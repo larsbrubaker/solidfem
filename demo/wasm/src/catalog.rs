@@ -84,13 +84,6 @@ pub enum LoadKind {
     Twist,
 }
 
-/// Element density: more cells through each wall and along the bar.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Detail {
-    Standard,
-    Fine,
-}
-
 /// One closed range a parameter must lie in.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Range {
@@ -121,36 +114,24 @@ pub struct Ranges {
     pub magnitude: Range,
 }
 
-/// The ranges allowed for `(kind, restraint, load)`. These are restricted to where the accuracy
-/// test passes: a bar at least 6 section depths long held at one end and at least 12 held at
-/// both, where a beam formula applies, and a wall between 0.2 and 0.3 of the smaller side, so
-/// each wall gets two square-ish elements through its thickness in the standard mesh.
+/// The ranges allowed for `(kind, restraint, load)`, within which the accuracy sweep passes and
+/// the slowest study solves in about 5 seconds. A bar held at one end is at least 6 section depths
+/// long and one held at both at least 8 (tube) or 12 (solid), where a beam formula applies. How
+/// slender a bar may be is capped by the solve: the conjugate gradient's iteration count grows
+/// with slenderness and the tube's thin walls cost more per length. The wall is 0.25 to 0.3 of the
+/// smaller side, so each wall gets two elements through its thickness.
 pub fn ranges(kind: SectionKind, restraint: Restraint, load: LoadKind) -> Ranges {
-    let length = match restraint {
-        Restraint::FixedOneEnd => Range {
-            min: 120.0,
-            max: 240.0,
-        },
-        Restraint::FixedBothEnds => Range {
-            min: 240.0,
-            max: 360.0,
-        },
-    };
-    // The tube's wall is at most 0.3 of the smaller side, so a narrower tube would need a finer
-    // mesh per wall cell and exceed the size cap on the bar's length.
-    let side = Range {
-        min: if kind == SectionKind::Tube {
-            14.0
-        } else {
-            10.0
-        },
-        max: 20.0,
+    let (length, side) = match (kind, restraint) {
+        (SectionKind::Solid, Restraint::FixedOneEnd) => (range(120.0, 190.0), range(10.0, 20.0)),
+        (SectionKind::Solid, Restraint::FixedBothEnds) => (range(240.0, 320.0), range(14.0, 20.0)),
+        (SectionKind::Tube, Restraint::FixedOneEnd) => (range(120.0, 160.0), range(16.0, 20.0)),
+        (SectionKind::Tube, Restraint::FixedBothEnds) => (range(160.0, 200.0), range(16.0, 20.0)),
     };
     Ranges {
         length,
         width: side,
         height: side,
-        wall_fraction: (kind == SectionKind::Tube).then_some(Range { min: 0.2, max: 0.3 }),
+        wall_fraction: (kind == SectionKind::Tube).then_some(range(0.25, 0.3)),
         magnitude: match load {
             LoadKind::Push => Range {
                 min: 1.0,
@@ -162,6 +143,11 @@ pub fn ranges(kind: SectionKind, restraint: Restraint, load: LoadKind) -> Ranges
             },
         },
     }
+}
+
+/// A closed range, written once per entry of [`ranges`].
+const fn range(min: f64, max: f64) -> Range {
+    Range { min, max }
 }
 
 /// A full request from the page.
@@ -178,7 +164,6 @@ pub struct StudyRequest {
     pub restraint: Restraint,
     pub load: LoadKind,
     pub magnitude: f64,
-    pub detail: Detail,
 }
 
 /// Why a request was refused.

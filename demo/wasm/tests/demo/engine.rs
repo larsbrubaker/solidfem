@@ -3,10 +3,11 @@
 // consistent during the solve.
 
 use solidfem_wasm::catalog::{
-    Combination, Detail, LoadKind, RequestError, Restraint, SectionKind, StudyRequest,
+    offered_combinations, ranges, Combination, LoadKind, Range, RequestError, Restraint,
+    SectionKind, StudyRequest,
 };
 use solidfem_wasm::engine::{DemoStudy, StudyState};
-use solidfem_wasm::plan::PlanError;
+use solidfem_wasm::plan::{plan_study_within, planned_elements, PlanError, MAX_ELEMENTS};
 
 use crate::support::{request_at, run_to_done};
 
@@ -19,7 +20,6 @@ fn solid_cantilever() -> StudyRequest {
         },
         0,
         0,
-        Detail::Standard,
     )
 }
 
@@ -100,20 +100,51 @@ fn starting_a_new_study_replaces_a_running_one_at_once() {
 
 #[test]
 fn a_request_past_the_size_limit_returns_too_large() {
-    // The tube's fine mesh needs far more elements than the cap at this length and side.
-    let combination = Combination {
-        section: SectionKind::Tube,
-        restraint: Restraint::FixedBothEnds,
-        load: LoadKind::Push,
-    };
-    let request = request_at(combination, 0, 2, Detail::Fine);
-    match DemoStudy::start(request) {
-        Err(PlanError::TooLarge { elements, limit }) => {
-            assert!(elements > limit, "{elements} must exceed {limit}");
+    let request = solid_cantilever();
+    let elements = planned_elements(&request);
+    match plan_study_within(&request, elements - 1) {
+        Err(PlanError::TooLarge { elements: e, limit }) => {
+            assert_eq!(e, elements);
+            assert_eq!(limit, elements - 1);
         }
         Err(other) => panic!("wrong error: {other}"),
         Ok(_) => panic!("expected too large"),
     }
+}
+
+#[test]
+fn no_position_the_page_offers_is_refused_as_too_large() {
+    // A dense walk of every slider, ends included, for every offered combination. The element
+    // count steps with ceilings of length over side and of the hollow over the wall, so the walk
+    // has to visit the interior as well as the corners.
+    const STEPS: usize = 12;
+    let along = |r: Range, i: usize| r.min + (r.max - r.min) * i as f64 / (STEPS - 1) as f64;
+    let mut largest = 0;
+    for combination in offered_combinations() {
+        let r = ranges(combination.section, combination.restraint, combination.load);
+        let walls = r.wall_fraction.map_or(1, |_| STEPS);
+        let mut request = request_at(combination, 0, 1);
+        for l in 0..STEPS {
+            request.length = along(r.length, l);
+            for w in 0..STEPS {
+                request.width = along(r.width, w);
+                for h in 0..STEPS {
+                    request.height = along(r.height, h);
+                    for t in 0..walls {
+                        if let Some(range) = r.wall_fraction {
+                            request.wall_fraction = along(range, t);
+                        }
+                        request.validate().expect("a position inside the ranges");
+                        largest = largest.max(planned_elements(&request));
+                    }
+                }
+            }
+        }
+    }
+    assert_eq!(
+        largest, MAX_ELEMENTS,
+        "MAX_ELEMENTS is documented as the largest mesh an offered position needs: keep the two equal"
+    );
 }
 
 #[test]
@@ -164,7 +195,7 @@ fn bad_inputs_are_errors_not_panics() {
         restraint: Restraint::FixedOneEnd,
         load: LoadKind::Push,
     };
-    let mut bad_wall = request_at(combination, 0, 1, Detail::Standard);
+    let mut bad_wall = request_at(combination, 0, 1);
     bad_wall.wall_fraction = 0.9;
     assert!(matches!(
         DemoStudy::start(bad_wall),

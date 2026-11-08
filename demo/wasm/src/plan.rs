@@ -27,11 +27,11 @@ use crate::catalog::{LoadKind, RequestError, Restraint, StudyRequest, MATERIALS}
 use crate::part::{build_mesh, kept_cells, plan_grid, PartGrid};
 use crate::section::Section;
 
-/// Maximum elements a study may have. Provisional: on this machine's native release build a
-/// study of 19,008 elements took about 75 seconds under load, so a study near this size does not
-/// meet the page's goal of finishing in about 5 seconds; bringing that down (fewer elements or a
-/// stronger preconditioner) is the open work, and the page's first measurement decides the number.
-pub const MAX_ELEMENTS: usize = 22_000;
+/// Maximum elements a study may have: the largest mesh any offered slider position needs, so a
+/// position inside the catalog's ranges is never refused (a test walks every slider to hold that).
+/// The time limit is set by the ranges, not by this number: `tests/demo/timing.rs` times the
+/// slowest offered studies in the native release build, the proxy for a browser run.
+pub const MAX_ELEMENTS: usize = 3_072;
 
 /// Six tetrahedra per kept hexahedral cell.
 const TETS_PER_CELL: usize = 6;
@@ -160,14 +160,21 @@ const ON_PLANE_RELATIVE: f64 = 1e-9;
 
 /// Plans a request, refusing a bad or oversized one before any mesh is built.
 pub fn plan_study(request: &StudyRequest) -> Result<PlannedStudy, PlanError> {
+    plan_study_within(request, MAX_ELEMENTS)
+}
+
+/// How many elements a validated request's mesh has.
+pub fn planned_elements(request: &StudyRequest) -> usize {
+    kept_cells(&plan_grid(request)) * TETS_PER_CELL
+}
+
+/// [`plan_study`] against an explicit element limit.
+pub fn plan_study_within(request: &StudyRequest, limit: usize) -> Result<PlannedStudy, PlanError> {
     request.validate().map_err(PlanError::Request)?;
     let grid = plan_grid(request);
     let elements = kept_cells(&grid) * TETS_PER_CELL;
-    if elements > MAX_ELEMENTS {
-        return Err(PlanError::TooLarge {
-            elements,
-            limit: MAX_ELEMENTS,
-        });
+    if elements > limit {
+        return Err(PlanError::TooLarge { elements, limit });
     }
     let mesh = build_mesh(&grid).map_err(PlanError::Mesh)?;
     let picked = MATERIALS[request.material];

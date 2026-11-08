@@ -19,7 +19,7 @@ pub mod view;
 use js_sys::{Float32Array, Uint32Array};
 use wasm_bindgen::prelude::*;
 
-use catalog::{Detail, LoadKind, Restraint, SectionKind, StudyRequest, DISPLAY_NAME, MATERIALS};
+use catalog::{LoadKind, Restraint, SectionKind, StudyRequest, DISPLAY_NAME, MATERIALS};
 use engine::{DemoStudy, StudyState};
 use plan::{PlanError, Textbook};
 
@@ -110,8 +110,8 @@ impl Demo {
     }
 
     /// Starts a new study, cancelling any running one at once. Section is `"solid"` or `"tube"`;
-    /// restraint `"one_end"` or `"both_ends"`; load `"push"` or `"twist"`; detail `"standard"` or
-    /// `"fine"`; `wall_fraction` is the wall as a fraction of the smaller side (solid: ignored).
+    /// restraint `"one_end"` or `"both_ends"`; load `"push"` or `"twist"`; `wall_fraction` is the
+    /// wall as a fraction of the smaller side (solid: ignored).
     ///
     /// Returns the state name: `"assembling"` when it began, `"too_large"` when the mesh would
     /// exceed the size the demo can solve in time (read [`Demo::refusal`] for the sentence). Bad
@@ -128,7 +128,6 @@ impl Demo {
         restraint: &str,
         load: &str,
         magnitude: f64,
-        detail: &str,
     ) -> Result<String, JsValue> {
         self.study = None;
         self.last_refusal = None;
@@ -142,7 +141,6 @@ impl Demo {
             restraint: parse_restraint(restraint)?,
             load: parse_load(load)?,
             magnitude,
-            detail: parse_detail(detail)?,
         };
         match DemoStudy::start(request) {
             Ok(study) => {
@@ -316,14 +314,6 @@ fn parse_load(name: &str) -> Result<LoadKind, JsValue> {
         "push" => Ok(LoadKind::Push),
         "twist" => Ok(LoadKind::Twist),
         other => Err(JsValue::from_str(&format!("unknown load {other:?}"))),
-    }
-}
-
-fn parse_detail(name: &str) -> Result<Detail, JsValue> {
-    match name {
-        "standard" => Ok(Detail::Standard),
-        "fine" => Ok(Detail::Fine),
-        other => Err(JsValue::from_str(&format!("unknown detail {other:?}"))),
     }
 }
 

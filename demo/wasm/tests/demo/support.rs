@@ -2,18 +2,13 @@
 // study to the end through the public `step`, and listing the deviation of each compared value.
 
 use solidfem_wasm::catalog::{
-    ranges, Combination, Detail, LoadKind, Restraint, SectionKind, StudyRequest, MATERIALS,
+    ranges, Combination, LoadKind, Restraint, SectionKind, StudyRequest, MATERIALS,
 };
 use solidfem_wasm::engine::{DemoStudy, StudyState};
 
 /// A request for `combination` at the given range level (0 = bottom, 1 = middle, 2 = top) of
 /// length, section and magnitude, for `material`.
-pub fn request_at(
-    combination: Combination,
-    material: usize,
-    level: usize,
-    detail: Detail,
-) -> StudyRequest {
+pub fn request_at(combination: Combination, material: usize, level: usize) -> StudyRequest {
     let r = ranges(combination.section, combination.restraint, combination.load);
     StudyRequest {
         section: combination.section,
@@ -25,7 +20,6 @@ pub fn request_at(
         restraint: combination.restraint,
         load: combination.load,
         magnitude: r.magnitude.points()[level],
-        detail,
     }
 }
 

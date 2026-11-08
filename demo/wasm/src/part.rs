@@ -4,7 +4,7 @@
 
 use solidfem::mesh::{box_tet_mesh, MeshError, QuadraticTetMesh, TetMesh};
 
-use crate::catalog::{Detail, SectionKind, StudyRequest};
+use crate::catalog::{SectionKind, StudyRequest};
 
 /// The grid lines of one axis, ascending.
 #[derive(Debug, Clone)]
@@ -29,18 +29,21 @@ pub struct PartGrid {
     pub wall_cells: usize,
 }
 
-/// Cells through a solid section's sides and through a tube's wall, by detail level.
-fn cross_cells(detail: Detail) -> (usize, usize) {
-    match detail {
-        Detail::Standard => (4, 2),
-        Detail::Fine => (6, 3),
-    }
-}
+/// Cells through a solid section's sides.
+const SOLID_CELLS: usize = 4;
 
-/// Longest cell along the bar, in cross-section cell sizes. Quadratic elements carry a bending
-/// bar's curvature with cells a few times longer than deep, and this keeps the solve inside the
-/// demo's budget at the slenderest bars the catalog offers.
-const ASPECT_ALONG_BAR: f64 = 2.5;
+/// Cells through a tube's wall: two, so a wall's bending is carried by more than one element.
+const WALL_CELLS: usize = 2;
+
+/// Longest cell along the bar, as a fraction of the section's smaller side. What the bar's bending
+/// needs along its length depends on the section depth, not on how thin a wall is, so a thin wall
+/// does not force more cells along the bar.
+const ALONG_CELL_OF_SIDE: f64 = 0.8;
+
+/// Fewest cells along a bar: enough to carry a bar's bending, and enough that the load band of a
+/// bar held at both ends (one cell either side of mid-span) stays clear of the sections the
+/// textbook is read at.
+const MIN_CELLS_ALONG: usize = 16;
 
 /// Grid lines of one cross-section axis: solid sections cut evenly, tubes get `wall_cells` cells
 /// across each wall and evenly sized cells across the interior.
@@ -61,9 +64,10 @@ fn cross_lines(
             let wall = request.wall_fraction * request.width.min(request.height);
             let inner = along - 2.0 * wall;
             let wall_step = wall / wall_cells as f64;
-            // At least the wall's cell count across the hollow, and cells no wider than two wall
-            // cells; a positive inner span is what the wall range guarantees.
-            let inner_cells = ((inner / (2.0 * wall_step)).ceil() as usize).max(wall_cells);
+            // The hollow span is cut as the wall is: it carries no material of its own, and a
+            // positive span is what the wall range guarantees. A bar's bending lives in the
+            // walls' stations along the bar, so finer cells across here only slow the solve.
+            let inner_cells = wall_cells;
             let mut lines = Vec::with_capacity(2 * wall_cells + inner_cells + 1);
             for i in 0..=wall_cells {
                 lines.push(wall_step * i as f64);
@@ -81,12 +85,12 @@ fn cross_lines(
 
 /// Plans the grid for a request. Geometry is validated by the caller.
 pub fn plan_grid(request: &StudyRequest) -> PartGrid {
-    let (solid_cells, wall_cells) = cross_cells(request.detail);
+    let (solid_cells, wall_cells) = (SOLID_CELLS, WALL_CELLS);
     let y = cross_lines(request, request.width, solid_cells, wall_cells);
     let z = cross_lines(request, request.height, solid_cells, wall_cells);
-    let smallest = min_spacing(&y).min(min_spacing(&z));
-    let wanted = (request.length / (ASPECT_ALONG_BAR * smallest)).ceil() as usize;
-    let along = wanted.div_ceil(8).max(1) * 8;
+    let side = request.width.min(request.height);
+    let wanted = (request.length / (ALONG_CELL_OF_SIDE * side)).ceil() as usize;
+    let along = wanted.max(MIN_CELLS_ALONG).div_ceil(8) * 8;
     let x = GridLines(
         (0..=along)
             .map(|i| request.length * i as f64 / along as f64)
@@ -102,14 +106,6 @@ pub fn plan_grid(request: &StudyRequest) -> PartGrid {
             0
         },
     }
-}
-
-fn min_spacing(lines: &GridLines) -> f64 {
-    lines
-        .0
-        .windows(2)
-        .map(|w| w[1] - w[0])
-        .fold(f64::INFINITY, f64::min)
 }
 
 /// Whether a section cell lies in the tube's hollow.
