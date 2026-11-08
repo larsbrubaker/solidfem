@@ -78,11 +78,18 @@ struct Allowed {
 }
 
 /// Packages that break the letter of the rule but whose build scripts compile and link nothing.
-const NO_NATIVE_CODE: &[Allowed] = &[Allowed {
-    package: "rayon-core",
-    reasons: &["links"],
-    why: "`links` only stops two versions linking into one program; its build script only prints `rerun-if-changed`",
-}];
+const NO_NATIVE_CODE: &[Allowed] = &[
+    Allowed {
+        package: "rayon-core",
+        reasons: &["links"],
+        why: "`links` only stops two versions linking into one program; its build script only prints `rerun-if-changed`",
+    },
+    Allowed {
+        package: "wasm-bindgen-shared",
+        reasons: &["links"],
+        why: "`links` only stops two versions linking into one program; its build script only sets environment variables",
+    },
+];
 
 /// Features that keep a NO_NATIVE_CODE entry free of native code on every supported target that
 /// builds it: (package, feature, whether it must be on). Only a tool its build script always

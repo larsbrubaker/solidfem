@@ -7,7 +7,9 @@
 //! nodes, nodal forces and face tractions. [`StaticStudy::new`] validates it (refusing a model
 //! that cannot be held or has no effective load, before any solving), eliminates the fixed nodes
 //! and assembles; [`StaticStudy::step`] then runs the solve in bounded slices with a cancel check,
-//! and [`StaticStudy::solution`] recovers displacements and von Mises stress.
+//! and [`StaticStudy::solution`] recovers displacements and von Mises stress. A host with no
+//! threads uses the resumable forms: [`StudyBuilder`] assembles in slices and
+//! [`StaticStudy::begin_recovery`] recovers in slices, each giving the bits of the one-call form.
 //!
 //! Exactness: every loop runs in node or element order on one thread and the solver's iterations
 //! depend only on its input, so results are bit-identical across runs and however a solve is
@@ -33,7 +35,7 @@ pub use element::{
 pub use error::{ElementFault, ModelError};
 pub use material::{Material, MaterialField};
 pub use quadrature::{Quadrature, QuadraturePoint, TRIANGLE_POINTS};
-pub use results::{PointStress, Solution};
+pub use results::{PointStress, RecoveredField, Recovery, Solution};
 pub use shape::{shape_derivatives, shape_values, NODE_COUNT, NODE_NATURAL};
 pub use solidfem_solve::{PcgOptions, Progress, StepOutcome};
-pub use study::{Clock, Model, Report, StaticStudy, StudyOptions};
+pub use study::{BuildProgress, Clock, Model, Report, StaticStudy, StudyBuilder, StudyOptions};

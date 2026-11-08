@@ -35,6 +35,28 @@ pub(crate) fn assemble_free(
     free_count: usize,
     cancel: &mut dyn FnMut() -> bool,
 ) -> Result<CsrMatrix, ModelError> {
+    let mut matrix = free_stiffness_pattern(mesh, free, free_count);
+    let mut ke = [0.0; 900];
+    add_element_stiffness(
+        mesh,
+        field,
+        rule,
+        free,
+        &mut matrix,
+        &mut ke,
+        0..mesh.tets().len(),
+        cancel,
+    )?;
+    Ok(matrix)
+}
+
+/// The sparsity pattern of the free-node stiffness, all zero. The first half of an assembly:
+/// [`add_element_stiffness`] fills it, in as many slices as the caller wants.
+pub(crate) fn free_stiffness_pattern(
+    mesh: &QuadraticTetMesh,
+    free: &[u32],
+    free_count: usize,
+) -> CsrMatrix {
     let mapped: Vec<([u32; NODE_COUNT], usize)> = mesh
         .tets()
         .iter()
@@ -51,19 +73,34 @@ pub(crate) fn assemble_free(
             (kept, count)
         })
         .collect();
-    let mut matrix = CsrMatrix::from_block_connectivity(
+    CsrMatrix::from_block_connectivity(
         free_count,
         3,
         mapped.iter().map(|(kept, count)| &kept[..*count]),
-    );
+    )
+}
 
-    let mut ke = [0.0; 900];
-    for (tet_index, tet) in mesh.tets().iter().enumerate() {
+/// Adds the stiffness of the elements in `range`, in element order, reading the cancel check once
+/// per element. Called with consecutive ranges it adds the same values in the same order as one
+/// call over all of them, so a sliced assembly is bit-identical.
+#[allow(clippy::too_many_arguments)] // Each input is a distinct part of the assembly, all borrowed.
+pub(crate) fn add_element_stiffness(
+    mesh: &QuadraticTetMesh,
+    field: &impl MaterialField,
+    rule: Quadrature,
+    free: &[u32],
+    matrix: &mut CsrMatrix,
+    ke: &mut [f64; 900],
+    range: std::ops::Range<usize>,
+    cancel: &mut dyn FnMut() -> bool,
+) -> Result<(), ModelError> {
+    for tet_index in range {
+        let tet = &mesh.tets()[tet_index];
         if cancel() {
             return Err(ModelError::Cancelled);
         }
         let nodes = tet.map(|n| mesh.nodes()[n as usize]);
-        element_stiffness(&nodes, field, rule, &mut ke).map_err(|fault| ModelError::Element {
+        element_stiffness(&nodes, field, rule, ke).map_err(|fault| ModelError::Element {
             tet: tet_index as u32,
             fault,
         })?;
@@ -89,5 +126,5 @@ pub(crate) fn assemble_free(
             }
         }
     }
-    Ok(matrix)
+    Ok(())
 }

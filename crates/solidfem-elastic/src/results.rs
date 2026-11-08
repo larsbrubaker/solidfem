@@ -2,7 +2,8 @@
 //! display value is a volume-weighted average of von Mises stress evaluated at the node in each
 //! incident element. Averaging the scalar rather than the tensor cannot cancel opposing stresses
 //! across elements, and evaluating at the node rather than copying the nearest integration point
-//! does not understate a peak.
+//! does not understate a peak. [`Recovery`] is the resumable form: a host with no threads runs it
+//! in bounded slices, in element order, so slicing never changes a value.
 
 use solidfem_mesh::QuadraticTetMesh;
 
@@ -41,56 +42,129 @@ pub struct Solution {
     pub report: Report,
 }
 
-/// Recovers stresses from nodal displacements, reading the cancel check once per element.
-pub(crate) fn recover(
-    mesh: &QuadraticTetMesh,
-    field: &impl MaterialField,
-    rule: Quadrature,
-    displacements: &[[f64; 3]],
-    cancel: &mut dyn FnMut() -> bool,
-) -> Result<(Vec<PointStress>, Vec<f64>), ModelError> {
-    let element_error = |tet: usize, fault| ModelError::Element {
-        tet: tet as u32,
-        fault,
-    };
-    let points = rule.points();
-    let mut point_stresses = Vec::with_capacity(mesh.tets().len() * points.len());
-    let mut weighted = vec![0.0; mesh.nodes().len()];
-    let mut weights = vec![0.0; mesh.nodes().len()];
-    for (tet_index, tet) in mesh.tets().iter().enumerate() {
-        if cancel() {
-            return Err(ModelError::Cancelled);
-        }
-        let nodes = tet.map(|n| mesh.nodes()[n as usize]);
-        let u = tet.map(|n| displacements[n as usize]);
-        let mut volume = 0.0;
-        for (index, q) in points.iter().enumerate() {
-            let geometry = point_geometry(&nodes, q.natural, index)
-                .map_err(|f| element_error(tet_index, f))?;
-            volume += q.weight * geometry.det_j / 6.0;
-            let material = checked_material(field, geometry.position, index)
-                .map_err(|f| element_error(tet_index, f))?;
-            let stress = stress_at(&material, &strain_at(&geometry, &u));
-            point_stresses.push(PointStress {
-                tet: tet_index as u32,
-                point: index as u8,
-                position: geometry.position,
-                stress,
-                von_mises: von_mises(&stress),
-            });
-        }
-        for node in 0..NODE_COUNT {
-            let geometry = point_geometry(&nodes, NODE_NATURAL[node], node)
-                .map_err(|f| element_error(tet_index, f))?;
-            let material = checked_material(field, geometry.position, node)
-                .map_err(|f| element_error(tet_index, f))?;
-            let stress = stress_at(&material, &strain_at(&geometry, &u));
-            let global = tet[node] as usize;
-            weighted[global] += volume * von_mises(&stress);
-            weights[global] += volume;
+/// A resumable stress recovery over a snapshot of nodal displacements. It runs in element order,
+/// so a recovery resumed in slices gives exactly the bits of one run; [`StaticStudy`] drives it
+/// because it owns the mesh and material it reads.
+///
+/// [`StaticStudy`]: crate::study::StaticStudy
+#[derive(Debug, Clone)]
+pub struct Recovery {
+    displacements: Vec<[f64; 3]>,
+    point_stresses: Vec<PointStress>,
+    weighted: Vec<f64>,
+    weights: Vec<f64>,
+    next: usize,
+}
+
+/// Displacements and the stresses recovered from them: a live estimate while a solve runs, the
+/// answer once it has converged.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecoveredField {
+    /// Displacement of every mesh node, zero at fixed nodes.
+    pub displacements: Vec<[f64; 3]>,
+    /// Stress at every integration point, in (element, point) order.
+    pub point_stresses: Vec<PointStress>,
+    /// Volume-weighted average von Mises stress per mesh node, for display.
+    pub nodal_von_mises: Vec<f64>,
+}
+
+impl Recovery {
+    /// A recovery of `displacements` over a mesh of `element_count` elements, none done yet.
+    pub(crate) fn new(
+        displacements: Vec<[f64; 3]>,
+        node_count: usize,
+        element_count: usize,
+        points_per_element: usize,
+    ) -> Self {
+        Recovery {
+            displacements,
+            point_stresses: Vec::with_capacity(element_count * points_per_element),
+            weighted: vec![0.0; node_count],
+            weights: vec![0.0; node_count],
+            next: 0,
         }
     }
-    // Every mesh node belongs to a tetrahedron (`TetMesh::new`), so every weight is positive.
-    let nodal_von_mises = weighted.iter().zip(&weights).map(|(s, w)| s / w).collect();
-    Ok((point_stresses, nodal_von_mises))
+
+    /// How many elements have been processed.
+    pub fn elements_done(&self) -> usize {
+        self.next
+    }
+
+    /// The displacements being recovered.
+    pub fn displacements(&self) -> &[[f64; 3]] {
+        &self.displacements
+    }
+
+    /// The finished field. Every mesh node belongs to a tetrahedron (`TetMesh::new`), so once the
+    /// last element is done every weight is positive.
+    pub(crate) fn into_field(self) -> RecoveredField {
+        let nodal_von_mises = self
+            .weighted
+            .iter()
+            .zip(&self.weights)
+            .map(|(s, w)| s / w)
+            .collect();
+        RecoveredField {
+            displacements: self.displacements,
+            point_stresses: self.point_stresses,
+            nodal_von_mises,
+        }
+    }
+
+    /// Recovers the next `max_elements` elements, reading the cancel check once per element.
+    pub(crate) fn advance(
+        &mut self,
+        mesh: &QuadraticTetMesh,
+        field: &impl MaterialField,
+        rule: Quadrature,
+        max_elements: usize,
+        cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<(), ModelError> {
+        let element_error = |tet: usize, fault| ModelError::Element {
+            tet: tet as u32,
+            fault,
+        };
+        let points = rule.points();
+        let end = self
+            .next
+            .saturating_add(max_elements)
+            .min(mesh.tets().len());
+        while self.next < end {
+            let tet_index = self.next;
+            if cancel() {
+                return Err(ModelError::Cancelled);
+            }
+            let tet = &mesh.tets()[tet_index];
+            let nodes = tet.map(|n| mesh.nodes()[n as usize]);
+            let u = tet.map(|n| self.displacements[n as usize]);
+            let mut volume = 0.0;
+            for (index, q) in points.iter().enumerate() {
+                let geometry = point_geometry(&nodes, q.natural, index)
+                    .map_err(|f| element_error(tet_index, f))?;
+                volume += q.weight * geometry.det_j / 6.0;
+                let material = checked_material(field, geometry.position, index)
+                    .map_err(|f| element_error(tet_index, f))?;
+                let stress = stress_at(&material, &strain_at(&geometry, &u));
+                self.point_stresses.push(PointStress {
+                    tet: tet_index as u32,
+                    point: index as u8,
+                    position: geometry.position,
+                    stress,
+                    von_mises: von_mises(&stress),
+                });
+            }
+            for node in 0..NODE_COUNT {
+                let geometry = point_geometry(&nodes, NODE_NATURAL[node], node)
+                    .map_err(|f| element_error(tet_index, f))?;
+                let material = checked_material(field, geometry.position, node)
+                    .map_err(|f| element_error(tet_index, f))?;
+                let stress = stress_at(&material, &strain_at(&geometry, &u));
+                let global = tet[node] as usize;
+                self.weighted[global] += volume * von_mises(&stress);
+                self.weights[global] += volume;
+            }
+            self.next += 1;
+        }
+        Ok(())
+    }
 }

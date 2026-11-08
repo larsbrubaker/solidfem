@@ -4,8 +4,10 @@
 # Where the architecture lives: each crate's `lib.rs` header says what the crate is, what it owns
 # and the rules that span its files; each file's header says how it fits its neighbours.
 #
-# Members live under crates/: the repo-wide gates (workspace-gates, tests only, never published)
-# and the solver crates, layered so each depends only on those above it in this list:
+# Members live under crates/ (plus demo/wasm, the public demo page's WebAssembly bindings, never
+# published; its Cargo.toml says why it is a member): the repo-wide gates (workspace-gates, tests
+# only, never published) and the solver crates, layered so each depends only on those above it in
+# this list:
 #   crates/solidfem-mesh     tetrahedral meshes, 10-node upgrade, boundary faces, box builder
 #   crates/solidfem-solve    sparse matrix storage and the resumable conjugate gradient solver
 #   crates/solidfem-elastic  10-node element, materials, boundary conditions, stress results
@@ -22,6 +24,7 @@ members = [
     "crates/solidfem-elastic",
     "crates/solidfem-bench",
     "crates/solidfem",
+    "demo/wasm",
     "crates/workspace-gates",
 ]
 

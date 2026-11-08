@@ -11,5 +11,7 @@ Linear-static structural analysis on tetrahedral meshes, in pure Rust, for nativ
   nodes, forces and tractions, resumable static studies and von Mises results.
 - `solidfem`: the facade re-exporting them.
 - `solidfem-bench` (never published): measures the Quartet mesher into the solver.
+- `demo/wasm` (never published): the WebAssembly engine of the public demo page, where a visitor
+  changes a part and sees its stress and how close it is to the textbook.
 
 BSD-2-Clause licensed; see `LICENSE`.

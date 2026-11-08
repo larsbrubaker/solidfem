@@ -1,20 +1,25 @@
 //! A static study: the model a caller describes and the resumable solve over it. `new` validates
 //! and assembles, `step` runs bounded slices of the conjugate gradient solve and `solution`
-//! recovers results. The caller's clock (no `std::time` here, it panics on wasm32) times each
-//! phase so a preconditioner's or a slicing decision's effect can be measured.
+//! recovers results. A host with no threads uses the resumable forms of the other two phases:
+//! [`StudyBuilder`] assembles in bounded slices of elements, and
+//! [`StaticStudy::begin_recovery`] with [`StaticStudy::continue_recovery`] recovers in bounded
+//! slices, on the converged solution or on a live estimate. Each gives exactly the bits of the
+//! uninterrupted call, which runs the same code. The caller's clock (no `std::time` here, it
+//! panics on wasm32) times each phase so a preconditioner's or a slicing decision's effect can be
+//! measured.
 
 use std::collections::BTreeSet;
 
 use solidfem_mesh::{BoundaryFace, QuadraticTetMesh};
-use solidfem_solve::{Jacobi, Pcg, PcgOptions, StepOutcome};
+use solidfem_solve::{CsrMatrix, Jacobi, Pcg, PcgOptions, StepOutcome};
 
-use crate::assembly::{assemble_free, FIXED};
+use crate::assembly::{add_element_stiffness, free_stiffness_pattern, FIXED};
 use crate::constraints::check_constraints;
 use crate::error::ModelError;
 use crate::loads::add_traction;
 use crate::material::MaterialField;
 use crate::quadrature::Quadrature;
-use crate::results::{recover, Solution};
+use crate::results::{RecoveredField, Recovery, Solution};
 
 /// A caller-supplied monotonic clock, in seconds.
 pub type Clock = Box<dyn FnMut() -> f64>;
@@ -118,64 +123,9 @@ impl<M: MaterialField> StaticStudy<M> {
         options: StudyOptions,
         cancel: &mut dyn FnMut() -> bool,
     ) -> Result<Self, ModelError> {
-        let mut clock = options.clock;
-        let start = now(&mut clock);
-        let node_count = model.mesh.nodes().len();
-        let mut is_fixed = vec![false; node_count];
-        for node in &model.fixed {
-            *is_fixed
-                .get_mut(*node as usize)
-                .ok_or(ModelError::NodeOutOfRange { node: *node })? = true;
-        }
-        check_constraints(&model.mesh, &is_fixed)?;
-        let load = build_load(&model)?;
-
-        let mut free = vec![FIXED; node_count];
-        let mut free_count = 0usize;
-        for (node, fixed) in is_fixed.iter().enumerate() {
-            if !fixed {
-                free[node] = free_count as u32;
-                free_count += 1;
-            }
-        }
-        let mut rhs = Vec::with_capacity(3 * free_count);
-        for (node, index) in free.iter().enumerate() {
-            if *index != FIXED {
-                rhs.extend_from_slice(&load[3 * node..3 * node + 3]);
-            }
-        }
-        if rhs.iter().all(|v| *v == 0.0) {
-            return Err(ModelError::NoEffectiveLoad);
-        }
-
-        let matrix = assemble_free(
-            &model.mesh,
-            &model.material,
-            model.quadrature,
-            &free,
-            free_count,
-            cancel,
-        )?;
-        let report = Report {
-            total_dofs: 3 * node_count,
-            free_dofs: 3 * free_count,
-            nonzeros: matrix.nonzeros(),
-            at_rounding_floor: false,
-            iterations: 0,
-            relative_residual: 1.0,
-            assembly_seconds: elapsed(&mut clock, start),
-            solve_seconds: 0.0,
-            recovery_seconds: 0.0,
-        };
-        let jacobi = Jacobi::new(&matrix)?;
-        let pcg = Pcg::new(matrix, jacobi, rhs, options.pcg);
-        Ok(StaticStudy {
-            model,
-            free,
-            pcg,
-            clock,
-            report,
-        })
+        let mut builder = StudyBuilder::new(model, options)?;
+        builder.step(usize::MAX, cancel)?;
+        builder.finish()
     }
 
     /// Runs up to `max_iterations` of the solve; identical bits however the work is sliced.
@@ -221,21 +171,212 @@ impl<M: MaterialField> StaticStudy<M> {
         if !self.pcg.is_converged() {
             return Err(ModelError::NotFinished);
         }
+        let mut recovery = self.begin_recovery();
+        self.continue_recovery(&mut recovery, usize::MAX, cancel)?;
+        let field = self.finish_recovery(recovery)?;
+        Ok(Solution {
+            displacements: field.displacements,
+            point_stresses: field.point_stresses,
+            nodal_von_mises: field.nodal_von_mises,
+            report: self.report,
+        })
+    }
+
+    /// Starts a resumable recovery of the current displacements: the converged answer, or a
+    /// partial estimate for a preview while the solve is still running.
+    pub fn begin_recovery(&self) -> Recovery {
+        Recovery::new(
+            self.displacements(),
+            self.model.mesh.nodes().len(),
+            self.model.mesh.tets().len(),
+            self.model.quadrature.points().len(),
+        )
+    }
+
+    /// Recovers up to `max_elements` more elements; `Ok(true)` once all are done. `cancel` is read
+    /// per element.
+    pub fn continue_recovery(
+        &mut self,
+        recovery: &mut Recovery,
+        max_elements: usize,
+        cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<bool, ModelError> {
         let start = now(&mut self.clock);
-        let displacements = self.displacements();
-        let (point_stresses, nodal_von_mises) = recover(
+        let result = recovery.advance(
             &self.model.mesh,
             &self.model.material,
             self.model.quadrature,
-            &displacements,
+            max_elements,
             cancel,
-        )?;
+        );
         self.report.recovery_seconds += elapsed(&mut self.clock, start);
-        Ok(Solution {
-            displacements,
-            point_stresses,
-            nodal_von_mises,
-            report: self.report,
+        result?;
+        Ok(recovery.elements_done() == self.model.mesh.tets().len())
+    }
+
+    /// The field of a finished recovery; refuses one with elements left to do.
+    pub fn finish_recovery(&self, recovery: Recovery) -> Result<RecoveredField, ModelError> {
+        if recovery.elements_done() != self.model.mesh.tets().len() {
+            return Err(ModelError::NotFinished);
+        }
+        Ok(recovery.into_field())
+    }
+
+    /// The mesh being solved.
+    pub fn mesh(&self) -> &QuadraticTetMesh {
+        self.model.mesh()
+    }
+
+    /// The material being solved.
+    pub fn material(&self) -> &M {
+        &self.model.material
+    }
+}
+
+/// How far a [`StudyBuilder`] has got.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BuildProgress {
+    /// Elements whose stiffness has been added.
+    pub elements_done: usize,
+    /// Elements in the mesh.
+    pub elements_total: usize,
+}
+
+/// A resumable [`StaticStudy::new`]: [`StudyBuilder::new`] validates and builds the load and the
+/// matrix pattern, and [`StudyBuilder::step`] adds element stiffness in bounded slices. Stepped in
+/// any slice sizes it builds exactly the bits of `new`, which runs the same code in one slice.
+pub struct StudyBuilder<M: MaterialField> {
+    model: Model<M>,
+    free: Vec<u32>,
+    free_count: usize,
+    rhs: Vec<f64>,
+    matrix: CsrMatrix,
+    ke: [f64; 900],
+    next: usize,
+    pcg_options: PcgOptions,
+    clock: Option<Clock>,
+    assembly_seconds: f64,
+}
+
+impl<M: MaterialField> StudyBuilder<M> {
+    /// Validates the model and prepares its assembly. Refuses a model that is not held or has no
+    /// effective load before any element is integrated.
+    pub fn new(model: Model<M>, options: StudyOptions) -> Result<Self, ModelError> {
+        let mut clock = options.clock;
+        let start = now(&mut clock);
+        let node_count = model.mesh.nodes().len();
+        let mut is_fixed = vec![false; node_count];
+        for node in &model.fixed {
+            *is_fixed
+                .get_mut(*node as usize)
+                .ok_or(ModelError::NodeOutOfRange { node: *node })? = true;
+        }
+        check_constraints(&model.mesh, &is_fixed)?;
+        let load = build_load(&model)?;
+
+        let mut free = vec![FIXED; node_count];
+        let mut free_count = 0usize;
+        for (node, fixed) in is_fixed.iter().enumerate() {
+            if !fixed {
+                free[node] = free_count as u32;
+                free_count += 1;
+            }
+        }
+        let mut rhs = Vec::with_capacity(3 * free_count);
+        for (node, index) in free.iter().enumerate() {
+            if *index != FIXED {
+                rhs.extend_from_slice(&load[3 * node..3 * node + 3]);
+            }
+        }
+        if rhs.iter().all(|v| *v == 0.0) {
+            return Err(ModelError::NoEffectiveLoad);
+        }
+        let matrix = free_stiffness_pattern(&model.mesh, &free, free_count);
+        let assembly_seconds = elapsed(&mut clock, start);
+        Ok(StudyBuilder {
+            model,
+            free,
+            free_count,
+            rhs,
+            matrix,
+            ke: [0.0; 900],
+            next: 0,
+            pcg_options: options.pcg,
+            clock,
+            assembly_seconds,
+        })
+    }
+
+    /// Adds the stiffness of up to `max_elements` more elements.
+    pub fn step(
+        &mut self,
+        max_elements: usize,
+        cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<BuildProgress, ModelError> {
+        let start = now(&mut self.clock);
+        let total = self.model.mesh.tets().len();
+        let end = self.next.saturating_add(max_elements).min(total);
+        let result = add_element_stiffness(
+            &self.model.mesh,
+            &self.model.material,
+            self.model.quadrature,
+            &self.free,
+            &mut self.matrix,
+            &mut self.ke,
+            self.next..end,
+            cancel,
+        );
+        self.assembly_seconds += elapsed(&mut self.clock, start);
+        result?;
+        self.next = end;
+        Ok(BuildProgress {
+            elements_done: self.next,
+            elements_total: total,
+        })
+    }
+
+    /// The mesh being assembled.
+    pub fn mesh(&self) -> &QuadraticTetMesh {
+        self.model.mesh()
+    }
+
+    /// The assembled study, ready to solve; refuses while elements remain.
+    pub fn finish(self) -> Result<StaticStudy<M>, ModelError> {
+        if self.next != self.model.mesh.tets().len() {
+            return Err(ModelError::NotFinished);
+        }
+        let StudyBuilder {
+            model,
+            free,
+            free_count,
+            rhs,
+            matrix,
+            pcg_options,
+            mut clock,
+            assembly_seconds,
+            ..
+        } = self;
+        let start = now(&mut clock);
+        let jacobi = Jacobi::new(&matrix)?;
+        let nonzeros = matrix.nonzeros();
+        let pcg = Pcg::new(matrix, jacobi, rhs, pcg_options);
+        let report = Report {
+            total_dofs: 3 * model.mesh.nodes().len(),
+            free_dofs: 3 * free_count,
+            nonzeros,
+            at_rounding_floor: false,
+            iterations: 0,
+            relative_residual: 1.0,
+            assembly_seconds: assembly_seconds + elapsed(&mut clock, start),
+            solve_seconds: 0.0,
+            recovery_seconds: 0.0,
+        };
+        Ok(StaticStudy {
+            model,
+            free,
+            pcg,
+            clock,
+            report,
         })
     }
 }
