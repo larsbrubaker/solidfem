@@ -10,6 +10,8 @@ mod cantilever;
 mod determinism;
 #[path = "validation/refusals.rs"]
 mod refusals;
+#[path = "validation/shell_core.rs"]
+mod shell_core;
 #[path = "validation/tension.rs"]
 mod tension;
 #[path = "validation/torsion.rs"]
