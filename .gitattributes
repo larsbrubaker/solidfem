@@ -1,0 +1,3 @@
+# Keeps every text file LF in the repository and in checkouts, on every platform, so
+# byte-compared files (the LICENSE copies) and rustfmt agree.
+* text=auto eol=lf

@@ -116,6 +116,23 @@ impl CsrMatrix {
         }
     }
 
+    /// A 2-norm bound on the rounding error of [`multiply`](Self::multiply) at `x`: each row
+    /// sums its stored terms, so its error is at most `terms * eps * sum |a_ij x_j|`. Residuals
+    /// below this cannot be told from rounding.
+    pub fn multiply_rounding_bound(&self, x: &[f64]) -> f64 {
+        let mut sum = 0.0;
+        for row in 0..self.size {
+            let (start, end) = (self.row_starts[row], self.row_starts[row + 1]);
+            let mut row_sum = 0.0;
+            for at in start..end {
+                row_sum += (self.values[at] * x[self.columns[at] as usize]).abs();
+            }
+            let bound = (end - start) as f64 * f64::EPSILON * row_sum;
+            sum += bound * bound;
+        }
+        sum.sqrt()
+    }
+
     /// The main diagonal.
     pub fn diagonal(&self) -> Vec<f64> {
         (0..self.size)

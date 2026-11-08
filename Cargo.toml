@@ -8,7 +8,8 @@
 # and the solver crates, layered so each depends only on those above it in this list:
 #   crates/solidfem-mesh     tetrahedral meshes, 10-node upgrade, boundary faces, box builder
 #   crates/solidfem-solve    sparse matrix storage and the resumable conjugate gradient solver
-#   crates/solidfem          the facade re-exporting the others
+#   crates/solidfem-elastic  10-node element, materials, boundary conditions, stress results
+#   crates/solidfem          the facade re-exporting the others, and the physics validation tests
 # A new member also takes the workspace lints; the workspace-gates test `workspace_members` fails
 # otherwise.
 [workspace]
@@ -16,6 +17,7 @@ resolver = "2"
 members = [
     "crates/solidfem-mesh",
     "crates/solidfem-solve",
+    "crates/solidfem-elastic",
     "crates/solidfem",
     "crates/workspace-gates",
 ]

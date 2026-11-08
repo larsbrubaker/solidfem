@@ -3,7 +3,8 @@
 //! (a browser host has no threads and solves between frames) with exactly the same sequence of
 //! floating-point operations as an uninterrupted run. The stopping test is on the true residual:
 //! when the recursively updated residual reports convergence, the residual is recomputed
-//! directly, so rounding drift cannot end the solve with a wrong answer.
+//! directly, so rounding drift cannot end the solve with a wrong answer, and the solve also stops
+//! when that residual reaches the rounding floor of the product, reporting what it attained.
 
 use std::fmt;
 
@@ -38,6 +39,9 @@ pub struct Progress {
     pub iteration: u64,
     /// `||r|| / ||b||`, the relative residual of the current estimate.
     pub relative_residual: f64,
+    /// True when the solve stopped at the rounding floor of `A x`: the requested tolerance is
+    /// below what f64 can resolve for this system, and `relative_residual` is what was reached.
+    pub at_rounding_floor: bool,
 }
 
 /// What a call to [`Pcg::step`] ended with.
@@ -122,6 +126,7 @@ pub struct Pcg<P: Preconditioner> {
     iterations: u64,
     max_iterations: u64,
     tolerance: f64,
+    floor_reached: bool,
     status: Status,
 }
 
@@ -146,6 +151,7 @@ impl<P: Preconditioner> Pcg<P> {
             iterations: 0,
             max_iterations,
             tolerance: options.tolerance,
+            floor_reached: false,
             status: Status::Active,
         };
         if rhs_norm == 0.0 {
@@ -192,6 +198,7 @@ impl<P: Preconditioner> Pcg<P> {
         Progress {
             iteration: self.iterations,
             relative_residual: self.relative_residual,
+            at_rounding_floor: self.floor_reached,
         }
     }
 
@@ -225,7 +232,14 @@ impl<P: Preconditioner> Pcg<P> {
                 *r = b - *r;
             }
             self.relative_residual = norm(&residual) / self.rhs_norm;
-            if self.relative_residual <= self.tolerance {
+            // A residual at the rounding floor of the product `A x` cannot be improved by iterating:
+            // on a slender part `||A|| ||x||` is far larger than `||b||`, so a tolerance relative to
+            // `||b||` alone can sit below what f64 can resolve. Stopping there reports the attained
+            // residual honestly and keeps the solve from running to its cap on digits that do not exist.
+            let floor = self.matrix.multiply_rounding_bound(&self.x) / self.rhs_norm;
+            self.floor_reached =
+                self.relative_residual > self.tolerance && self.relative_residual <= floor;
+            if self.relative_residual <= self.tolerance || self.floor_reached {
                 self.status = Status::Converged;
                 return Ok(Some(StepOutcome::Converged(self.progress())));
             }

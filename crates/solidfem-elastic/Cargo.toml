@@ -1,0 +1,20 @@
+# solidfem-elastic: the 10-node quadratic tetrahedron, materials evaluated per integration point,
+# boundary conditions, static studies and stress results. Builds on solidfem-mesh and
+# solidfem-solve.
+[package]
+name = "solidfem-elastic"
+description = "Linear-static elasticity with 10-node tetrahedra: stiffness, loads, resumable solves, von Mises stress"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+solidfem-mesh = { path = "../solidfem-mesh", version = "0.1.0" }
+solidfem-solve = { path = "../solidfem-solve", version = "0.1.0" }
+
+[lints]
+workspace = true

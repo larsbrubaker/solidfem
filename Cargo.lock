@@ -78,6 +78,15 @@ dependencies = [
 name = "solidfem"
 version = "0.1.0"
 dependencies = [
+ "solidfem-elastic",
+ "solidfem-mesh",
+ "solidfem-solve",
+]
+
+[[package]]
+name = "solidfem-elastic"
+version = "0.1.0"
+dependencies = [
  "solidfem-mesh",
  "solidfem-solve",
 ]

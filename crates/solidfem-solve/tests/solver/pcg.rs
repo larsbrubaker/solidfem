@@ -90,3 +90,28 @@ fn an_indefinite_matrix_returns_a_specific_error() {
     let error = pcg.step(100, &mut never()).expect_err("indefinite");
     assert!(matches!(error, PcgError::NotPositiveDefinite { .. }));
 }
+
+#[test]
+fn a_tolerance_below_rounding_stops_at_the_floor_and_says_so() {
+    // 1e-18 is below f64's epsilon relative to ||b||, so no iteration can reach it; the solve must
+    // stop at the rounding floor of A x with an honest report, not run out its iteration cap.
+    let n = 50;
+    let matrix = laplacian(n);
+    let jacobi = Jacobi::new(&matrix).expect("positive diagonal");
+    let mut rhs = vec![0.0; n];
+    rhs[n - 1] = 1.0;
+    let options = PcgOptions {
+        tolerance: 1e-18,
+        ..PcgOptions::default()
+    };
+    let mut pcg = Pcg::new(matrix, jacobi, rhs, options);
+    let StepOutcome::Converged(progress) = pcg.step(100_000, &mut never()).expect("stops") else {
+        panic!("expected a converged solve");
+    };
+    assert!(progress.at_rounding_floor);
+    assert!(progress.relative_residual > 1e-18);
+    for (i, x) in pcg.estimate().iter().enumerate() {
+        let exact = (i + 1) as f64 / (n + 1) as f64;
+        assert!((x - exact).abs() < 1e-10, "x[{i}] = {x}, exact {exact}");
+    }
+}

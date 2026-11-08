@@ -151,7 +151,12 @@ fn the_gate_sees_the_published_crates_and_their_sections() {
     // Guards against a gate that passes by reading nothing.
     let root = workspace_root();
     let published = published_crates(&root);
-    for folder in ["solidfem", "solidfem-mesh", "solidfem-solve"] {
+    for folder in [
+        "solidfem",
+        "solidfem-elastic",
+        "solidfem-mesh",
+        "solidfem-solve",
+    ] {
         assert!(published.iter().any(|f| f == folder), "missed {folder}");
     }
     assert!(!published.iter().any(|f| f == "workspace-gates"));

@@ -1,4 +1,5 @@
-# solidfem: the facade, re-exporting solidfem-mesh and solidfem-solve.
+# solidfem: the facade, re-exporting solidfem-mesh, solidfem-solve and solidfem-elastic, and
+# holding the end-to-end physics validation tests under tests/validation/.
 [package]
 name = "solidfem"
 description = "Linear-static structural analysis on tetrahedral meshes, in pure Rust"
@@ -13,6 +14,7 @@ readme.workspace = true
 [dependencies]
 solidfem-mesh = { path = "../solidfem-mesh", version = "0.1.0" }
 solidfem-solve = { path = "../solidfem-solve", version = "0.1.0" }
+solidfem-elastic = { path = "../solidfem-elastic", version = "0.1.0" }
 
 [lints]
 workspace = true

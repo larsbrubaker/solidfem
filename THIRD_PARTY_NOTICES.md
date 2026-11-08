@@ -16,3 +16,7 @@ No third-party code.
 # solidfem (`crates/solidfem`)
 
 No third-party code.
+
+# solidfem-elastic (`crates/solidfem-elastic`)
+
+No third-party code.
