@@ -1,0 +1,10 @@
+# Clippy's settings for every crate in this workspace (`cargo clippy --workspace --all-targets
+# -- -D warnings`, run by CI). Only what is listed here differs from clippy's defaults.
+
+disallowed-methods = [
+    # Callers (results compared bit for bit across runs and platforms, anyone comparing
+    # outputs across platforms) depend on exact values, and a fused multiply-add rounds once where
+    # `a * b + c` rounds twice, so it moves results in the last bits.
+    { path = "f64::mul_add", reason = "fused multiply-add changes results in the last bits, and callers depend on exact values: write `a * b + c` in a stable order. Only an exact-arithmetic routine that needs the single rounding (an error-free product) may allow it, with a comment saying why" },
+    { path = "f32::mul_add", reason = "fused multiply-add changes results in the last bits, and callers depend on exact values: write `a * b + c` in a stable order" },
+]

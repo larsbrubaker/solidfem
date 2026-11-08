@@ -1,0 +1,24 @@
+# workspace-gates: repo-wide gates that are tests only (file_compliance, markdown_placement,
+# workspace_members, dependencies, notices). The library is empty; the gates live in tests/ and
+# read the whole workspace from its root, so a crate that joins the workspace is covered without
+# naming it here. serde_json reads `cargo metadata` for the dependencies and workspace_members
+# gates. Never published.
+[package]
+name = "workspace-gates"
+description = "Repo-wide gates for solidfem (file compliance, Markdown placement, workspace members, dependencies, notices), tests only"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dev-dependencies]
+serde_json = "1"
+
+# The workspace lints: `todo!()` and `unimplemented!()` are refused everywhere (root Cargo.toml).
+[lints]
+workspace = true

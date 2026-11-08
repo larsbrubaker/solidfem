@@ -1,0 +1,15 @@
+# solidfem-solve: sparse matrix storage and the resumable preconditioned conjugate gradient solver.
+# No dependencies; the conjugate gradient loop is written here so its state can pause between steps.
+[package]
+name = "solidfem-solve"
+description = "Sparse symmetric matrices and a resumable preconditioned conjugate gradient solver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[lints]
+workspace = true

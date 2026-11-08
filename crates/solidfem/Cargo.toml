@@ -1,0 +1,18 @@
+# solidfem: the facade, re-exporting solidfem-mesh and solidfem-solve.
+[package]
+name = "solidfem"
+description = "Linear-static structural analysis on tetrahedral meshes, in pure Rust"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme.workspace = true
+
+[dependencies]
+solidfem-mesh = { path = "../solidfem-mesh", version = "0.1.0" }
+solidfem-solve = { path = "../solidfem-solve", version = "0.1.0" }
+
+[lints]
+workspace = true

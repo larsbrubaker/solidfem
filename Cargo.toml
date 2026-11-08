@@ -1,0 +1,54 @@
+# solidfem workspace: linear-static structural analysis on tetrahedral meshes, in pure Rust
+# (README.md says what it does; CLAUDE.md holds the rules).
+#
+# Where the architecture lives: each crate's `lib.rs` header says what the crate is, what it owns
+# and the rules that span its files; each file's header says how it fits its neighbours.
+#
+# Members live under crates/: the repo-wide gates (workspace-gates, tests only, never published)
+# and the solver crates, layered so each depends only on those above it in this list:
+#   crates/solidfem-mesh     tetrahedral meshes, 10-node upgrade, boundary faces, box builder
+#   crates/solidfem-solve    sparse matrix storage and the resumable conjugate gradient solver
+#   crates/solidfem          the facade re-exporting the others
+# A new member also takes the workspace lints; the workspace-gates test `workspace_members` fails
+# otherwise.
+[workspace]
+resolver = "2"
+members = [
+    "crates/solidfem-mesh",
+    "crates/solidfem-solve",
+    "crates/solidfem",
+    "crates/workspace-gates",
+]
+
+# Every member inherits these with `<key>.workspace = true`. `readme` is relative to this
+# directory, so a crate without a README of its own publishes the repository's.
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "BSD-2-Clause"
+authors = ["Lars Brubaker <larsbrubaker@matterhackers.com>"]
+repository = "https://github.com/larsbrubaker/solidfem"
+homepage = "https://github.com/larsbrubaker/solidfem"
+readme = "README.md"
+
+# Lints every member opts into with `[lints] workspace = true` (the workspace-gates test
+# `workspace_members` refuses a member without it). A `todo!()` or `unimplemented!()` is a stub,
+# so clippy refuses both. Every `unsafe` block carries a `// SAFETY:` comment; `clippy.toml` holds
+# the refused calls.
+[workspace.lints.clippy]
+todo = "deny"
+unimplemented = "deny"
+undocumented_unsafe_blocks = "deny"
+
+# Debug-build optimization. Both sections are required: `[profile.dev.package."*"]` applies to
+# dependencies only, and generic code monomorphized into workspace members inherits the member's
+# opt-level, so without the `[profile.dev]` section the solver's tests would run many times
+# slower than they need to. `debug-assertions` stay on, so assertions still fire. No debug info:
+# it only slows test processes when they start; panic messages keep their file and line.
+[profile.dev]
+opt-level = 1
+debug = false
+
+[profile.dev.package."*"]
+opt-level = 2
+debug = false

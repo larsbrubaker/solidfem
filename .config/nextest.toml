@@ -1,0 +1,11 @@
+# cargo-nextest settings for `cargo nextest run --workspace`.
+#
+# How every crate lays its tests out: an area is one test binary, `crates/<crate>/tests/<area>.rs`,
+# which pulls its files in with `#[path = "<area>/<file>.rs"] mod <file>;`, so a binary's tests
+# share one build and one link. A test is named for the behaviour it pins.
+
+[profile.default]
+test-threads = "num-cpus"
+# A hung test fails within 3 minutes instead of stalling the run.
+slow-timeout = { period = "60s", terminate-after = 3 }
+fail-fast = false

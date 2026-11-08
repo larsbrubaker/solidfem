@@ -1,0 +1,8 @@
+# Pins the toolchain so local checks and CI run the same clippy and rustfmt (a newer stable
+# clippy once failed CI on lints the local one did not have). Kept on the channel of its siblings,
+# bumped together with them, deliberately.
+# wasm32-unknown-unknown: every library crate builds for the browser (CI's wasm32 job).
+[toolchain]
+channel = "1.99.0"
+components = ["clippy", "rustfmt"]
+targets = ["wasm32-unknown-unknown"]
