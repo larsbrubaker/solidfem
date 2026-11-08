@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<!-- The demo's one page: the sidebar with the honest statement of what this is, the 3D view with
+     its legend and exaggeration label, the controls, and the results below the view. src/main.ts
+     fills it in; build.ts swaps the src/main.ts script for the bundled main.js. The display name
+     is set from the wasm's displayName(), and is written nowhere here. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Strength of a bar in your browser</title>
+  <meta name="description" content="Change a bar or thick-walled tube, its material and its load, and see the stress, the bending and how close the result is to the textbook, computed in your browser.">
+  <link rel="icon" type="image/svg+xml" href="./public/favicon.svg">
+  <link rel="stylesheet" href="./styles/main.css">
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+    }
+  }
+  </script>
+</head>
+<body>
+  <nav id="sidebar">
+    <div class="sidebar-header">
+      <h1 class="logo" id="logo">&nbsp;</h1>
+      <p class="tagline">Structural analysis in the browser</p>
+    </div>
+    <div class="honesty">
+      <p><strong>What you can try.</strong> Solid bars and thick-walled tubes only. Their mesh follows the part, and results are checked against textbook answers.</p>
+      <p><strong>Not supported yet.</strong> Arbitrary shapes and thin-walled parts.</p>
+      <p><strong>Estimates only.</strong> Material values are typical, so results are estimates. Not for safety-critical use.</p>
+    </div>
+    <div class="sidebar-footer">
+      <p class="license">BSD-2-Clause License. 3D view by three.js (MIT).</p>
+    </div>
+  </nav>
+
+  <main id="main-content">
+    <div class="demo-page">
+      <div class="demo-header">
+        <h2>How does this bar hold up?</h2>
+        <p>Change the part and the load, and see the stress and bending as the solve runs. Drag to orbit.</p>
+      </div>
+      <div class="demo-layout">
+        <div class="demo-canvas-area" id="viewer">
+          <div class="viewer-state" id="viewer-state" role="status"></div>
+          <div class="legend" id="legend" aria-label="Stress colour scale">
+            <div class="legend-title">Von Mises stress (MPa)</div>
+            <div class="legend-scale">
+              <div class="legend-bar" id="legend-bar"></div>
+              <div class="legend-labels">
+                <span id="legend-high">&mdash;</span>
+                <span id="legend-low">&mdash;</span>
+              </div>
+            </div>
+            <div class="legend-note">Top colour: peak stress outside the clamps. Clamp corners can go higher.</div>
+          </div>
+          <div class="exaggeration">
+            <span id="exaggeration"></span>
+            <button id="pause" type="button" class="control-btn">Pause the animation</button>
+          </div>
+        </div>
+
+        <div class="demo-controls" id="controls"></div>
+
+        <section class="results" id="results" aria-live="polite">
+          <div class="results-head">
+            <h3>Compared with the textbook</h3>
+            <div class="status"><span class="state-pill" id="state">Starting</span> <span id="progress"></span></div>
+          </div>
+          <div class="comparison-table" id="comparison"></div>
+          <p class="comparison-note" id="comparison-note"></p>
+          <div class="peak-row">
+            <div class="peak">
+              <span class="k">Peak stress outside the clamps</span>
+              <span class="v" id="peak-stress">&mdash;</span>
+            </div>
+            <div class="peak">
+              <span class="k">Safety factor</span>
+              <span class="v" id="safety-factor">&mdash;</span>
+            </div>
+          </div>
+          <p class="note-line" id="safety-verdict"></p>
+          <p class="note-line">
+            Peak stress is the highest stress in the part away from the clamps. A clamp's corners are left out because their stress is a model artefact: it grows without limit as the mesh gets finer. Safety factor is the material's yield stress divided by that peak; below 1 the part would yield.
+          </p>
+          <p class="error-line" id="message"></p>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <script type="module" src="./src/main.ts"></script>
+</body>
+</html>

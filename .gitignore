@@ -2,3 +2,6 @@
 *.swp
 .DS_Store
 .claude/worktrees/
+/demo/node_modules
+/demo/dist
+/demo/public/pkg
