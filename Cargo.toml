@@ -9,7 +9,8 @@
 #   crates/solidfem-mesh     tetrahedral meshes, 10-node upgrade, boundary faces, box builder
 #   crates/solidfem-solve    sparse matrix storage and the resumable conjugate gradient solver
 #   crates/solidfem-elastic  10-node element, materials, boundary conditions, stress results
-#   crates/solidfem-bench    never published: measures the Quartet mesher into the solver
+#   crates/solidfem-bench    never published: measures the Quartet mesher into the solver, and
+#                            what real triangle meshes and the surface remesher look like
 #   crates/solidfem          the facade re-exporting the others, and the physics validation tests
 # A new member also takes the workspace lints; the workspace-gates test `workspace_members` fails
 # otherwise.

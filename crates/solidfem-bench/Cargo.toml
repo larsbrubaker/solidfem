@@ -1,7 +1,9 @@
 # solidfem-bench: measures the whole pipeline, the Quartet mesher into the solver, on known-answer
 # bars and printable parts, natively and in the browser. Never published: the published crates stay
 # free of the mesher, which is a sibling checkout reached by path with a version floor. The cdylib
-# target is what the browser benchmark loads; it binds nothing beyond plain wasm exports.
+# target is what the browser benchmark loads; it binds nothing beyond plain wasm exports. The
+# `solidfem-corpus` binary measures real triangle meshes and the solidmesh surface remesher, natively
+# only, through the same kind of path dependency with a version floor.
 [package]
 name = "solidfem-bench"
 description = "Measures Quartet meshing into solidfem solves, natively and in the browser"
@@ -20,10 +22,22 @@ path = "src/lib.rs"
 name = "solidfem-bench-run"
 path = "src/bin/bench.rs"
 
+[[bin]]
+name = "solidfem-corpus"
+path = "src/bin/corpus.rs"
+
 [dependencies]
 quartet-rust = { path = "../../../quartet-rust", version = "0.1.0" }
 solidfem-elastic = { path = "../solidfem-elastic", version = "0.1.0" }
 solidfem-mesh = { path = "../solidfem-mesh", version = "0.1.0" }
+
+# The corpus measurement runs on triangle meshes from solidmesh, natively only: the browser
+# benchmark and the wasm build never see it. Path dependencies with version floors, like the mesher.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+libm = "0.2.16"
+solidmesh = { path = "../../../solidmesh/crates/geometry-processing", version = "0.1.0" }
+solidmesh-math = { path = "../../../solidmesh/crates/vector-math", version = "0.1.0" }
+solidmesh-mesh = { path = "../../../solidmesh/crates/polygon-mesh", version = "0.1.0" }
 
 [lints]
 workspace = true

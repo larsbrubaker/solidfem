@@ -4,7 +4,14 @@
 //! cantilever whose result is known in closed form, and `table.rs` prints what was measured.
 //! `browser.rs` drives the same pipeline from plain wasm exports, in slices, with the page's
 //! clock; the native binary (`src/bin/bench.rs`) prints the tables and writes the browser page.
-//! This crate depends on the mesher and is never published; the library crates do not.
+//! `corpus` is the separate native-only measurement of real triangle meshes and the surface
+//! remesher (`src/bin/corpus.rs` runs it). This crate depends on the mesher and is never
+//! published; the library crates do not.
+
+#[cfg(not(target_arch = "wasm32"))]
+pub mod corpus;
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) use corpus::g3_mount::Mesh;
 
 pub mod cases;
 pub mod known_answer;
