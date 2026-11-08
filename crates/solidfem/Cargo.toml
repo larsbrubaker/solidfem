@@ -1,4 +1,4 @@
-# solidfem: the facade, re-exporting solidfem-mesh, solidfem-solve and solidfem-elastic, and
+# solidfem: the facade, re-exporting solidfem-mesh, solidfem-solve, solidfem-elastic and solidfem-tetra, and
 # holding the end-to-end physics validation tests under tests/validation/.
 [package]
 name = "solidfem"
@@ -15,6 +15,7 @@ readme.workspace = true
 solidfem-mesh = { path = "../solidfem-mesh", version = "0.1.0" }
 solidfem-solve = { path = "../solidfem-solve", version = "0.1.0" }
 solidfem-elastic = { path = "../solidfem-elastic", version = "0.1.0" }
+solidfem-tetra = { path = "../solidfem-tetra", version = "0.1.0" }
 
 [lints]
 workspace = true

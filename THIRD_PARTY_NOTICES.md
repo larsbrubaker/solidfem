@@ -21,6 +21,12 @@ No third-party code.
 
 No third-party code.
 
+# solidfem-tetra (`crates/solidfem-tetra`)
+
+No third-party code is copied into this crate. It depends on the `robust` crate (MIT OR Apache-2.0,
+https://github.com/georust/robust) for exact orientation and in-sphere predicates, and takes it
+from crates.io as an ordinary dependency.
+
 # Demo page (`demo/`)
 
 ## three.js (MIT)

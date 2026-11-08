@@ -11,6 +11,7 @@
 #   crates/solidfem-mesh     tetrahedral meshes, 10-node upgrade, boundary faces, box builder
 #   crates/solidfem-solve    sparse matrix storage and the resumable conjugate gradient solver
 #   crates/solidfem-elastic  10-node element, materials, boundary conditions, stress results
+#   crates/solidfem-tetra    exact Delaunay tetrahedralization, the core of the tetrahedral mesher
 #   crates/solidfem-bench    never published: measures the Quartet mesher into the solver, and
 #                            what real triangle meshes and the surface remesher look like
 #   crates/solidfem          the facade re-exporting the others, and the physics validation tests
@@ -22,6 +23,7 @@ members = [
     "crates/solidfem-mesh",
     "crates/solidfem-solve",
     "crates/solidfem-elastic",
+    "crates/solidfem-tetra",
     "crates/solidfem-bench",
     "crates/solidfem",
     "demo/wasm",
