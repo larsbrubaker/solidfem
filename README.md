@@ -10,5 +10,6 @@ Linear-static structural analysis on tetrahedral meshes, in pure Rust, for nativ
 - `solidfem-elastic`: the 10-node tetrahedron, materials evaluated per integration point, fixed
   nodes, forces and tractions, resumable static studies and von Mises results.
 - `solidfem`: the facade re-exporting them.
+- `solidfem-bench` (never published): measures the Quartet mesher into the solver.
 
 BSD-2-Clause licensed; see `LICENSE`.

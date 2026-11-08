@@ -1,0 +1,29 @@
+# solidfem-bench: measures the whole pipeline, the Quartet mesher into the solver, on known-answer
+# bars and printable parts, natively and in the browser. Never published: the published crates stay
+# free of the mesher, which is a sibling checkout reached by path with a version floor. The cdylib
+# target is what the browser benchmark loads; it binds nothing beyond plain wasm exports.
+[package]
+name = "solidfem-bench"
+description = "Measures Quartet meshing into solidfem solves, natively and in the browser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[[bin]]
+name = "solidfem-bench-run"
+path = "src/bin/bench.rs"
+
+[dependencies]
+quartet-rust = { path = "../../../quartet-rust", version = "0.1.0" }
+solidfem-elastic = { path = "../solidfem-elastic", version = "0.1.0" }
+solidfem-mesh = { path = "../solidfem-mesh", version = "0.1.0" }
+
+[lints]
+workspace = true
