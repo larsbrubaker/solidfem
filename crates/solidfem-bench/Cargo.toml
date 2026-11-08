@@ -3,7 +3,8 @@
 # free of the mesher, which is a sibling checkout reached by path with a version floor. The cdylib
 # target is what the browser benchmark loads; it binds nothing beyond plain wasm exports. The
 # `solidfem-corpus` binary measures real triangle meshes and the solidmesh surface remesher, natively
-# only, through the same kind of path dependency with a version floor.
+# only, through the same kind of path dependency with a version floor. The `solidfem-sliver` binary
+# measures what bad boundary triangles cost a stress result.
 [package]
 name = "solidfem-bench"
 description = "Measures Quartet meshing into solidfem solves, natively and in the browser"
@@ -25,6 +26,10 @@ path = "src/bin/bench.rs"
 [[bin]]
 name = "solidfem-corpus"
 path = "src/bin/corpus.rs"
+
+[[bin]]
+name = "solidfem-sliver"
+path = "src/bin/sliver.rs"
 
 [dependencies]
 quartet-rust = { path = "../../../quartet-rust", version = "0.1.0" }
