@@ -6,14 +6,16 @@
 //! between calls), [`Demo::step`] advances it by a small budget per frame, and the getters copy
 //! the current estimate out as typed arrays and rows. Everything visible to JavaScript is here;
 //! `catalog.rs` holds what is offered, `section.rs` and `plan.rs` the textbook, `part.rs` the
-//! mesh, `engine.rs` the slicing and `view.rs` the render arrays, so the native tests run the
-//! same code the browser does.
+//! mesh, `engine.rs` the slicing, `view.rs` the render arrays and `validity.rs` whether a result
+//! is inside what the linear model can describe, so the native tests run the same code the
+//! browser does.
 
 pub mod catalog;
 pub mod engine;
 pub mod part;
 pub mod plan;
 pub mod section;
+pub mod validity;
 pub mod view;
 
 use js_sys::{Float32Array, Uint32Array};
@@ -179,7 +181,10 @@ impl Demo {
 
     /// JSON text of the current estimate's numbers: state, iterations, residual, element and node
     /// counts, min/max stress, max displacement, peak stress outside the clamps, safety factor
-    /// (`null` before there is stress) and either `rows` (quantity, unit, place, fea, textbook,
+    /// (`null` before there is stress), `validity` (whether the result is inside what the linear
+    /// model can describe: `withinModel`, `exceedsYield`, `excessiveDeflection`, `excessiveTwist`,
+    /// and `deflectionLimit`, `twistRadians`, `twistLimitRadians`, each `null` where it does not
+    /// apply; see `validity.rs`) and either `rows` (quantity, unit, place, fea, textbook,
     /// percentDifference) or `textbook: "none"` with `explanation` when the combination has no
     /// textbook answer. Failure gives `failure` with the message.
     #[wasm_bindgen(js_name = summaryJson)]
@@ -190,6 +195,20 @@ impl Demo {
         let view = study.view();
         let (elements, nodes) = study.mesh_size();
         let safety = view.safety_factor.map_or("null".to_string(), json_number);
+        let optional = |value: Option<f64>| value.map_or("null".to_string(), json_number);
+        let validity = study.validity(&view);
+        let validity = format!(
+            "{{\"withinModel\":{},\"exceedsYield\":{},\"excessiveDeflection\":{},\
+             \"excessiveTwist\":{},\"deflectionLimit\":{},\"twistRadians\":{},\
+             \"twistLimitRadians\":{}}}",
+            validity.within_model(),
+            validity.exceeds_yield,
+            validity.excessive_deflection,
+            validity.excessive_twist,
+            optional(validity.deflection_limit),
+            optional(validity.twist_radians),
+            optional(validity.twist_limit_radians),
+        );
         let textbook = match study.textbook() {
             Textbook::Answers(_) => {
                 let rows: Vec<String> = study
@@ -219,7 +238,7 @@ impl Demo {
         format!(
             "{{\"state\":{},\"iterations\":{},\"residual\":{},\"elements\":{elements},\"nodes\":{nodes},\
              \"minStress\":{},\"maxStress\":{},\"maxDisplacement\":{},\"peakStressOutsideClamps\":{},\
-             \"safetyFactor\":{safety},\"failure\":{},{textbook}}}",
+             \"safetyFactor\":{safety},\"validity\":{validity},\"failure\":{},{textbook}}}",
             json_string(state_name(study.state())),
             study.iterations(),
             json_number(study.residual()),

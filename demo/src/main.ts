@@ -2,8 +2,8 @@
 // study through src/scheduler.ts and shows each result in the viewer, the legend and the tables.
 // The rules live with their tests: ranges and clamping in src/catalog.ts, slices and restarts in
 // src/scheduler.ts, the ramp in src/colormap.ts, the exaggeration in src/animation.ts, the number
-// text in src/format.ts; this file only connects them to the DOM. The display name comes from the
-// wasm's displayName() and nowhere else.
+// text in src/format.ts, what the results panel says in src/results-view.ts; this file only
+// connects them to the DOM. The display name comes from the wasm's displayName() and nowhere else.
 //
 // There is no worker: the solve runs on the main thread in small slices (src/scheduler.ts) between
 // frames, so a control change takes effect at once and the page never freezes.
@@ -17,36 +17,9 @@ import {
 } from './catalog.ts';
 import { exaggerationScale } from './animation.ts';
 import { rampCssGradient } from './colormap.ts';
-import {
-  exaggerationLabel, formatDuration, formatNumber, formatPercent, formatSafetyFactor, safetyVerdict, stateLabel,
-} from './format.ts';
+import { exaggerationLabel, formatDuration, formatNumber, stateLabel } from './format.ts';
+import { modelWarning, safetyMessage, safetyText, tableView, type Summary } from './results-view.ts';
 import { StudyDriver, type Clock } from './scheduler.ts';
-
-interface ComparisonRow {
-  quantity: string;
-  unit: string;
-  place: string;
-  fea: number | null;
-  textbook: number | null;
-  percentDifference: number | null;
-}
-
-interface Summary {
-  state: string;
-  iterations?: number;
-  residual?: number | null;
-  elements?: number;
-  nodes?: number;
-  minStress?: number | null;
-  maxStress?: number | null;
-  maxDisplacement?: number | null;
-  peakStressOutsideClamps?: number | null;
-  safetyFactor?: number | null;
-  failure?: string | null;
-  textbook?: 'compared' | 'none';
-  rows?: ComparisonRow[];
-  explanation?: string;
-}
 
 interface DemoInstance {
   start(...args: any[]): string;
@@ -108,19 +81,17 @@ async function loadWasm(): Promise<WasmModule> {
 
 function renderTable(summary: Summary) {
   const table = el('comparison');
-  const note = el('comparison-note');
-  if (summary.textbook === 'none') {
+  const view = tableView(summary);
+  el('comparison-note').textContent = view.note;
+  if (view.note) {
     table.innerHTML = '';
-    note.textContent = `No textbook answer for this case. ${summary.explanation ?? ''}`.trim();
     return;
   }
-  note.textContent = '';
-  const rows = summary.rows ?? [];
-  const body = rows.map(row => `<tr>
+  const body = view.rows.map(row => `<tr class="row-${row.status}">
       <td>${row.quantity} <small>${row.place}</small></td>
-      <td class="num">${formatNumber(row.fea)} <small>${row.unit}</small></td>
-      <td class="num">${formatNumber(row.textbook)} <small>${row.unit}</small></td>
-      <td class="num">${formatPercent(row.percentDifference)}</td>
+      <td class="num">${row.fea} <small>${row.unit}</small></td>
+      <td class="num">${row.textbook} <small>${row.unit}</small></td>
+      <td class="num difference">${row.difference}</td>
     </tr>`).join('');
   table.innerHTML = `<table>
     <thead><tr><th>Quantity and where</th><th class="num">FEA</th><th class="num">Textbook</th><th class="num">Difference</th></tr></thead>
@@ -199,6 +170,8 @@ async function main() {
       if (c.wallFraction) sliders.wall.update(linearSpec(c.wallFraction, STEP_WALL, formatWall), choice.wallFraction);
     }
     setStaleness(true);
+    // The warning belongs to the finished result, which this change has just left behind.
+    showWarning(null);
     showState('cancelled');
     driver.request(startArguments(catalog, choice));
   }
@@ -277,8 +250,17 @@ async function main() {
     if (summary.state === 'assembling') return;
     renderTable(summary);
     el('peak-stress').textContent = `${formatNumber(summary.peakStressOutsideClamps)} MPa`;
-    el('safety-factor').textContent = formatSafetyFactor(summary.safetyFactor);
-    el('safety-verdict').textContent = safetyVerdict(summary.safetyFactor);
+    el('safety-factor').textContent = safetyText(summary);
+    el('safety-verdict').textContent = safetyMessage(summary);
+    el('results').classList.toggle('solving', summary.state !== 'done');
+    showWarning(modelWarning(summary));
+  }
+
+  function showWarning(text: string | null) {
+    const box = el('model-warning');
+    box.textContent = text ?? '';
+    box.classList.toggle('visible', text !== null);
+    el('results').classList.toggle('outside-model', text !== null);
   }
 
   function showState(state: string) {

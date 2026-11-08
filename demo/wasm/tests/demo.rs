@@ -10,3 +10,5 @@ mod page_catalog;
 mod support;
 #[path = "demo/timing.rs"]
 mod timing;
+#[path = "demo/validity.rs"]
+mod validity;

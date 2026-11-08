@@ -6,6 +6,7 @@ import { describe, expect, test } from 'bun:test';
 import { existsSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { defaultChoice, parseCatalog, startArguments, type Catalog, type Combination, type Range } from './catalog.ts';
+import { modelWarning, tableView } from './results-view.ts';
 
 const pkg = join(import.meta.dir, '../public/pkg');
 const built = existsSync(join(pkg, 'solidfem_wasm.js'));
@@ -63,6 +64,26 @@ describe.skipIf(!built)('the real engine', () => {
       expect(Math.abs(row.percentDifference)).toBeLessThan(10);
     }
     expect(summary.safetyFactor).toBeGreaterThan(0);
+    expect(summary.validity.withinModel).toBe(true);
     expect(demo.vonMises().length).toBe(demo.positions().length / 3);
+  }, 120000);
+
+  test('the top of the load slider is reported outside the model and marked not meaningful', async () => {
+    const wasm = await loadWasm();
+    const catalog: Catalog = parseCatalog(wasm.catalogJson());
+    const demo = new wasm.Demo();
+    const base = defaultChoice(catalog);
+    demo.start(...startArguments(catalog, { ...base, magnitudes: { ...base.magnitudes, push: 2000 } }));
+    let state = 'assembling';
+    for (let i = 0; i < 100000 && state !== 'done' && state !== 'failed'; i++) {
+      state = demo.step(50);
+    }
+    expect(state).toBe('done');
+    const summary = JSON.parse(demo.summaryJson());
+    expect(summary.validity.withinModel).toBe(false);
+    expect(summary.validity.exceedsYield).toBe(true);
+    expect(summary.validity.excessiveDeflection).toBe(true);
+    expect(tableView(summary).rows[0].difference).toBe('not meaningful');
+    expect(modelWarning(summary)).toContain('do not apply');
   }, 120000);
 });

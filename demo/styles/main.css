@@ -372,6 +372,30 @@ select {
 /* A new study has started but this table still shows the previous one's numbers. */
 .results.stale .comparison-table, .results.stale .peak-row { opacity: 0.55; }
 
+/* The estimate is still moving: live numbers, dimmed, and no difference read as a verdict. */
+.results.solving .peak-row { opacity: 0.6; }
+.comparison-table tr.row-solving td { color: var(--text-muted); }
+.comparison-table td.difference { font-weight: 600; }
+.comparison-table tr.row-solving td.difference { font-weight: 400; font-style: italic; }
+
+/* A finished result outside the linear model: the warning, and a comparison marked as void. */
+.model-warning {
+  display: none;
+  margin: 2px 0 8px;
+  padding: 8px 10px;
+  background: #fff8e1;
+  border: 1px solid #e9c46a;
+  border-radius: 6px;
+  color: #6d4c00;
+  font-size: 0.86rem;
+}
+
+.model-warning.visible { display: block; }
+
+.comparison-table tr.row-not-meaningful td { color: var(--text-muted); text-decoration: line-through; }
+.comparison-table tr.row-not-meaningful td.difference { text-decoration: none; color: #6d4c00; font-weight: 600; }
+.results.outside-model .peak-row { opacity: 0.7; }
+
 .comparison-table table {
   width: 100%;
   border-collapse: collapse;

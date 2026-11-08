@@ -21,6 +21,7 @@ use solidfem::mesh::QuadraticTetMesh;
 
 use crate::catalog::StudyRequest;
 use crate::plan::{plan_study, Comparison, PlanError, Probe, Textbook};
+use crate::validity::{assess, Validity};
 use crate::view::{Surface, ViewData};
 
 /// Elements assembled or recovered per budget unit.
@@ -278,6 +279,11 @@ impl DemoStudy {
                 }
             })
             .collect();
+    }
+
+    /// Whether the estimate in `view` is inside what the linear model can describe.
+    pub fn validity(&self, view: &ViewData) -> Validity {
+        assess(&self.request, self.yield_strength, view)
     }
 
     /// The arrays and summary for the current estimate.
