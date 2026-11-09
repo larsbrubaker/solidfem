@@ -1,0 +1,9 @@
+# The sibling commit CI builds against: .github/workflows/ci.yml and deploy-demo.yml check
+# solidmesh out at SOLIDMESH_REV rather than at its main, so a version bump on solidmesh's main
+# cannot break this repository's `--locked` builds with no change here.
+#
+# Moving the pin means updating this SHA and Cargo.lock in the same commit: check solidmesh out at
+# the new commit beside this repository, run `cargo update -p solidmesh` (or any build) so the
+# lock records its version, and commit both. Each workflow reads the line below, the only place
+# the commit is named; it must be a full 40-character SHA.
+SOLIDMESH_REV=4209cee41dcec1fd3a07ce89912c284e688be3fe

@@ -117,7 +117,9 @@ from a CDN by `demo/index.html`, so the page needs network access.
 
 The workspace reaches [solidmesh](https://github.com/larsbrubaker/solidmesh) by path, for the
 never-published `solidfem-bench` measurements, and solidmesh reaches three more libraries the same
-way, so check them out beside this repository:
+way, so check them out beside this repository (CI checks solidmesh out at the commit
+`.github/sibling-pins` names; moving that pin means updating its SHA and `Cargo.lock` in the same
+commit):
 
 ```
 <any folder>/
