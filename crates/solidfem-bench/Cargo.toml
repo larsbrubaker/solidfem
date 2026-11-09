@@ -1,28 +1,18 @@
-# solidfem-bench: measures the whole pipeline, the Quartet mesher into the solver, on known-answer
-# bars and printable parts, natively and in the browser. Never published: the published crates stay
-# free of the mesher, which is a sibling checkout reached by path with a version floor. The cdylib
-# target is what the browser benchmark loads; it binds nothing beyond plain wasm exports. The
-# `solidfem-corpus` binary measures real triangle meshes and the solidmesh surface remesher, natively
-# only, through the same kind of path dependency with a version floor. The `solidfem-sliver` binary
-# measures what bad boundary triangles cost a stress result. The `solidfem-gate` binary is the
-# end-of-mesher gate: this workspace's mesher into the solver on a 100 x 100 x 0.8 mm plate.
+# solidfem-bench: measures what real inputs do to the mesher and the solver. Never published. The
+# `solidfem-corpus` binary measures real triangle meshes and the solidmesh surface remesher,
+# natively only, through a path dependency on a solidmesh checkout with a version floor. The
+# `solidfem-sliver` binary measures what bad boundary triangles cost a stress result. The
+# `solidfem-gate` binary is the end-of-mesher gate: this workspace's mesher into the solver on a
+# 100 x 100 x 0.8 mm plate.
 [package]
 name = "solidfem-bench"
-description = "Measures Quartet meshing into solidfem solves, natively and in the browser"
+description = "Measures real triangle meshes, sliver cost and the end-of-mesher gate for solidfem"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 publish = false
-
-[lib]
-crate-type = ["cdylib", "rlib"]
-path = "src/lib.rs"
-
-[[bin]]
-name = "solidfem-bench-run"
-path = "src/bin/bench.rs"
 
 [[bin]]
 name = "solidfem-corpus"
@@ -37,14 +27,13 @@ name = "solidfem-gate"
 path = "src/bin/gate.rs"
 
 [dependencies]
-quartet-rust = { path = "../../../quartet-rust", version = "0.1.0" }
 robust = "1.2"
 solidfem = { path = "../solidfem", version = "0.1.0" }
 solidfem-elastic = { path = "../solidfem-elastic", version = "0.1.0" }
 solidfem-mesh = { path = "../solidfem-mesh", version = "0.1.0" }
 
-# The corpus measurement runs on triangle meshes from solidmesh, natively only: the browser
-# benchmark and the wasm build never see it. Path dependencies with version floors, like the mesher.
+# The corpus measurement runs on triangle meshes from solidmesh, natively only: the wasm build
+# never sees it. Path dependencies with version floors, on the checkout CI puts beside this one.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libm = "0.2.16"
 solidmesh = { path = "../../../solidmesh/crates/geometry-processing", version = "0.2.1" }

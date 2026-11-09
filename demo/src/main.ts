@@ -8,6 +8,7 @@
 // There is no worker: the solve runs on the main thread in small slices (src/scheduler.ts) between
 // frames, so a control change takes effect at once and the page never freezes.
 
+import { wasmModuleUrl } from './asset-url.ts';
 import { Viewer } from './viewer.ts';
 import { createDropdown, createSegmented, createSlider, type Slider, type SliderSpec } from './controls.ts';
 import {
@@ -73,7 +74,7 @@ function loadLabelFor(choice: Choice): string {
 
 async function loadWasm(): Promise<WasmModule> {
   // By URL at run time, so the bundler leaves wasm-pack's module and its .wasm beside it alone.
-  const url = new URL('./public/pkg/solidfem_wasm.js', window.location.href).href;
+  const url = wasmModuleUrl(window.location.href);
   const wasm = (await import(/* webpackIgnore: true */ url)) as WasmModule;
   await wasm.default();
   return wasm;

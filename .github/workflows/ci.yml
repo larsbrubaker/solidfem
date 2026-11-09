@@ -1,0 +1,231 @@
+# CI: format, lint and test on Linux, macOS and Windows, the wasm32-unknown-unknown check of every
+# library crate, and the demo page's tests and type check.
+#
+# Siblings: crates/solidfem-bench depends on solidmesh by path (`../../../solidmesh/...`) and
+# solidmesh on manifold-rust, clipper2-rust and tess2-rust the same way, so every job that runs
+# cargo checks solidfem out into `solidfem/` and those four beside it, the layout of a development
+# machine's checkout folder. They are public repositories, so the default token checks them out.
+#
+# The test job runs on all three systems because solidfem promises the same answer on every
+# platform: a result that differs between them fails somewhere here. Each push runs what
+# CLAUDE.md's "Done" names: `cargo fmt --check`, clippy with warnings denied, and every test through
+# cargo-nextest with .config/nextest.toml's `ci` profile (every test in its own process, a test
+# still running after 5 minutes stopped and failed, every test run even after a failure), then the
+# doctests, which nextest does not run. The tests include the workspace-gates crate (file headers
+# and size, Markdown placement, licenses and native code, third-party notices), so CI holds the
+# repository rules too.
+#
+# The demo job builds the wasm engine first, so the page's engine tests
+# (demo/src/catalog.engine.test.ts) run for real rather than being skipped, and builds the site
+# before `bun test`, so demo/src/subpath.test.ts checks the bundle as well as the sources.
+#
+# Cache: Swatinem/rust-cache saves the build in its post step, normally only after a success; a
+# job that keeps failing would then never save and build cold every time, so the test job saves
+# even when it fails (`cache-on-failure`). Every job has a `timeout-minutes`, so a hang fails in
+# reasonable time rather than at GitHub's 6-hour limit.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  # No incremental artifacts: CI builds once, and they only cost disk and link time.
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-26.04, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: solidfem
+    steps:
+      # Git on Windows runners turns LF into CRLF on checkout (core.autocrlf true). The repository
+      # compares files byte for byte (the LICENSE copies), so every checkout keeps the bytes as
+      # committed.
+      - name: Keep line endings as committed (Windows)
+        if: runner.os == 'Windows'
+        working-directory: .
+        run: git config --global core.autocrlf false
+      - name: Checkout solidfem
+        uses: actions/checkout@v7
+        with:
+          path: solidfem
+      - name: Checkout solidmesh
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/solidmesh
+          path: solidmesh
+      - name: Checkout manifold-rust
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/manifold-rust
+          path: manifold-rust
+      - name: Checkout clipper2-rust
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/clipper2-rust
+          path: clipper2-rust
+      - name: Checkout tess2-rust
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/tess2-rust
+          path: tess2-rust
+      # rust-toolchain.toml pins the version, clippy, rustfmt and the wasm32 target; with no
+      # argument rustup installs exactly that (the step runs inside the checkout, so it sees it).
+      - name: Install pinned Rust toolchain
+        id: toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: solidfem
+          cache-on-failure: true
+      # The test runner, at a pinned version; the action downloads the release and checks its
+      # checksum. The action runs its installer in bash, which on a Windows runner sometimes fails
+      # to start; when it still fails after its own retries, the step after it builds the same
+      # version from source instead (a few minutes, only on that failure).
+      - name: Install cargo-nextest
+        id: install-nextest
+        continue-on-error: true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.146
+      - name: Install cargo-nextest from source (install-action failed)
+        id: install-nextest-source
+        if: steps.install-nextest.outcome == 'failure'
+        run: cargo install cargo-nextest --version 0.9.146 --locked
+      # Not `--all`: that also formats local path dependencies, i.e. the sibling checkouts. In a
+      # virtual workspace plain `cargo fmt` covers exactly the workspace members.
+      - name: Formatting
+        run: cargo fmt --check
+      # Clippy and the tests run even when a check before them failed, as long as the toolchain
+      # (and for the tests, nextest) is in place, so one run reports every failure and the cache
+      # holds the test build.
+      - name: Clippy
+        if: ${{ !cancelled() && steps.toolchain.outcome == 'success' }}
+        timeout-minutes: 30
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Tests
+        id: tests
+        if: >-
+          ${{ !cancelled() && steps.toolchain.outcome == 'success' &&
+          (steps.install-nextest.outcome == 'success' ||
+          steps.install-nextest-source.outcome == 'success') }}
+        timeout-minutes: 75
+        run: cargo nextest run --workspace --profile ci
+      # nextest does not run doctests.
+      - name: Doctests
+        if: ${{ !cancelled() && steps.tests.outcome != 'skipped' }}
+        timeout-minutes: 10
+        run: cargo test --workspace --doc
+
+  wasm:
+    name: wasm32 check
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: solidfem
+    steps:
+      - name: Checkout solidfem
+        uses: actions/checkout@v7
+        with:
+          path: solidfem
+      - name: Checkout solidmesh
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/solidmesh
+          path: solidmesh
+      - name: Checkout manifold-rust
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/manifold-rust
+          path: manifold-rust
+      - name: Checkout clipper2-rust
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/clipper2-rust
+          path: clipper2-rust
+      - name: Checkout tess2-rust
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/tess2-rust
+          path: tess2-rust
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: solidfem
+      # Every library crate builds for wasm32 (CLAUDE.md, "Never"): every workspace member but
+      # workspace-gates (tests only, native only). `--locked`, so a stale Cargo.lock fails here.
+      - name: Check the workspace for wasm32-unknown-unknown
+        run: cargo check --locked --target wasm32-unknown-unknown --workspace --exclude workspace-gates
+
+  demo:
+    name: demo page tests
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: solidfem
+    steps:
+      - name: Checkout solidfem
+        uses: actions/checkout@v7
+        with:
+          path: solidfem
+      - name: Checkout solidmesh
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/solidmesh
+          path: solidmesh
+      - name: Checkout manifold-rust
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/manifold-rust
+          path: manifold-rust
+      - name: Checkout clipper2-rust
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/clipper2-rust
+          path: clipper2-rust
+      - name: Checkout tess2-rust
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/tess2-rust
+          path: tess2-rust
+      - name: Install pinned Rust toolchain (with wasm32-unknown-unknown)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: solidfem
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+      - name: Build WASM
+        run: wasm-pack build demo/wasm --target web --out-dir ../public/pkg --no-typescript
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+      - name: Install demo dependencies
+        working-directory: solidfem/demo
+        run: bun install --frozen-lockfile
+      - name: Build static site
+        working-directory: solidfem/demo
+        run: bun run build
+      - name: Tests
+        working-directory: solidfem/demo
+        run: bun test
+      - name: Type check
+        working-directory: solidfem/demo
+        run: bun run typecheck

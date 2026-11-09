@@ -1,0 +1,102 @@
+# Deploys the demo site (demo/) to GitHub Pages: https://larsbrubaker.github.io/solidfem/
+#
+# Builds the wasm engine (demo/wasm) with wasm-pack into demo/public/pkg, bundles the TypeScript
+# with Bun (`bun run build`, demo/build.ts), and publishes demo/dist. Every URL the site uses is
+# relative to the page, so it works under the /solidfem/ subpath; `bun run preview:pages` serves
+# dist/ under that prefix locally, and demo/src/subpath.test.ts holds the rule.
+#
+# Siblings: the workspace depends on solidmesh by path (`../../../solidmesh/...` from
+# crates/solidfem-bench), and solidmesh on manifold-rust, clipper2-rust and tess2-rust the same
+# way, so solidfem is checked out into `solidfem/` and the four siblings beside it, as ci.yml
+# does. Cargo loads every workspace member's dependencies, so the demo needs them even though its
+# engine does not link them. rust-toolchain.toml pins the toolchain and the
+# wasm32-unknown-unknown target; `rustup toolchain install` in the checkout installs exactly that.
+#
+# Pages must be enabled for the repository with "GitHub Actions" as its source.
+name: Deploy Demo to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: solidfem
+    steps:
+      - name: Checkout solidfem
+        uses: actions/checkout@v7
+        with:
+          path: solidfem
+      - name: Checkout solidmesh
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/solidmesh
+          path: solidmesh
+      - name: Checkout manifold-rust
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/manifold-rust
+          path: manifold-rust
+      - name: Checkout clipper2-rust
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/clipper2-rust
+          path: clipper2-rust
+      - name: Checkout tess2-rust
+        uses: actions/checkout@v7
+        with:
+          repository: larsbrubaker/tess2-rust
+          path: tess2-rust
+
+      - name: Install pinned Rust toolchain (with wasm32-unknown-unknown)
+        run: rustup toolchain install
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: solidfem
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Build WASM
+        run: wasm-pack build demo/wasm --target web --out-dir ../public/pkg --no-typescript
+
+      - name: Install Bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Install demo dependencies
+        working-directory: solidfem/demo
+        run: bun install --frozen-lockfile
+
+      - name: Build static site
+        working-directory: solidfem/demo
+        run: bun run build
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: solidfem/demo/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-26.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5

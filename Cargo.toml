@@ -12,8 +12,8 @@
 #   crates/solidfem-solve    sparse matrix storage and the resumable conjugate gradient solver
 #   crates/solidfem-elastic  10-node element, materials, boundary conditions, stress results
 #   crates/solidfem-tetra    exact Delaunay tetrahedralization, the core of the tetrahedral mesher
-#   crates/solidfem-bench    never published: measures the Quartet mesher into the solver, and
-#                            what real triangle meshes and the surface remesher look like
+#   crates/solidfem-bench    never published: the end-of-mesher gate, and what real triangle meshes,
+#                            the surface remesher and sliver triangles do to a result
 #   crates/solidfem          the facade re-exporting the others, and the physics validation tests
 # A new member also takes the workspace lints; the workspace-gates test `workspace_members` fails
 # otherwise.

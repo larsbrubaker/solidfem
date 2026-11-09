@@ -9,3 +9,11 @@ test-threads = "num-cpus"
 # A hung test fails within 3 minutes instead of stalling the run.
 slow-timeout = { period = "60s", terminate-after = 3 }
 fail-fast = false
+
+# CI's runners (`--profile ci`, `.github/workflows/ci.yml`): 3 or 4 CPUs, several times slower than
+# a development machine, so a correct test there can pass the 3 minutes a hung test gets locally;
+# it is stopped after 5.
+[profile.ci]
+slow-timeout = { period = "60s", terminate-after = 5 }
+# The failures again at the end of the run, where a long CI log is read from.
+failure-output = "immediate-final"
