@@ -1,7 +1,9 @@
-//! Why a triangulation cannot be built: the named failures of [`crate::Triangulator`]. Input
-//! problems (`TooFewPoints` .. `AllPointsCoplanar`, `DuplicatePoint`) say what the caller must
-//! fix; `LocationFailed` and `CavityInconsistent` report a broken internal invariant and refuse
-//! to return a mesh rather than hand back a wrong one.
+//! Why a triangulation cannot be built: the named failures of [`crate::Triangulator`] and
+//! [`crate::SurfaceMesher`]. Input problems (`TooFewPoints` .. `AllPointsCoplanar`,
+//! `DuplicatePoint`, the `Surface...` shape errors) say what the caller must fix;
+//! `SurfaceNotRecovered` says how much of a surface flips could not recover;
+//! `LocationFailed` and `CavityInconsistent` report a broken internal invariant and refuse to
+//! return a mesh rather than hand back a wrong one.
 
 use std::fmt;
 
@@ -30,6 +32,32 @@ pub enum TetraError {
     NotFinished { inserted: usize, total: usize },
     /// A point can only be added once the initial set has been fully inserted.
     StillInserting { inserted: usize, total: usize },
+    /// A surface triangle names a vertex past the end of the point list.
+    SurfaceIndexOutOfRange { triangle: usize, index: u32 },
+    /// A surface triangle has no area: its corners repeat or are exactly collinear.
+    DegenerateTriangle { triangle: usize },
+    /// A surface edge is not used by exactly one triangle in each direction: the surface is not
+    /// closed, not manifold, or its triangles are not consistently wound.
+    SurfaceNotClosed { edge: [u32; 2] },
+    /// A point is on no triangle. Only surface vertices may be given.
+    UnusedVertex { index: u32 },
+    /// A surface vertex lies exactly on another surface edge, so that edge cannot exist in any
+    /// tetrahedralization of these vertices; the surface touches itself.
+    VertexOnSurfaceEdge { vertex: u32, edge: [u32; 2] },
+    /// Flips could not recover the whole surface: what remains, and how much. The surface may
+    /// intersect itself, or may need a point added inside the solid.
+    SurfaceNotRecovered {
+        missing_edges: usize,
+        missing_faces: usize,
+        first_missing_edge: Option<[u32; 2]>,
+        first_missing_face: Option<[u32; 3]>,
+    },
+    /// The winding does not leave the solid on the inner side of this triangle.
+    SurfaceWindingWrong { triangle: usize },
+    /// This triangle does not separate solid from empty, so the shells are not consistent.
+    SurfaceDoesNotSeparate { triangle: usize },
+    /// The result was requested before the surface was recovered and classified.
+    SurfaceNotFinished,
     /// Point location did not reach a tetrahedron: a broken invariant, not a property of the
     /// input.
     LocationFailed { point: u32 },
@@ -78,6 +106,57 @@ impl fmt::Display for TetraError {
                 "{inserted} of {total} points are inserted; a point can be added once the \
                  initial set is done"
             ),
+            Self::SurfaceIndexOutOfRange { triangle, index } => write!(
+                f,
+                "surface triangle {triangle} names vertex {index}, past the end of the points"
+            ),
+            Self::DegenerateTriangle { triangle } => {
+                write!(f, "surface triangle {triangle} has no area")
+            }
+            Self::SurfaceNotClosed { edge } => write!(
+                f,
+                "surface edge {edge:?} is not used once in each direction; the surface must be \
+                 closed, manifold and consistently wound"
+            ),
+            Self::UnusedVertex { index } => {
+                write!(
+                    f,
+                    "point {index} is on no surface triangle; give only surface vertices"
+                )
+            }
+            Self::VertexOnSurfaceEdge { vertex, edge } => write!(
+                f,
+                "surface vertex {vertex} lies exactly on surface edge {edge:?}; the surface \
+                 touches itself"
+            ),
+            Self::SurfaceNotRecovered {
+                missing_edges,
+                missing_faces,
+                first_missing_edge,
+                first_missing_face,
+            } => write!(
+                f,
+                "{missing_edges} surface edges and {missing_faces} surface triangles could not \
+                 be recovered by flips (first edge {first_missing_edge:?}, first triangle \
+                 {first_missing_face:?}); the surface may intersect itself or need a point \
+                 added inside the solid"
+            ),
+            Self::SurfaceWindingWrong { triangle } => write!(
+                f,
+                "surface triangle {triangle} is wound with the solid on its outer side; wind \
+                 every triangle counterclockwise seen from outside the solid"
+            ),
+            Self::SurfaceDoesNotSeparate { triangle } => write!(
+                f,
+                "surface triangle {triangle} does not separate solid from empty space; check \
+                 the shells are closed and do not cross"
+            ),
+            Self::SurfaceNotFinished => {
+                write!(
+                    f,
+                    "the surface is not finished; run step until it reports Done"
+                )
+            }
             Self::LocationFailed { point } => {
                 write!(
                     f,

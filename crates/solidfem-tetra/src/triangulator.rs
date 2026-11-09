@@ -200,6 +200,11 @@ impl Triangulator {
         })
     }
 
+    /// The triangulation itself, for surface recovery to flip further.
+    pub(crate) fn into_core(self) -> Core {
+        self.core
+    }
+
     /// The bytes of memory the triangulator holds per point right now, counting the capacity of
     /// the tetrahedron and neighbour arrays and the point array.
     pub fn memory_bytes(&self) -> usize {

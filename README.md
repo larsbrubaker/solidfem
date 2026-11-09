@@ -9,8 +9,9 @@ Linear-static structural analysis on tetrahedral meshes, in pure Rust, for nativ
   bounded slices, so a host with no threads can solve between frames.
 - `solidfem-elastic`: the 10-node tetrahedron, materials evaluated per integration point, fixed
   nodes, forces and tractions, resumable static studies and von Mises results.
-- `solidfem-tetra`: exact Delaunay tetrahedralization of a point set, the core of the tetrahedral
-  mesher, resumable in slices and tolerant of grids, cospherical points and thin plates.
+- `solidfem-tetra`: exact Delaunay tetrahedralization of a point set and flip-based recovery of a
+  closed surface in it, the core of the tetrahedral mesher, resumable in slices and tolerant of
+  grids, cospherical points and thin plates.
 - `solidfem`: the facade re-exporting them.
 - `solidfem-bench` (never published): measures the Quartet mesher into the solver.
 - `demo/wasm` (never published): the WebAssembly engine of the public demo page, where a visitor

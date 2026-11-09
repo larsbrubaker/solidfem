@@ -77,6 +77,21 @@ pub(crate) struct Core {
     edges: Vec<(u64, u32, u8)>,
 }
 
+/// The three vertices of `tet` other than slot `i`, sorted: a key naming the face from either
+/// side.
+fn sorted_face(tet: &[u32; 4], i: usize) -> [u32; 3] {
+    let mut face = [0; 3];
+    let mut count = 0;
+    for (slot, &vertex) in tet.iter().enumerate() {
+        if slot != i {
+            face[count] = vertex;
+            count += 1;
+        }
+    }
+    face.sort_unstable();
+    face
+}
+
 /// What locating a point found.
 enum Located {
     /// A tetrahedron in conflict with the point.
@@ -341,6 +356,59 @@ impl Core {
             pair += 2;
         }
         Ok(())
+    }
+
+    /// Replaces the tetrahedra `old` with `new`, which must fill exactly the same region, and
+    /// rebuilds every adjacency across the region's boundary and between the new tetrahedra.
+    /// Returns the new slots. Flips of every size go through here, so adjacency has one author.
+    pub(crate) fn replace(
+        &mut self,
+        old: &[u32],
+        new: &[[u32; 4]],
+    ) -> Result<Vec<u32>, TetraError> {
+        // (face vertices sorted, tetrahedron, its slot, whether the tetrahedron is new)
+        let mut faces: Vec<([u32; 3], u32, u8, bool)> =
+            Vec::with_capacity(old.len() * 4 + new.len() * 4);
+        for &t in old {
+            let tet = self.tets[t as usize];
+            for i in 0..4 {
+                let n = self.neighbors[t as usize][i];
+                if old.contains(&n) {
+                    continue;
+                }
+                let slot = (0..4u8)
+                    .find(|&j| self.neighbors[n as usize][j as usize] == t)
+                    .ok_or(TetraError::CavityInconsistent { point: tet[0] })?;
+                faces.push((sorted_face(&tet, i), n, slot, false));
+            }
+        }
+        for &t in old {
+            self.tets[t as usize] = [DEAD; 4];
+            self.free.push(t);
+        }
+        let mut slots = Vec::with_capacity(new.len());
+        for tet in new {
+            let slot = self.place(*tet, [0; 4]);
+            slots.push(slot);
+            for i in 0..4 {
+                faces.push((sorted_face(tet, i), slot, i as u8, true));
+            }
+        }
+        // A region that closes up names each face exactly twice.
+        faces.sort_unstable_by_key(|entry| entry.0);
+        for pair in faces.chunks(2) {
+            let &[(key_a, t_a, slot_a, new_a), (key_b, t_b, slot_b, new_b)] = pair else {
+                return Err(TetraError::CavityInconsistent {
+                    point: pair[0].0[0],
+                });
+            };
+            if key_a != key_b || !(new_a || new_b) {
+                return Err(TetraError::CavityInconsistent { point: key_a[0] });
+            }
+            self.neighbors[t_a as usize][slot_a as usize] = t_b;
+            self.neighbors[t_b as usize][slot_b as usize] = t_a;
+        }
+        Ok(slots)
     }
 
     /// Adds a point to the point list, returning its index.
