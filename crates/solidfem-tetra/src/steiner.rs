@@ -6,7 +6,9 @@
 //! **Where the point goes.** The obstruction is a mesh edge, or the face a missing surface edge
 //! passes through. The union of the tetrahedra around it is star-shaped from every point on the
 //! edge or face itself, so a point just off it on the solid side sees that whole region and a
-//! star of new tetrahedra replaces it, removing the obstruction. The offset is along the inward
+//! star of new tetrahedra replaces it, removing the obstruction. A hull edge folded over a stuck
+//! edge cannot be removed at all, so there the point takes every real tetrahedron around that hull
+//! edge, leaving a ring the fold flip in `flips.rs` can close. The offset is along the inward
 //! normal of the surface at the blockage, as far as the room allows: the search tries the
 //! largest offset first (the shapeliest elements) and halves it until the point fits.
 //!
@@ -33,6 +35,10 @@ pub(crate) enum Obstruction {
     Edge(u32, u32),
     /// The two tetrahedra sharing the face of tetrahedron `t` opposite slot `slot`.
     Face(u32, usize),
+    /// The real tetrahedra around a hull edge that folds over a stuck surface edge: a point
+    /// seeing all of them shortens the fold's ring to just that edge's ends, so the fold flip
+    /// (`Flipper::cap_hull_fold`) can finish.
+    HullFold(u32, u32),
 }
 
 /// The surface as the inside test needs it: its triangles and their bounding boxes.
@@ -208,6 +214,14 @@ impl Flipper {
         scale: f64,
     ) -> Result<Placed, TetraError> {
         let seeds = match obstruction {
+            Obstruction::HullFold(a, b) => {
+                let Some((_, tets)) = self.ring_public(a, b) else {
+                    return Ok(Placed::NotPlaced { no_room: false });
+                };
+                tets.into_iter()
+                    .filter(|&t| !self.core.tets[t as usize].contains(&GHOST))
+                    .collect()
+            }
             Obstruction::Edge(a, b) => {
                 let Some((_, tets)) = self.ring_public(a, b) else {
                     return Ok(Placed::NotPlaced { no_room: false });

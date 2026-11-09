@@ -497,11 +497,17 @@ fn recover_edge_with_points(
         let (obstruction, base) = match entry {
             Entry::Face(t, slot) => {
                 let face = FACE[slot].map(|p| recovery.flipper.core.tets[t as usize][p]);
-                let [a, b, c] = face.map(|f| points[f as usize]);
-                (
-                    Obstruction::Face(t, slot),
-                    segment_plane_crossing(pu, pv, a, b, c),
-                )
+                match recovery.flipper.hull_fold_over(face, u, v) {
+                    Some((a, b)) => (Obstruction::HullFold(a, b), midpoint(pu, pv)),
+                    None => {
+                        let points = &recovery.flipper.core.points;
+                        let [a, b, c] = face.map(|f| points[f as usize]);
+                        (
+                            Obstruction::Face(t, slot),
+                            segment_plane_crossing(pu, pv, a, b, c),
+                        )
+                    }
+                }
             }
             Entry::Edge(a, b) => {
                 let (pa, pb) = (points[a as usize], points[b as usize]);

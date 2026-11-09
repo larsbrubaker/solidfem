@@ -1,6 +1,9 @@
 // Closed surfaces with outward winding, built from simple geometry. `Surface` welds equal
 // coordinates (by their bits) so shapes are described face by face without tracking shared
 // vertices; a quad is counterclockwise seen from outside the solid and split on one diagonal.
+// Every sine and cosine here is `sin_cos`, plain `+ - * /`, so a shape is the same bits on every
+// system: a platform's math library differs in its last bits, which changes which near-flat faces
+// a rotated shape has.
 
 use std::collections::HashMap;
 use std::f64::consts::TAU;
@@ -53,11 +56,31 @@ impl Surface {
     }
 }
 
-/// A rotation by exact (rounded) cosines: previously exactly coplanar faces become near-coplanar.
-pub fn rotated(surface: &Surface) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
-    let (sa, ca) = (0.71_f64.sin(), 0.71_f64.cos());
-    let (sb, cb) = (1.13_f64.sin(), 1.13_f64.cos());
-    let (sc, cc) = (0.37_f64.sin(), 0.37_f64.cos());
+/// The sine and cosine of `angle` by a Taylor series in plain `+ - * /`, which every IEEE platform
+/// rounds identically: the platform's `sin` and `cos` differ in their last bits from one math
+/// library to the next, and a test's input must be the same bits on every system. Accurate to a
+/// few units in the last place, which is all a test shape needs.
+pub fn sin_cos(angle: f64) -> (f64, f64) {
+    let x = angle - TAU * (angle / TAU).round_ties_even();
+    let (mut term, mut sine, mut cosine) = (1.0_f64, 0.0_f64, 1.0_f64);
+    for k in 1..40 {
+        term = term * x / k as f64;
+        match k % 4 {
+            1 => sine += term,
+            2 => cosine -= term,
+            3 => sine -= term,
+            _ => cosine += term,
+        }
+    }
+    (sine, cosine)
+}
+
+/// The surface turned by intrinsic Z-Y-X angles (radians): exactly coplanar faces become only
+/// nearly coplanar.
+pub fn rotated_by(surface: &Surface, angles: [f64; 3]) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+    let (sa, ca) = sin_cos(angles[0]);
+    let (sb, cb) = sin_cos(angles[1]);
+    let (sc, cc) = sin_cos(angles[2]);
     let matrix = [
         [ca * cb, ca * sb * sc - sa * cc, ca * sb * cc + sa * sc],
         [sa * cb, sa * sb * sc + ca * cc, sa * sb * cc - ca * sc],
@@ -75,6 +98,11 @@ pub fn rotated(surface: &Surface) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
         })
         .collect();
     (points, surface.triangles.clone())
+}
+
+/// The fixed rotation the shape tests use.
+pub fn rotated(surface: &Surface) -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
+    rotated_by(surface, [0.71, 1.13, 0.37])
 }
 
 /// A box with outward faces, each split into `n x n` quads.
@@ -206,11 +234,9 @@ pub fn plate_with_holes(
                     let rim: Vec<[f64; 2]> = (0..count)
                         .map(|i| {
                             if round {
-                                let angle = TAU * i as f64 / count as f64 + TAU * 0.625;
-                                [
-                                    centre[0] + radius * angle.cos(),
-                                    centre[1] + radius * angle.sin(),
-                                ]
+                                let (sine, cosine) =
+                                    sin_cos(TAU * i as f64 / count as f64 + TAU * 0.625);
+                                [centre[0] + radius * cosine, centre[1] + radius * sine]
                             } else {
                                 let o = outline[i];
                                 [
@@ -287,8 +313,8 @@ pub fn prism(n: usize, radius: f64, height: f64, zigzag: bool) -> Surface {
     let mut s = Surface::default();
     let rim: Vec<[f64; 2]> = (0..n)
         .map(|i| {
-            let angle = TAU * i as f64 / n as f64;
-            [radius * angle.cos(), radius * angle.sin()]
+            let (sine, cosine) = sin_cos(TAU * i as f64 / n as f64);
+            [radius * cosine, radius * sine]
         })
         .collect();
     for i in 0..n {
@@ -354,7 +380,10 @@ pub fn schoenhardt() -> Surface {
 /// The same twisted prism with its two triangles `height` apart.
 pub fn schoenhardt_of_height(height: f64) -> Surface {
     let mut s = Surface::default();
-    let at = |angle: f64, z: f64| [angle.cos(), angle.sin(), z];
+    let at = |angle: f64, z: f64| {
+        let (sine, cosine) = sin_cos(angle);
+        [cosine, sine, z]
+    };
     let twist = 0.6;
     let bottom = [0.0, TAU / 3.0, 2.0 * TAU / 3.0].map(|a| at(a, 0.0));
     let top = [0.0, TAU / 3.0, 2.0 * TAU / 3.0].map(|a| at(a + twist, height));

@@ -7,7 +7,11 @@ mod cases;
 mod check;
 #[path = "surface/errors.rs"]
 mod errors;
+#[path = "surface/instances.rs"]
+mod instances;
 #[path = "surface/resumable.rs"]
 mod resumable;
+#[path = "surface/rotations.rs"]
+mod rotations;
 #[path = "surface/shapes.rs"]
 mod shapes;

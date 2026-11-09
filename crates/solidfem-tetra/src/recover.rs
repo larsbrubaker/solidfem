@@ -18,6 +18,13 @@
 //! inside is recovered triangle by triangle: every mesh edge piercing the region is removed, and
 //! the in-plane faces the mesh then has inside the boundary become the surface.
 //!
+//! **A fold of the hull.** When rounding folds a nearly flat quad outward along the diagonal the
+//! surface does not use, the wanted edge runs just inside a hull edge that no flip can remove: a
+//! hull edge only goes when its two hull faces are exactly coplanar. The walk notices a hull edge
+//! whose ring runs between the wanted edge's two ends and uses the fold flip in `flips.rs` (or a
+//! point inside the solid shortens the ring first, `steiner.rs`). A relief flip made along the
+//! way can happen to create the wanted edge itself, so every give-up re-checks whether it exists.
+//!
 //! **Refusal.** The flips are local and can be blocked (the Schoenhardt polyhedron admits no
 //! tetrahedralization without a new point). A constraint that makes no progress is retried in a
 //! later round, when others may have opened its way; when a round finishes nothing, what remains
@@ -25,7 +32,7 @@
 
 use std::collections::HashSet;
 
-use crate::core::GHOST;
+use crate::core::{FACE, GHOST};
 use crate::error::TetraError;
 use crate::flips::{edge_key, face_key, Flipper, Target};
 use crate::predicates::orient;
@@ -56,24 +63,40 @@ pub(crate) fn recover_edge(flipper: &mut Flipper, u: u32, v: u32) -> Result<bool
         match entry {
             Entry::Edge(a, b) => {
                 if !flipper.remove_edge(a, b, Target::Edge(u, v))? {
-                    return Ok(false);
+                    return Ok(flipper.find_edge(u, v).is_some());
                 }
             }
-            Entry::Face(t, slot) => match flipper.remove_face(t, slot)? {
-                Ok(()) => {}
-                Err(blocked) => {
-                    let mut flipped = false;
-                    for (a, b) in blocked.edges {
-                        if flipper.remove_edge(a, b, Target::Edge(u, v))? {
-                            flipped = true;
-                            break;
-                        }
-                    }
-                    if !flipped {
-                        return Ok(false);
+            Entry::Face(t, slot) => {
+                // A walk blocked by a hull edge with the target edge joining its ring's ends runs just
+                // under a fold of the hull; only the fold flip makes it.
+                let tet = flipper.core.tets[t as usize];
+                let face = FACE[slot].map(|position| tet[position]);
+                let mut folded = false;
+                for (a, b) in [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])] {
+                    if flipper.cap_fold_of(a, b, u, v)? {
+                        folded = true;
+                        break;
                     }
                 }
-            },
+                if folded {
+                    continue;
+                }
+                match flipper.remove_face(t, slot)? {
+                    Ok(()) => {}
+                    Err(blocked) => {
+                        let mut flipped = false;
+                        for (a, b) in blocked.edges {
+                            if flipper.remove_edge(a, b, Target::Edge(u, v))? {
+                                flipped = true;
+                                break;
+                            }
+                        }
+                        if !flipped {
+                            return Ok(flipper.find_edge(u, v).is_some());
+                        }
+                    }
+                }
+            }
         }
     }
     Ok(flipper.find_edge(u, v).is_some())

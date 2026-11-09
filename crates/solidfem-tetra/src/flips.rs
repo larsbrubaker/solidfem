@@ -21,6 +21,10 @@
 //! [`RELIEF_DEPTH`] levels, because a ring is shaped by its neighbours. Those flips stand even if
 //! the edge then stays: each is legal, so the mesh is valid whichever way it ends.
 //!
+//! One more flip keeps a hull edge whose two hull faces fold ([`Flipper::cap_hull_fold`]): the
+//! ring's real tetrahedra are replaced by the chain closed through the wanted surface edge plus one
+//! sliver under the fold, leaving the hull exactly as it is.
+//!
 //! Edges and faces that belong to the input surface are locked: no flip may destroy them. Edges
 //! are removed only by an edge removal and faces only by a face removal or by the removal of one
 //! of their edges, so those are the only places locks are checked.
@@ -41,6 +45,16 @@ const NO_TRIANGULATION: i32 = i32::MAX / 4;
 
 /// How many levels of neighbouring edges an edge removal will flip first to open its ring.
 const RELIEF_DEPTH: u32 = 3;
+
+/// How the ring triangulation is closed along the chord joining the chain's two ends.
+enum Closure {
+    /// The chain goes all the way round the edge; that chord is a side of the ring.
+    Ring,
+    /// The chain ends at a hull edge whose two hull faces are coplanar, split along the chord.
+    FlatHull,
+    /// The chain ends at a hull edge whose two hull faces fold, which a sliver tetrahedron keeps.
+    Sliver,
+}
 
 /// What an edge removal should favour.
 #[derive(Clone, Copy)]
@@ -337,14 +351,19 @@ impl Flipper {
             ring.rotate_left(position + 1);
             tets.rotate_left(position + 1);
             if !self.ghost_ring_is_flat(p, q, &ring) {
-                return Ok(false);
+                return self.cap_hull_fold(p, q, &ring, &tets, target);
             }
         }
         let chain = if ghost.is_some() { n - 1 } else { n };
         if chain < 2 {
             return Ok(false);
         }
-        let Some(new) = self.triangulate_ring(p, q, &ring[..chain], ghost.is_some(), target) else {
+        let closure = if ghost.is_some() {
+            Closure::FlatHull
+        } else {
+            Closure::Ring
+        };
+        let Some(new) = self.triangulate_ring(p, q, &ring[..chain], closure, target) else {
             return Ok(false);
         };
         self.apply(&tets, &new)?;
@@ -354,6 +373,90 @@ impl Flipper {
             _ => self.counts.larger += 1,
         }
         Ok(true)
+    }
+
+    /// The flip that makes target edge `(u, v)` under a fold of the hull. `(p, q)` is a hull edge
+    /// whose two hull faces are not coplanar, `ring` is its ring rotated so the point at infinity
+    /// is last, and the surface edge `(u, v)` joins the ring's two ends: it runs just inside the
+    /// fold, and no sequence of ordinary flips can make it, because a hull edge that is not flat
+    /// can never be removed and points added inside the solid leave the fold where it is. The ring's
+    /// real tetrahedra are replaced by the chain closed through `(u, v)` and one sliver
+    /// `(p, q, u, v)` that keeps the hull's fold, leaving the hull faces untouched; exact
+    /// positive volume of every new tetrahedron makes the region the same.
+    pub(crate) fn cap_hull_fold(
+        &mut self,
+        p: u32,
+        q: u32,
+        ring: &[u32],
+        tets: &[u32],
+        target: Target,
+    ) -> Result<bool, TetraError> {
+        let Target::Edge(u, v) = target else {
+            return Ok(false);
+        };
+        let n = ring.len();
+        let (first, last) = (ring[0], ring[n - 2]);
+        if n < 4 || !((first == u && last == v) || (first == v && last == u)) {
+            return Ok(false);
+        }
+        let sliver = [p, q, first, last];
+        if !self.tet_positive(&sliver) {
+            return Ok(false);
+        }
+        let Some(new) = self.triangulate_ring(p, q, &ring[..n - 1], Closure::Sliver, target) else {
+            return Ok(false);
+        };
+        self.apply(&tets[..n - 2], &new)?;
+        self.counts.larger += 1;
+        Ok(true)
+    }
+
+    /// The hull edge of `face` that folds over surface edge `(u, v)`, its ring running between the
+    /// two ends of that edge, if there is one.
+    pub(crate) fn hull_fold_over(&mut self, face: [u32; 3], u: u32, v: u32) -> Option<(u32, u32)> {
+        let edges = [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])];
+        edges.into_iter().find(|&(a, b)| {
+            if self.locked_edges.contains(&edge_key(a, b)) {
+                return false;
+            }
+            let Some((mut ring, _)) = self.ring(a, b) else {
+                return false;
+            };
+            let Some(position) = ring.iter().position(|&w| w == GHOST) else {
+                return false;
+            };
+            ring.rotate_left(position + 1);
+            let n = ring.len();
+            n >= 4
+                && !self.ghost_ring_is_flat(a, b, &ring)
+                && ((ring[0] == u && ring[n - 2] == v) || (ring[0] == v && ring[n - 2] == u))
+        })
+    }
+
+    /// Tries [`Flipper::cap_hull_fold`] on the hull edge `(a, b)`, for a walk blocked by a face
+    /// that contains it. Returns whether the edge `(u, v)` now exists under the fold.
+    pub(crate) fn cap_fold_of(
+        &mut self,
+        a: u32,
+        b: u32,
+        u: u32,
+        v: u32,
+    ) -> Result<bool, TetraError> {
+        if self.locked_edges.contains(&edge_key(a, b)) {
+            return Ok(false);
+        }
+        let Some((mut ring, mut tets)) = self.ring(a, b) else {
+            return Ok(false);
+        };
+        let Some(position) = ring.iter().position(|&w| w == GHOST) else {
+            return Ok(false);
+        };
+        ring.rotate_left(position + 1);
+        tets.rotate_left(position + 1);
+        if self.ghost_ring_is_flat(a, b, &ring) {
+            return Ok(false);
+        }
+        self.cap_hull_fold(a, b, &ring, &tets, Target::Edge(u, v))
     }
 
     /// Whether a hull edge can be removed: `ring` ends with the point at infinity, the two hull
@@ -387,7 +490,7 @@ impl Flipper {
         p: u32,
         q: u32,
         chain: &[u32],
-        ghost: bool,
+        closure: Closure,
         target: Target,
     ) -> Option<Vec<[u32; 4]>> {
         let m = chain.len() - 1;
@@ -412,7 +515,11 @@ impl Flipper {
                         continue;
                     }
                     // The chord closing the interval is new, unless it is a side of the ring.
-                    let closing = if i == 0 && j == m && !ghost { 0 } else { chord };
+                    let closing = if i == 0 && j == m && matches!(closure, Closure::Ring) {
+                        0
+                    } else {
+                        chord
+                    };
                     let cost = left + right + closing;
                     if cost < best[i * width + j] {
                         best[i * width + j] = cost;
@@ -439,10 +546,15 @@ impl Flipper {
             stack.push((i, k));
             stack.push((k, j));
         }
-        if ghost {
-            // The hull keeps its two flat faces, now split along the chord closing the chain.
-            tets.push([chain[0], GHOST, chain[m], p]);
-            tets.push([chain[0], chain[m], GHOST, q]);
+        match closure {
+            Closure::Ring => {}
+            Closure::FlatHull => {
+                // The hull keeps its two flat faces, now split along the chord closing the chain.
+                tets.push([chain[0], GHOST, chain[m], p]);
+                tets.push([chain[0], chain[m], GHOST, q]);
+            }
+            // The hull's fold is kept by the sliver between it and the closing chord.
+            Closure::Sliver => tets.push([p, q, chain[0], chain[m]]),
         }
         Some(tets)
     }
