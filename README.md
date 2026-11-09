@@ -53,6 +53,13 @@ it stands.
   triangle mesh to a trustworthy stress result is still unproven beyond these cases.
 - Multigrid is optional and off by default. Thin plates still need around a thousand or more
   iterations.
+- **Real-part benchmarks are mixed.** The `solidfem-benchmarks` runner builds each part, meshes it
+  and judges it against a limit set in advance. Passing: a thin strip, a thick ring, NAFEMS LE1, a
+  hook and a nominal snap-fit strain. An L-bracket's deflection is mesh-stable but has no accuracy
+  reference, and its sharp corner is reported as a singularity. Failing: a plate with a hole (peak
+  stress 3.3% high against a 3% limit, from an un-averaged display value), a 1 mm hollow box (not
+  yet converged on refinement), and NAFEMS LE10 and a gear tooth, where the mesher refused a
+  surface at the finer density. Buckling and large deflection are reported as out of scope.
 - Only linear statics: no contact, no large deflection, no buckling, no fatigue, no plasticity. A
   stress past the material's yield says the part would yield, not how it would fail.
 
