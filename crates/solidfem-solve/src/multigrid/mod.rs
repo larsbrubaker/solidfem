@@ -27,6 +27,15 @@
 //! level that still stalls widens its reach and aggregates again, at most three times, before the
 //! hierarchy stops there.
 //!
+//! The default reach is three times the closest neighbour. A real wall has unaligned skins and
+//! midside nodes close to some neighbours and far from others, so a tighter reach follows that
+//! irregularity row by row instead of the wall: at 2.0 a remeshed two-layer strip left 314 of
+//! 2,926 aggregates under three nodes, too few to carry all six rigid-body modes, and needed
+//! 1,127 iterations; at 3.0 the same strip needs 662 and operator complexity falls from 1.66 to
+//! 1.27, while a 158,760-unknown stocky cantilever goes from 36 to 42 iterations in the same
+//! solve time. A wider reach still costs compact parts more than it gains on plates (4.0: 530
+//! iterations on the strip, 57 on the cantilever).
+//!
 //! **Prolongator smoothing is filtered.** Weak couplings are lumped into the diagonal instead of
 //! widening the prolongator, which is what bounds the coarse stencil: without it the 20,000-unknown
 //! plate's first coarse level stored 8.6 times the finest level's values, with it 0.9 times. Only
@@ -85,7 +94,7 @@ pub struct MultigridOptions {
 impl Default for MultigridOptions {
     fn default() -> Self {
         MultigridOptions {
-            neighbour_reach: 2.0,
+            neighbour_reach: 3.0,
             coarse_dofs: 1500,
             max_levels: 12,
             smoother_degree: 3,

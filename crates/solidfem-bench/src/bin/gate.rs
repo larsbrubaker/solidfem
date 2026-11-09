@@ -8,8 +8,13 @@
 //!
 //! `solidfem-gate structured <cells> <nu> <cap-seconds> [width]` builds the plate from a structured
 //! grid (a width other than 100 is the narrower strip reported as additional information);
-//! `solidfem-gate file <path> <edge> <nu> <cap-seconds>` reads a triangle surface from a text file
-//! (`vertex-count face-count`, then `x y z` lines, then `a b c` lines). Run in release.
+//! `solidfem-gate unaligned <cells> <nu> <cap-seconds> [width]` moves the structured plate's
+//! interior skin vertices differently on the two skins, a small and quick stand-in for a remeshed
+//! surface; `solidfem-gate file <path> <edge> <nu> <cap-seconds>` reads a triangle surface from a
+//! text file (`vertex-count face-count`, then `x y z` lines, then `a b c` lines). Run in release.
+//! The cap is looked at every few iterations. `MG_INSPECT` prints the levels and how much of the
+//! wall the finest aggregates span, `GATE_TRACE=<n>` the residual every n iterations, and
+//! `MG_REACH`, `MG_RANGE`, `MG_DEGREE` and `MG_COARSE` override the multigrid options.
 //!
 //! **The reference.** The plate is clamped at x = 0 and loaded by a uniform traction over the x =
 //! L end, total force F. With Poisson's ratio zero there is no anticlastic or clamp restraint, so
@@ -25,17 +30,22 @@ use std::time::Instant;
 
 use robust::{orient3d, Coord3D};
 use solidfem::elastic::{
-    Clock, Material, Model, MultigridOptions, PreconditionerChoice, Quadrature, Report, Solution,
-    StaticStudy, StepOutcome, StudyOptions,
+    Clock, Material, Model, PreconditionerChoice, Quadrature, Report, Solution, StaticStudy,
+    StepOutcome, StudyOptions,
 };
 use solidfem::meshing::quadratic_from_solid;
 use solidfem::tetra::{RefineOptions, Refiner, SolidMesh, StepStatus, SurfaceMesher, HULL};
+use solidfem_bench::gate_diagnostics::{inspect_aggregates, multigrid_options};
 
 const LENGTH: f64 = 100.0;
 const DEFAULT_WIDTH: f64 = 100.0;
 const THICK: f64 = 0.8;
 const LOAD: f64 = 1.0;
 const YOUNGS_MODULUS: f64 = 200_000.0;
+
+/// Solver iterations between looks at the clock. A cycle of multigrid on a large model takes about
+/// a second, so a cap is met to within a few seconds.
+const SOLVE_SLICE: usize = 5;
 
 type Surface = (Vec<[f64; 3]>, Vec<[u32; 3]>);
 
@@ -56,6 +66,19 @@ fn main() {
                 format!("structured {cells} cells"),
             ))
         }),
+        "unaligned" => get(1).parse::<usize>().ok().and_then(|cells| {
+            let nu = get(2).parse::<f64>().ok()?;
+            let cap = get(3).parse::<f64>().ok()?;
+            let width = get(4).parse::<f64>().unwrap_or(DEFAULT_WIDTH);
+            Some((
+                unaligned_plate(cells, width),
+                LENGTH / cells as f64,
+                nu,
+                cap,
+                width,
+                format!("unaligned skins, {cells} cells"),
+            ))
+        }),
         "file" => (|| {
             let surface = read_surface(get(1))?;
             let edge = get(2).parse::<f64>().ok()?;
@@ -74,6 +97,7 @@ fn main() {
     };
     let Some(((points, triangles), edge, nu, cap, width, name)) = parsed else {
         eprintln!("usage: solidfem-gate structured <cells> <nu> <cap-seconds> [width]");
+        eprintln!("       solidfem-gate unaligned <cells> <nu> <cap-seconds> [width]");
         eprintln!("       solidfem-gate file <path> <edge> <nu> <cap-seconds>");
         std::process::exit(2);
     };
@@ -136,6 +160,28 @@ fn structured_plate(cells: usize, width: f64) -> Surface {
             at(cells, j + 1, 1),
             at(cells, j, 1),
         );
+    }
+    (points, triangles)
+}
+
+/// The plate with square cells, each interior skin vertex moved within its cell by a different,
+/// sign-alternating amount on the two skins, so the top and bottom triangulations share no column
+/// away from the rim: the small, quick stand-in for a remeshed surface.
+fn unaligned_plate(cells: usize, width: f64) -> Surface {
+    let (mut points, triangles) = structured_plate(cells, width);
+    let size = LENGTH / cells as f64;
+    let rows = (width / size).round().max(1.0) as usize;
+    for p in &mut points {
+        let (i, j) = (
+            (p[0] / size).round() as usize,
+            (p[1] / (width / rows as f64)).round() as usize,
+        );
+        if i == 0 || j == 0 || i == cells || j == rows {
+            continue;
+        }
+        let sign = if p[2] > 0.0 { 1.0 } else { -1.0 };
+        p[0] += 0.31 * size * sign * if (i + j).is_multiple_of(2) { 1.0 } else { -1.0 };
+        p[1] += 0.23 * size * sign * if i.is_multiple_of(2) { 1.0 } else { -1.0 };
     }
     (points, triangles)
 }
@@ -323,7 +369,7 @@ fn run_gate(
         model,
         StudyOptions {
             clock: Some(clock),
-            preconditioner: PreconditionerChoice::Multigrid(MultigridOptions::default()),
+            preconditioner: PreconditionerChoice::Multigrid(multigrid_options()),
             ..StudyOptions::default()
         },
         &mut || false,
@@ -346,11 +392,20 @@ fn run_gate(
             r.total_dofs, r.free_dofs, r.nonzeros, r.iterations, r.relative_residual, r.at_rounding_floor, r.assembly_seconds, r.preconditioner_seconds, r.solve_seconds, r.recovery_seconds
         )
     };
+    if std::env::var("MG_INSPECT").is_ok() {
+        if let Some(multigrid) = study.multigrid() {
+            inspect_aggregates(multigrid, &mesh);
+        }
+    }
+    let trace_every = std::env::var("GATE_TRACE")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok());
     let solve_start = Instant::now();
     let mut converged = false;
     let mut last_print = 0.0_f64;
+    let mut next_trace = trace_every.unwrap_or(u64::MAX);
     loop {
-        match study.step(1000, &mut || false) {
+        match study.step(SOLVE_SLICE, &mut || false) {
             Ok(StepOutcome::Converged(_)) => {
                 converged = true;
                 break;
@@ -360,6 +415,16 @@ fn run_gate(
             Err(error) => return fail(&format!("solve failed: {error}")),
         }
         let spent = solve_start.elapsed().as_secs_f64();
+        if let Some(every) = trace_every {
+            let r = study.report();
+            if r.iterations >= next_trace {
+                println!(
+                    "  iteration {}: residual {:.3e}, {spent:.1} s",
+                    r.iterations, r.relative_residual
+                );
+                next_trace = r.iterations + every;
+            }
+        }
         if spent - last_print >= 120.0 {
             let r = study.report();
             println!(

@@ -10,7 +10,10 @@ use solidfem::elastic::{
     PcgOptions, PreconditionerChoice, Quadrature, StaticStudy, StepOutcome, StudyBuilder,
     StudyOptions,
 };
+use solidfem::mesh::QuadraticTetMesh;
+use solidfem::meshing::quadratic_from_solid;
 use solidfem::solve::{CsrMatrix, Multigrid, MultigridSetup, Preconditioner, SetupStatus};
+use solidfem::tetra::{RefineOptions, Refiner, StepStatus, SurfaceMesher};
 
 use crate::support::{bar, faces_at, fix_root, mean_displacement};
 
@@ -295,11 +298,11 @@ fn two_materials_in_series_agree_with_jacobi() {
 }
 
 /// Iterations and level count of the multigrid at residual 1e-9 on a clamped end-loaded box,
-/// coarsened down to 300 values so even the smallest mesh has real levels.
+/// coarsened down to 100 values so even the smallest mesh has real levels.
 fn iterations_on(size: [f64; 3], divisions: [usize; 3]) -> (u64, usize) {
     let model = clamped_end_loaded(size, divisions, steel(), [0.0, 0.0, -1.0]);
     let choice = PreconditionerChoice::Multigrid(MultigridOptions {
-        coarse_dofs: 300,
+        coarse_dofs: 100,
         ..MultigridOptions::default()
     });
     let mut study = StaticStudy::new(
@@ -492,4 +495,150 @@ fn cancelling_during_setup_and_during_the_solve_stops_each_promptly() {
         Some(ModelError::NotFinished)
     );
     let _ = mean_displacement;
+}
+
+/// A 2.5 mm-celled 40 x 20 x 0.8 plate whose interior skin vertices are moved within their cells
+/// differently on the two skins, so no column lines up: the wall a remeshed surface really has.
+fn unaligned_thin_plate() -> QuadraticTetMesh {
+    let (cells, rows) = (16usize, 8usize);
+    let (length, width, thick) = (40.0, 20.0, 0.8);
+    let (hx, hy) = (length / cells as f64, width / rows as f64);
+    let at = |i: usize, j: usize, layer: usize| ((layer * (cells + 1) + i) * (rows + 1) + j) as u32;
+    let mut points = Vec::new();
+    for layer in 0..2 {
+        for i in 0..=cells {
+            for j in 0..=rows {
+                let on_rim = i == 0 || j == 0 || i == cells || j == rows;
+                let sign = if layer == 1 { 1.0 } else { -1.0 };
+                let (dx, dy) = if on_rim {
+                    (0.0, 0.0)
+                } else {
+                    (
+                        0.31 * hx * sign * if (i + j).is_multiple_of(2) { 1.0 } else { -1.0 },
+                        0.23 * hy * sign * if i.is_multiple_of(2) { 1.0 } else { -1.0 },
+                    )
+                };
+                points.push([i as f64 * hx + dx, j as f64 * hy + dy, layer as f64 * thick]);
+            }
+        }
+    }
+    let mut triangles = Vec::new();
+    let mut quad = |a: u32, b: u32, c: u32, d: u32| {
+        triangles.push([a, b, c]);
+        triangles.push([a, c, d]);
+    };
+    for i in 0..cells {
+        for j in 0..rows {
+            quad(
+                at(i, j, 1),
+                at(i + 1, j, 1),
+                at(i + 1, j + 1, 1),
+                at(i, j + 1, 1),
+            );
+            quad(
+                at(i, j, 0),
+                at(i, j + 1, 0),
+                at(i + 1, j + 1, 0),
+                at(i + 1, j, 0),
+            );
+        }
+        quad(at(i, 0, 0), at(i + 1, 0, 0), at(i + 1, 0, 1), at(i, 0, 1));
+        quad(
+            at(i + 1, rows, 0),
+            at(i, rows, 0),
+            at(i, rows, 1),
+            at(i + 1, rows, 1),
+        );
+    }
+    for j in 0..rows {
+        quad(at(0, j + 1, 0), at(0, j, 0), at(0, j, 1), at(0, j + 1, 1));
+        quad(
+            at(cells, j, 0),
+            at(cells, j + 1, 0),
+            at(cells, j + 1, 1),
+            at(cells, j, 1),
+        );
+    }
+    let mut mesher = SurfaceMesher::new(points, triangles).expect("valid surface");
+    assert!(matches!(
+        mesher.step(usize::MAX, &mut || false),
+        Ok(StepStatus::Done)
+    ));
+    let solid = mesher.result().expect("recovered");
+    let size = 1.5 * hx;
+    let options = RefineOptions {
+        layers_through_walls: 2,
+        ..RefineOptions::default()
+    };
+    let mut refiner = Refiner::new(solid, Box::new(move |_| size), options).expect("valid");
+    assert!(matches!(
+        refiner.step(usize::MAX, &mut || false),
+        Ok(StepStatus::Done)
+    ));
+    let refined = refiner.result().expect("refined");
+    quadratic_from_solid(&refined, Quadrature::FourPoint).expect("upgrades")
+}
+
+/// The iteration count and the finest aggregates' count and undersized count for `reach`.
+fn unaligned_plate_iterations(reach: f64) -> (u64, usize, usize) {
+    let mesh = unaligned_thin_plate();
+    let material = Material {
+        youngs_modulus: 200_000.0,
+        poisson_ratio: 0.0,
+    };
+    let mut model = Model::new(mesh.clone(), material);
+    fix_root(&mut model);
+    for face in faces_at(&mesh, 40.0) {
+        model.add_traction(face, [0.0, 0.0, -1.0]);
+    }
+    let choice = PreconditionerChoice::Multigrid(MultigridOptions {
+        neighbour_reach: reach,
+        ..MultigridOptions::default()
+    });
+    let mut study = StaticStudy::new(
+        model,
+        StudyOptions {
+            preconditioner: choice,
+            ..StudyOptions::default()
+        },
+        &mut || false,
+    )
+    .expect("valid");
+    let aggregates = study.multigrid().expect("multigrid").aggregates(0).to_vec();
+    let count = 1 + aggregates.iter().copied().max().unwrap_or(0) as usize;
+    let mut size = vec![0usize; count];
+    for a in &aggregates {
+        size[*a as usize] += 1;
+    }
+    let undersized = size.iter().filter(|s| **s < 3).count();
+    loop {
+        match study.step(500, &mut || false).expect("solves") {
+            StepOutcome::Converged(_) => break,
+            StepOutcome::Running(_) => {}
+            StepOutcome::Cancelled(_) => panic!("nothing cancelled"),
+        }
+    }
+    (study.report().iterations, count, undersized)
+}
+
+#[test]
+fn the_default_multigrid_handles_unaligned_two_layer_walls_better_than_the_narrow_reach() {
+    let narrow = 2.0;
+    let default = MultigridOptions::default().neighbour_reach;
+    let (narrow_iterations, narrow_count, narrow_small) = unaligned_plate_iterations(narrow);
+    let (iterations, count, small) = unaligned_plate_iterations(default);
+    eprintln!(
+        "reach {narrow}: {narrow_iterations} iterations, {narrow_small} of {narrow_count} aggregates under three nodes; reach {default}: {iterations} iterations, {small} of {count}"
+    );
+    // An aggregate of fewer than three nodes cannot carry the six rigid-body modes, so it leaves
+    // coarse values dead; a solver user's wall should have almost none. The share is a budget: one
+    // in twenty still leaves nineteen of twenty aggregates able to carry the wall's bending.
+    assert!(
+        small * 20 <= count,
+        "{small} of {count} aggregates are under three nodes"
+    );
+    assert!(
+        iterations < narrow_iterations,
+        "the default took {iterations} iterations, the narrow reach {narrow_iterations}"
+    );
 }
