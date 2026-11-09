@@ -220,7 +220,7 @@ fn run_gate(
     let refined = refiner.result().expect("finished refinement has a result");
     let report = refiner.report();
     println!(
-        "phase refinement: {:.3} s, {} tets, {} points; layer points {}, dropped {}, thin-wall vertices {}, too thin {}, size points {}; min dihedral before {:.2} after {:.2}, mean after {:.2}",
+        "phase refinement: {:.3} s, {} tets, {} points; layer points {}, dropped {}, thin-wall vertices {}, too thin {}, through edges split {}, refused {}, size points {}; min dihedral before {:.2} after {:.2}, mean after {:.2}",
         t0.elapsed().as_secs_f64(),
         refined.tets.len(),
         refined.points.len(),
@@ -228,6 +228,8 @@ fn run_gate(
         report.layer_points_dropped,
         report.thin_wall_vertices,
         report.walls_too_thin_for_rounding,
+        report.through_edges_split,
+        report.through_edges_refused,
         report.size_points,
         report.before.min_degrees,
         report.after.min_degrees,
@@ -241,7 +243,9 @@ fn run_gate(
     println!("contracts: surface bits identical, every tet exactly positive, volume matches, added points strictly inside: PASS");
 
     // Layers through the wall, by a walk along columns.
-    let layers = measure_layers(&refined, edge, THICK, width);
+    // Measured on the wall this surface really has: a file may carry the thickness rounded to f32.
+    let wall = surface_points.iter().map(|p| p[2]).fold(f64::MIN, f64::max);
+    let layers = measure_layers(&refined, edge, wall, width);
     println!(
         "layers away from the rim ({} columns, margin {:.1} mm): at least two tets everywhere = {}, none crossing both skins = {} ({} columns have one), fewest tets {}, largest span {:.4} of a {:.1} wall; columns missed {}",
         layers.away_columns,
@@ -442,8 +446,9 @@ fn benchmark(
     let expected_stress = LOAD * (LENGTH / 2.0) * (THICK / 2.0) / inertia;
     let (mut stress, mut samples) = (0.0, 0usize);
     let corners = mesh.vertex_count();
+    let top = mesh.nodes().iter().map(|n| n[2]).fold(f64::MIN, f64::max);
     for (node, position) in mesh.nodes()[..corners].iter().enumerate() {
-        if (position[2] - THICK).abs() < 1e-9
+        if (position[2] - top).abs() < 1e-9
             && (position[0] - LENGTH / 2.0).abs() < 1.5
             && position[1] > 0.1 * width
             && position[1] < 0.9 * width

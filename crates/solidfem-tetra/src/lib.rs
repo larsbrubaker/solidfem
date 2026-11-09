@@ -16,8 +16,9 @@
 //!
 //! [`Refiner`] takes that finished solid and adds points strictly inside it: layers through thin
 //! walls, points driven by a caller's size function, and a pass that improves the worst
-//! tetrahedra, leaving the surface exactly as it was (`refine.rs`, `layers.rs`, `interior.rs`,
-//! `quality.rs`).
+//! tetrahedra, leaving the surface exactly as it was (`refine.rs`, `layers.rs`, `skins.rs`,
+//! `interior.rs`, `quality.rs`). Requesting layers also guarantees that no tetrahedron joins the
+//! two skins of a thin wall.
 //!
 //! The rules that span its files:
 //! - **Exact decisions.** Every geometric decision is an exact predicate (`predicates.rs`), so a
@@ -32,8 +33,10 @@
 //!   a decision about the caller's surface, so a repeated point is
 //!   [`TetraError::DuplicatePoint`] rather than a silent merge.
 //!
-//! Layout: `refine.rs` is the refinement interface, `layers.rs` the through-wall points,
-//! `interior.rs` the insertion, `quality.rs` the improvement, `surface.rs` is the surface-recovery interface and classifies the solid, `patches.rs`
+//! Layout: `refine.rs` is the refinement interface, `layers.rs` the through-wall points, `skins.rs`
+//! the opposite skins of a wall and the splitting of the edges joining them, `interior.rs` the
+//! insertion, `quality.rs` the improvement, `surface.rs` is the surface-recovery interface and
+//! classifies the solid, `patches.rs`
 //! finds the flat regions, `recover.rs` orders the recovery of each constraint, `flips.rs` holds
 //! the flips, `steiner.rs` adds points inside the solid, `triangulator.rs` the
 //! point-set interface and input checks, `order.rs` the insertion order, `core.rs` the tetrahedra,
@@ -50,6 +53,7 @@ mod predicates;
 mod quality;
 mod recover;
 mod refine;
+mod skins;
 mod steiner;
 mod surface;
 mod triangulator;

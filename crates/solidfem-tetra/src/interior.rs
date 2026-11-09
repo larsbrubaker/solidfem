@@ -24,7 +24,50 @@ use crate::predicates::{in_sphere, orient};
 /// A cavity larger than this is left uncarved past it; real cavities are a few dozen tetrahedra.
 const MAX_CAVITY: usize = 512;
 
+/// How far off the requested point an edge-ring split may land before it gives up: the exact
+/// tests can refuse a point rounded just outside a tetrahedron that is nearly flat, and a point
+/// a little along the edge is on the edge just the same.
+const SPLIT_OFFSETS: [f64; 5] = [1.0, 0.875, 1.125, 0.75, 1.25];
+
 impl Flipper {
+    /// Splits edge `(p, q)` at `fraction` of its length from `p` by replacing the ring of
+    /// tetrahedra around it, so nothing away from the edge changes. Only an edge with no ghost
+    /// in its ring can be split, so the new point is strictly inside the solid; every new
+    /// tetrahedron is checked exactly positive first. Returns the new vertex, or `None` when the
+    /// ring refuses every offset of the point.
+    pub(crate) fn split_edge(
+        &mut self,
+        p: u32,
+        q: u32,
+        fraction: f64,
+    ) -> Result<Option<u32>, TetraError> {
+        let Some((ring, cavity)) = self.ring_public(p, q) else {
+            return Ok(None);
+        };
+        if ring.contains(&GHOST) {
+            return Ok(None);
+        }
+        let (from, to) = (self.core.points[p as usize], self.core.points[q as usize]);
+        for scale in SPLIT_OFFSETS {
+            let t = fraction * scale;
+            if t <= 0.0 || t >= 1.0 {
+                continue;
+            }
+            let point = [
+                from[0] + (to[0] - from[0]) * t,
+                from[1] + (to[1] - from[1]) * t,
+                from[2] + (to[2] - from[2]) * t,
+            ];
+            if point == from || point == to || self.first_unseen(&cavity, &point).is_some() {
+                continue;
+            }
+            self.add_steiner(&cavity, point)?;
+            // The vertex count stays below `u32::MAX`, as the input is capped far below it.
+            return Ok(Some(self.core.points.len() as u32 - 1));
+        }
+        Ok(None)
+    }
+
     /// The tetrahedra that must be replaced for `target`, by a walk from `start`: the containing
     /// one, the two sharing a face, or the ring of an edge. `None` when the walk is stopped by
     /// the surface or `target` is on the surface or at a vertex.

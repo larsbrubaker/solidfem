@@ -11,25 +11,32 @@
 //! triangulations, and one poor tetrahedron in the choice is the bad outcome. The interval search
 //! maximises the minimum over the whole ring rather than taking the first legal choice.
 //!
-//! **Layers survive flips.** A flip never adds an edge joining two surface vertices of thin walls
-//! (`crosses_wall`), so the layer points through a wall cannot be stepped over.
+//! **Walls stay split.** A flip never adds an edge joining opposite skins of a thin wall
+//! ([`OppositeSkins`]), so what `skins.rs` removed stays removed. Edges along a skin and edges to
+//! interior points stay free, which is what the flips need to repair the elements a split leaves.
 //!
 //! **Smoothing.** A vertex moves towards the centroid of its neighbours, at the first of a few
 //! step lengths that strictly raises the worst tetrahedron in its star while every tetrahedron
-//! stays exactly positive, so a move never makes anything worse. A layer point moves only in the plane of
-//! the wall it divides, so the layers stay planar.
+//! stays exactly positive, so a move never makes anything worse. A point dividing a wall moves only
+//! in the plane of that wall, so the layers stay planar.
 
 use std::collections::HashMap;
 
 use crate::core::GHOST;
 use crate::error::TetraError;
 use crate::flips::{edge_key, Flipper};
+use crate::skins::OppositeSkins;
 
 /// Rings larger than this are skipped: the search is cubic and big rings give poor elements.
 const MAX_QUALITY_RING: usize = 7;
 
 /// Step lengths tried for one smoothing move, largest first.
 const SMOOTH_STEPS: [f64; 3] = [1.0, 0.5, 0.25];
+
+/// Below this ratio of volume to edge-length product a tetrahedron is treated as flat: a few
+/// thousand units of rounding of the coordinate magnitudes the mesher accepts, far under any
+/// dihedral angle that would matter to the quality pass.
+const FLAT_RELATIVE_VOLUME: f64 = 1e-12;
 
 pub(crate) fn subtract(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
@@ -60,7 +67,23 @@ pub(crate) fn normalized(a: [f64; 3]) -> [f64; 3] {
     }
 }
 
-/// The smallest of the six dihedral angles of a tetrahedron, in degrees.
+/// Whether a tetrahedron is flat within what its coordinates can resolve: its volume determinant
+/// is below [`FLAT_RELATIVE_VOLUME`] of its three edge lengths at a corner multiplied together.
+/// An exactly positive tetrahedron can be flat by this measure, four points in one plane but for
+/// a unit of rounding; its face normals then carry no reliable sign, and reading an angle off
+/// them would rate the worst possible shape as a good one.
+fn flat_to_rounding(p: &[[f64; 3]; 4]) -> bool {
+    let (u, v, w) = (
+        subtract(p[1], p[0]),
+        subtract(p[2], p[0]),
+        subtract(p[3], p[0]),
+    );
+    let volume = dot(u, cross(v, w)).abs();
+    volume <= FLAT_RELATIVE_VOLUME * length(u) * length(v) * length(w)
+}
+
+/// The smallest of the six dihedral angles of a tetrahedron, in degrees, zero for one flat to
+/// rounding (`flat_to_rounding`).
 pub(crate) fn min_dihedral_degrees(points: &[[f64; 3]], tet: &[u32; 4]) -> f64 {
     let p = tet.map(|v| points[v as usize]);
     // The outward normal of the face opposite vertex `i`.
@@ -78,6 +101,9 @@ pub(crate) fn min_dihedral_degrees(points: &[[f64; 3]], tet: &[u32; 4]) -> f64 {
         };
         normalized(oriented)
     });
+    if flat_to_rounding(&p) {
+        return 0.0;
+    }
     let mut smallest = 180.0_f64;
     for i in 0..4 {
         for j in i + 1..4 {
@@ -166,7 +192,7 @@ impl Flipper {
         &mut self,
         slot: u32,
         fixed: &[bool],
-        wall_vertices: &[bool],
+        skins: &OppositeSkins,
         axes: &HashMap<u32, [f64; 3]>,
         target: f64,
     ) -> Result<bool, TetraError> {
@@ -178,13 +204,13 @@ impl Flipper {
         }
         for a in 0..4 {
             for b in a + 1..4 {
-                if self.remove_edge_for_quality(tet[a], tet[b], wall_vertices)? {
+                if self.remove_edge_for_quality(tet[a], tet[b], skins)? {
                     return Ok(true);
                 }
             }
         }
         for face in 0..4 {
-            if self.remove_face_for_quality(slot, face, wall_vertices)? {
+            if self.remove_face_for_quality(slot, face, skins)? {
                 return Ok(true);
             }
         }
@@ -204,7 +230,7 @@ impl Flipper {
         &mut self,
         p: u32,
         q: u32,
-        wall_vertices: &[bool],
+        skins: &OppositeSkins,
     ) -> Result<bool, TetraError> {
         if self.locked_edges.contains(&edge_key(p, q)) {
             return Ok(false);
@@ -216,7 +242,7 @@ impl Flipper {
             return Ok(false);
         }
         let old = self.worst_of(&tets);
-        let Some((new_worst, new)) = self.best_ring(p, q, &ring, wall_vertices) else {
+        let Some((new_worst, new)) = self.best_ring(p, q, &ring, skins) else {
             return Ok(false);
         };
         if new_worst <= old {
@@ -238,7 +264,7 @@ impl Flipper {
         p: u32,
         q: u32,
         ring: &[u32],
-        wall_vertices: &[bool],
+        skins: &OppositeSkins,
     ) -> Option<(f64, Vec<[u32; 4]>)> {
         let m = ring.len() - 1;
         let width = m + 1;
@@ -257,7 +283,7 @@ impl Flipper {
                     }
                     // A chord other than the ring's closing side is a new edge.
                     let is_new = !(i == 0 && j == m);
-                    if is_new && crosses_wall(wall_vertices, ring[i], ring[j]) {
+                    if is_new && skins.joins(&self.core.points, ring[i], ring[j]) {
                         continue;
                     }
                     let pair = ring_pair(p, q, ring[i], ring[k], ring[j]);
@@ -298,7 +324,7 @@ impl Flipper {
         &mut self,
         slot: u32,
         face: usize,
-        wall_vertices: &[bool],
+        skins: &OppositeSkins,
     ) -> Result<bool, TetraError> {
         let tet = self.core.tets[slot as usize];
         let u = tet[face];
@@ -310,7 +336,7 @@ impl Flipper {
         let Some(y) = other.iter().copied().find(|v| !tet.contains(v)) else {
             return Ok(false);
         };
-        if crosses_wall(wall_vertices, u, y) {
+        if skins.joins(&self.core.points, u, y) {
             return Ok(false);
         }
         let positions = crate::core::FACE[face].map(|p| tet[p]);
@@ -333,8 +359,8 @@ impl Flipper {
     }
 
     /// Moves `vertex` towards the centroid of its neighbours where that raises the worst
-    /// tetrahedron around it, a layer point only in the plane of its wall (`axis` normal to it). Returns whether
-    /// it moved.
+    /// tetrahedron around it, a point dividing a wall only in that wall's plane (`axis` is its
+    /// normal). Returns whether it moved.
     fn smooth_vertex(&mut self, vertex: u32, axis: Option<[f64; 3]>) -> bool {
         let star = self.tets_around(vertex);
         if star
@@ -395,15 +421,6 @@ impl Flipper {
         self.core.points[vertex as usize] = start;
         false
     }
-}
-
-/// Whether a new edge would join two surface vertices of thin walls. Layers are the whole point
-/// of those walls, and such an edge is the only way a flip can undo them, by crossing the wall
-/// without touching a layer point. A flip may still add edges along a wall surface or to a layer
-/// point.
-fn crosses_wall(wall_vertices: &[bool], u: u32, v: u32) -> bool {
-    let wall = |w: u32| wall_vertices.get(w as usize).copied().unwrap_or(false);
-    wall(u) && wall(v)
 }
 
 /// The two tetrahedra of ring triangle `(i, k, j)`, as `flips.rs` builds them.

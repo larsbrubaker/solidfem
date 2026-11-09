@@ -1,14 +1,20 @@
 //! The public face of refinement: [`Refiner`] takes a finished [`SolidMesh`] and through resumable
-//! steps puts points inside it, by through-thickness layers across thin walls (`layers.rs`), by
-//! a caller's size function, then improves the worst tetrahedra (`quality.rs`). Points go in
-//! through `interior.rs`, the only way a vertex is created, and only strictly inside the solid.
+//! steps puts points inside it, by through-thickness layers across thin walls (`layers.rs`) and
+//! the removal of every edge still joining the walls' opposite skins (`skins.rs`), by a caller's
+//! size function, then improves the worst tetrahedra (`quality.rs`). Points go in through
+//! `interior.rs`, the only way a vertex is created, and only strictly inside the solid.
 //!
 //! **What is fixed.** Every boundary face of the input stays a boundary face with the same bits
 //! and vertices: surface triangles are never split and surface vertices never move. Boundary
 //! faces and edges are locked; everything else is the mesher's to change.
 //!
-//! **Layers stay layers.** A layer point is smoothed only across its wall, along the plane of the
-//! surface triangle its ray hit, so a layer stays planar however the plane of the ray leans.
+//! **Layers stay layers.** A point dividing a wall is smoothed only across that wall, in the plane
+//! the wall's own normal defines, so a layer stays planar however the plane of the ray leans.
+//!
+//! **No element joins opposite skins.** The layer stage ends by splitting every interior edge
+//! between opposite skins of a thin wall, and from then on no later stage can restore one: size
+//! points add edges only to themselves and a flip refuses such an edge. So every tetrahedron has
+//! no vertex pair on opposite skins, and any column across a wall crosses at least two of them.
 //!
 //! **Size-driven insertion.** A tetrahedron whose longest interior edge exceeds
 //! [`SIZE_RATIO`]` * size(centroid)` gets a point: its circumcentre where a walk from it reaches
@@ -31,6 +37,7 @@ use crate::layers::{min_layer_thickness, Separation, SurfaceRays};
 use crate::quality::{
     cross, histogram, length, min_dihedral_degrees, normalized, subtract, DihedralHistogram,
 };
+use crate::skins::OppositeSkins;
 use crate::surface::SolidMesh;
 use crate::triangulator::{StepStatus, HULL};
 
@@ -101,6 +108,10 @@ pub struct RefineReport {
     pub layer_points_dropped: usize,
     /// Surface vertices that found a thin wall.
     pub thin_wall_vertices: usize,
+    /// Interior edges joining opposite skins of a thin wall that were split.
+    pub through_edges_split: usize,
+    /// Such edges the exact tests refused at every offset, each left in place and counted.
+    pub through_edges_refused: usize,
     /// Surface vertices across a wall too thin to divide above rounding, so no points were added.
     pub walls_too_thin_for_rounding: usize,
     /// Points added by the size function.
@@ -130,6 +141,11 @@ struct LayerRun {
     magnitude: f64,
 }
 
+struct SplitRun {
+    edges: Vec<(u32, u32)>,
+    cursor: usize,
+}
+
 struct SizeRun {
     cursor: usize,
     round_end: usize,
@@ -148,13 +164,15 @@ struct QualityRun {
 pub struct Refiner {
     flipper: Flipper,
     fixed: Vec<bool>,
-    /// Surface vertices that found a thin wall; flips may not join two of them.
-    wall_vertices: Vec<bool>,
+    /// Which surface vertices stand on opposite skins; no edge may join two that do.
+    skins: OppositeSkins,
+    /// Points dividing a wall, with the wall's normal, which they are not smoothed along.
     axes: HashMap<u32, [f64; 3]>,
     size: SizeFn,
     options: RefineOptions,
     phase: RefinePhase,
     layers: Option<LayerRun>,
+    splits: Option<SplitRun>,
     size_run: SizeRun,
     quality: Option<QualityRun>,
     report: RefineReport,
@@ -181,12 +199,17 @@ impl Refiner {
         }
         let core = Core::from_solid(solid.points.clone(), &solid.tets, &solid.neighbors)?;
         let flipper = Flipper::new(core, locked_edges, locked_faces, Vec::new());
-        let layers = if options.layers_through_walls >= 2 {
-            Some(layer_run(&solid.points, &boundary, &fixed))
+        let (layers, skins) = if options.layers_through_walls >= 2 {
+            let run = layer_run(&solid.points, &boundary, &fixed);
+            let skins = OppositeSkins::new(
+                run.normals.clone(),
+                run.edge_mean.clone(),
+                options.thin_wall_ratio,
+            );
+            (Some(run), skins)
         } else {
-            None
+            (None, OppositeSkins::default())
         };
-        let wall_vertices = vec![false; solid.points.len()];
         let phase = if layers.is_some() {
             RefinePhase::Layers
         } else {
@@ -196,12 +219,13 @@ impl Refiner {
         Ok(Self {
             flipper,
             fixed,
-            wall_vertices,
+            skins,
             axes: HashMap::new(),
             size,
             options,
             phase,
             layers,
+            splits: None,
             size_run: SizeRun {
                 cursor: 0,
                 round_end,
@@ -258,13 +282,19 @@ impl Refiner {
     }
 
     fn advance_layers(&mut self) -> Result<(), TetraError> {
+        if self.splits.is_some() {
+            return self.advance_split();
+        }
         let Some(run) = self.layers.as_mut() else {
             self.phase = RefinePhase::Sizing;
             return Ok(());
         };
         let Some(&vertex) = run.vertices.get(run.cursor) else {
             self.layers = None;
-            self.phase = RefinePhase::Sizing;
+            self.splits = Some(SplitRun {
+                edges: self.skins.through_edges(&self.flipper),
+                cursor: 0,
+            });
             return Ok(());
         };
         run.cursor += 1;
@@ -280,7 +310,6 @@ impl Refiner {
             return Ok(());
         }
         self.report.thin_wall_vertices += 1;
-        self.wall_vertices[vertex as usize] = true;
         let count = self.options.layers_through_walls;
         let layer = hit.distance / f64::from(count);
         if layer < min_layer_thickness(run.magnitude) {
@@ -314,6 +343,34 @@ impl Refiner {
             } else {
                 self.report.layer_points_dropped += 1;
             }
+        }
+        Ok(())
+    }
+
+    /// Splits the next edge joining opposite skins, ending the layer stage when none are left.
+    fn advance_split(&mut self) -> Result<(), TetraError> {
+        let Some(run) = self.splits.as_mut() else {
+            return Ok(());
+        };
+        let Some(&edge) = run.edges.get(run.cursor) else {
+            self.splits = None;
+            self.phase = RefinePhase::Sizing;
+            return Ok(());
+        };
+        run.cursor += 1;
+        self.budget_check()?;
+        let layers = self.options.layers_through_walls;
+        let outcome = self
+            .skins
+            .split_through_edge(&mut self.flipper, edge, layers)?;
+        for &point in &outcome.added {
+            self.axes.insert(point, outcome.axis);
+            self.added += 1;
+        }
+        if outcome.cut {
+            self.report.through_edges_split += 1;
+        } else {
+            self.report.through_edges_refused += 1;
         }
         Ok(())
     }
@@ -450,7 +507,7 @@ impl Refiner {
         let changed = self.flipper.improve_tet(
             slot,
             &self.fixed,
-            &self.wall_vertices,
+            &self.skins,
             &self.axes,
             QUALITY_TARGET_DEGREES,
         )?;
@@ -499,10 +556,14 @@ impl Refiner {
     /// Where the run is now, for reporting.
     pub fn progress(&self) -> RefineProgress {
         let (done, total) = match self.phase {
-            RefinePhase::Layers => self
-                .layers
-                .as_ref()
-                .map_or((0, 0), |run| (run.cursor, run.vertices.len())),
+            RefinePhase::Layers => self.splits.as_ref().map_or_else(
+                || {
+                    self.layers
+                        .as_ref()
+                        .map_or((0, 0), |run| (run.cursor, run.vertices.len()))
+                },
+                |run| (run.cursor, run.edges.len()),
+            ),
             RefinePhase::Sizing => (self.size_run.cursor, self.size_run.round_end),
             RefinePhase::Quality => self
                 .quality
