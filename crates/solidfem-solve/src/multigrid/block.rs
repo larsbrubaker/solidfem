@@ -346,3 +346,40 @@ impl DenseCholesky {
         }
     }
 }
+
+/// A deterministic start value for the power iteration: positive and uncorrelated with node
+/// numbering, so it has a component along any eigenvector the matrix can have. Integer mixing
+/// keeps it bit-identical on every platform.
+pub(super) fn start_value(index: usize) -> f64 {
+    let mixed = (index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    0.5 + (mixed >> 11) as f64 / ((1u64 << 53) as f64)
+}
+
+pub(super) fn apply_block_diagonal(inverse: &[f64], block: usize, x: &[f64], y: &mut [f64]) {
+    let rows = x.len() / block;
+    for row in 0..rows {
+        let d = &inverse[row * block * block..(row + 1) * block * block];
+        for p in 0..block {
+            let mut sum = 0.0;
+            for q in 0..block {
+                sum += d[p * block + q] * x[row * block + q];
+            }
+            y[row * block + p] = sum;
+        }
+    }
+}
+
+pub(super) fn norm2(x: &[f64]) -> f64 {
+    let mut sum = 0.0;
+    for v in x {
+        sum += v * v;
+    }
+    sum.sqrt()
+}
+
+pub(super) fn normalize(x: &mut [f64]) {
+    let norm = norm2(x);
+    for v in x {
+        *v /= norm;
+    }
+}

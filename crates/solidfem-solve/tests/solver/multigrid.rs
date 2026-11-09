@@ -26,6 +26,10 @@ fn block_chain(nodes: usize) -> CsrMatrix {
     matrix
 }
 
+fn positions_for(nodes: usize) -> Vec<[f64; 3]> {
+    (0..nodes).map(|i| [i as f64, 0.0, 0.0]).collect()
+}
+
 fn modes_for(size: usize) -> Vec<f64> {
     (0..size * NEAR_NULL_MODES)
         .map(|i| i as f64 % 7.0 + 1.0)
@@ -36,7 +40,12 @@ fn modes_for(size: usize) -> Vec<f64> {
 fn a_near_null_space_of_the_wrong_length_is_refused_by_name() {
     let matrix = block_chain(4);
     let wrong = modes_for(matrix.size() - 3);
-    let result = MultigridSetup::new(&matrix, &wrong, MultigridOptions::default());
+    let result = MultigridSetup::new(
+        &matrix,
+        &wrong,
+        &positions_for(4),
+        MultigridOptions::default(),
+    );
     match result {
         Err(MultigridError::NearNullLength { expected, found }) => {
             assert_eq!(expected, NEAR_NULL_MODES * matrix.size());
@@ -50,12 +59,38 @@ fn a_near_null_space_of_the_wrong_length_is_refused_by_name() {
 }
 
 #[test]
+fn positions_of_the_wrong_length_are_refused_by_name() {
+    let matrix = block_chain(4);
+    let modes = modes_for(matrix.size());
+    let result = MultigridSetup::new(
+        &matrix,
+        &modes,
+        &positions_for(3),
+        MultigridOptions::default(),
+    );
+    match result {
+        Err(MultigridError::PositionLength { expected, found }) => {
+            assert_eq!((expected, found), (4, 3));
+        }
+        other => panic!(
+            "expected a PositionLength error, got {:?}",
+            other.map(|_| ())
+        ),
+    }
+}
+
+#[test]
 fn a_matrix_without_three_by_three_blocks_is_refused_by_name() {
     // Block size 1: the rows are single scalars, so the first node's rows do not group into 3.
     let links: Vec<[u32; 2]> = vec![[0, 1], [1, 2], [2, 3], [3, 4], [4, 5]];
     let matrix = CsrMatrix::from_block_connectivity(6, 1, links.iter().map(|link| link.as_slice()));
     let near_null = vec![1.0; matrix.size() * NEAR_NULL_MODES];
-    match MultigridSetup::new(&matrix, &near_null, MultigridOptions::default()) {
+    match MultigridSetup::new(
+        &matrix,
+        &near_null,
+        &positions_for(2),
+        MultigridOptions::default(),
+    ) {
         Err(MultigridError::BlockStructure { .. }) => {}
         other => panic!(
             "expected a BlockStructure error, got {:?}",
@@ -68,8 +103,13 @@ fn a_matrix_without_three_by_three_blocks_is_refused_by_name() {
 fn a_cancelled_setup_reports_cancelled_and_stays_cancelled() {
     let matrix = block_chain(4000);
     let modes = modes_for(matrix.size());
-    let mut setup =
-        MultigridSetup::new(&matrix, &modes, MultigridOptions::default()).expect("a valid setup");
+    let mut setup = MultigridSetup::new(
+        &matrix,
+        &modes,
+        &positions_for(4000),
+        MultigridOptions::default(),
+    )
+    .expect("a valid setup");
     let mut polls = 0usize;
     let result = setup.step(usize::MAX, &mut || {
         polls += 1;

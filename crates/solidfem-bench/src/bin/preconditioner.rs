@@ -2,17 +2,69 @@
 //! thin plate. `solidfem-preconditioner <cantilever|plate> <jacobi|multigrid> <nx> <ny> <nz>
 //! <cap-seconds>` builds a structured box of 10-node elements, clamps x = 0, loads the x = L face
 //! and prints the free unknowns, iterations, setup and solve seconds, operator complexity and
-//! hierarchy memory. Run in release; a capped solve reports the residual it reached.
+//! hierarchy memory. Run in release; a capped solve reports the residual it reached. `MG_INSPECT`
+//! prints the levels and the finest aggregates' geometry, `MG_REACH` and the like override the
+//! options, and `MG_SLICE_ROWS` assembles and sets up in slices of that many rows, printing the
+//! longest single call.
 
 use std::time::Instant;
 
 use solidfem::elastic::{
     Clock, Material, Model, MultigridOptions, PreconditionerChoice, StaticStudy, StepOutcome,
-    StudyOptions,
+    StudyBuilder, StudyOptions,
 };
 use solidfem::mesh::{box_tet_mesh, QuadraticTetMesh};
+use solidfem::solve::Multigrid;
 
 const ON_PLANE: f64 = 1e-9;
+
+/// An aggregate's lowest corner, highest corner and member count.
+type Extent = ([f64; 3], [f64; 3], usize);
+
+/// Prints every level's size, and what the finest level's aggregates look like geometrically:
+/// how many nodes they hold, and how far they reach through the wall and across it.
+fn inspect(multigrid: &Multigrid, mesh: &QuadraticTetMesh, size: &[f64; 3]) {
+    let levels = multigrid.level_sizes();
+    let finest = levels[0].2 as f64;
+    for (level, (rows, block, stored)) in levels.iter().enumerate() {
+        println!(
+            "  level {level}: {rows} block rows of {block}, stored values {stored} ({:.2} of finest)",
+            *stored as f64 / finest
+        );
+    }
+    let free: Vec<usize> = (0..mesh.nodes().len())
+        .filter(|n| mesh.nodes()[*n][0].abs() >= ON_PLANE)
+        .collect();
+    let aggregates = multigrid.aggregates(0);
+    if aggregates.is_empty() {
+        return;
+    }
+    let count = 1 + aggregates.iter().copied().max().unwrap_or(0) as usize;
+    let mut reach: Vec<Extent> = vec![([f64::MAX; 3], [f64::MIN; 3], 0usize); count];
+    for (row, aggregate) in aggregates.iter().enumerate() {
+        let p = mesh.nodes()[free[row]];
+        let entry = &mut reach[*aggregate as usize];
+        for (axis, value) in p.iter().enumerate() {
+            entry.0[axis] = entry.0[axis].min(*value);
+            entry.1[axis] = entry.1[axis].max(*value);
+        }
+        entry.2 += 1;
+    }
+    let mean = |pick: &dyn Fn(&Extent) -> f64| reach.iter().map(pick).sum::<f64>() / count as f64;
+    println!(
+        "  level 0 aggregates: {count} for {} rows, mean size {:.1}, largest {}, singletons {}, mean extent x {:.3} y {:.3} z {:.3} (part {} x {} x {})",
+        aggregates.len(),
+        aggregates.len() as f64 / count as f64,
+        reach.iter().map(|r| r.2).max().unwrap_or(0),
+        reach.iter().filter(|r| r.2 == 1).count(),
+        mean(&|r| r.1[0] - r.0[0]),
+        mean(&|r| r.1[1] - r.0[1]),
+        mean(&|r| r.1[2] - r.0[2]),
+        size[0],
+        size[1],
+        size[2],
+    );
+}
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -71,7 +123,7 @@ fn main() {
                     .unwrap_or(default)
             };
             let mut options = MultigridOptions::default();
-            options.strength_threshold = env_or("MG_THETA", options.strength_threshold);
+            options.neighbour_reach = env_or("MG_REACH", options.neighbour_reach);
             options.smoother_range = env_or("MG_RANGE", options.smoother_range);
             options.smoother_degree = env_or("MG_DEGREE", options.smoother_degree as f64) as usize;
             PreconditionerChoice::Multigrid(options)
@@ -83,16 +135,39 @@ fn main() {
     };
     let start = Instant::now();
     let clock: Clock = Box::new(move || start.elapsed().as_secs_f64());
-    let mut study = StaticStudy::new(
-        model,
-        StudyOptions {
-            clock: Some(clock),
-            preconditioner,
-            ..StudyOptions::default()
-        },
-        &mut || false,
-    )
-    .expect("the study builds");
+    let options = StudyOptions {
+        clock: Some(clock),
+        preconditioner,
+        ..StudyOptions::default()
+    };
+    let slice = std::env::var("MG_SLICE_ROWS")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok());
+    let mut study = if let Some(rows) = slice {
+        let mut builder = StudyBuilder::new(model, options).expect("the study builds");
+        let (mut longest, mut calls) = (0.0_f64, 0usize);
+        loop {
+            let begun = Instant::now();
+            let progress = builder.step(rows, &mut || false).expect("builds");
+            longest = longest.max(begun.elapsed().as_secs_f64());
+            calls += 1;
+            if progress.elements_done == progress.elements_total && progress.setup_finished {
+                break;
+            }
+        }
+        println!(
+            "longest single build slice {:.1} ms over {calls} calls of {rows} rows",
+            longest * 1000.0
+        );
+        builder.finish().expect("finished")
+    } else {
+        StaticStudy::new(model, options, &mut || false).expect("the study builds")
+    };
+    if std::env::var("MG_INSPECT").is_ok() {
+        if let Some(multigrid) = study.multigrid() {
+            inspect(multigrid, &mesh, &size);
+        }
+    }
     let solve_start = Instant::now();
     let mut converged = false;
     loop {

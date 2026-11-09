@@ -193,6 +193,11 @@ impl<P: Preconditioner> Pcg<P> {
         &self.x
     }
 
+    /// The preconditioner this solve runs with.
+    pub fn preconditioner(&self) -> &P {
+        &self.preconditioner
+    }
+
     /// The progress reached so far.
     pub fn progress(&self) -> Progress {
         Progress {

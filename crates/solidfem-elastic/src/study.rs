@@ -268,6 +268,14 @@ impl<M: MaterialField> StaticStudy<M> {
         self.model.mesh()
     }
 
+    /// The multigrid hierarchy, when multigrid was chosen, for inspecting what it built.
+    pub fn multigrid(&self) -> Option<&Multigrid> {
+        match self.pcg.preconditioner() {
+            StudyPreconditioner::Multigrid(multigrid) => Some(multigrid),
+            StudyPreconditioner::Jacobi(_) => None,
+        }
+    }
+
     /// The material being solved.
     pub fn material(&self) -> &M {
         &self.model.material
@@ -416,7 +424,21 @@ impl<M: MaterialField> StudyBuilder<M> {
         let start = now(&mut self.clock);
         if self.setup.is_none() {
             let modes = free_rigid_body_modes(self.model.mesh.nodes(), &self.free, self.free_count);
-            self.setup = Some(MultigridSetup::new(&self.matrix, &modes, options)?);
+            let positions: Vec<[f64; 3]> = self
+                .model
+                .mesh
+                .nodes()
+                .iter()
+                .zip(&self.free)
+                .filter(|(_, index)| **index != FIXED)
+                .map(|(point, _)| *point)
+                .collect();
+            self.setup = Some(MultigridSetup::new(
+                &self.matrix,
+                &modes,
+                &positions,
+                options,
+            )?);
         }
         let status = match &mut self.setup {
             Some(setup) => setup.step(budget, cancel),

@@ -1,9 +1,10 @@
-//! Strength of connection and the aggregation of block rows. Connections are strong when the
-//! block norm is large against the geometric mean of the two diagonal block norms, a test that
-//! does not change with units or element size. Aggregation makes three passes: a pass grouping
-//! whole untouched neighbourhoods around seed rows, a pass joining leftovers to the group they are
-//! most strongly connected to, and a pass grouping what is still left. Rows are visited in index
-//! order, so the aggregates depend only on the matrix.
+//! Strength of connection and the aggregation of block rows. A connection is strong when the
+//! neighbour is near the row's closest neighbour, measured geometrically on the level's block
+//! positions, so strength follows the mesh's aspect ratio and changes with neither units nor
+//! material values. Aggregation makes three passes: a pass grouping whole untouched neighbourhoods
+//! around seed rows, a pass joining leftovers to the group they are most strongly connected to,
+//! and a pass grouping what is still left. Rows are visited in index order, so the aggregates
+//! depend only on the matrix pattern and the positions.
 
 use super::block::BlockCsr;
 
@@ -19,21 +20,33 @@ pub(super) fn block_norm(block: &[f64]) -> f64 {
     sum.sqrt()
 }
 
-/// Appends the strong neighbours of one row of `matrix` to `columns`.
+/// Appends the strong neighbours of one row of `matrix` to `columns`: the stencil neighbours at
+/// most `reach` times as far away as the row's closest stencil neighbour.
 pub(super) fn strong_row(
     matrix: &BlockCsr,
-    diagonal_norms: &[f64],
-    threshold: f64,
+    positions: &[[f64; 3]],
+    reach: f64,
     row: usize,
     columns: &mut Vec<u32>,
 ) {
+    let here = positions[row];
+    let squared = |column: usize| {
+        let there = positions[column];
+        let (dx, dy, dz) = (there[0] - here[0], there[1] - here[1], there[2] - here[2]);
+        dx * dx + dy * dy + dz * dz
+    };
+    let mut closest = f64::MAX;
     for at in matrix.row_range(row) {
         let column = matrix.columns[at] as usize;
-        if column == row {
-            continue;
+        if column != row {
+            closest = closest.min(squared(column));
         }
-        let scale = (diagonal_norms[row] * diagonal_norms[column]).sqrt();
-        if block_norm(matrix.block(at)) >= threshold * scale {
+    }
+    let limit = reach * reach * closest;
+    for at in matrix.row_range(row) {
+        let column = matrix.columns[at] as usize;
+        if column != row && squared(column) <= limit {
+            // Fits in u32: it came from a u32 column index.
             columns.push(column as u32);
         }
     }

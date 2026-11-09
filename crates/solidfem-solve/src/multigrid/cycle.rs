@@ -20,6 +20,8 @@ pub(super) struct Level {
     pub prolongator: Option<BlockCsr>,
     /// The direct solve on the coarsest level; absent means smoothing alone.
     pub coarse: Option<DenseCholesky>,
+    /// The aggregate of each block row, empty on the coarsest level.
+    pub aggregates: Vec<u32>,
 }
 
 /// Reused vectors of one level, so applying the preconditioner allocates nothing.
@@ -78,6 +80,22 @@ impl Multigrid {
     /// The shape and cost of the hierarchy.
     pub fn stats(&self) -> MultigridStats {
         self.stats
+    }
+
+    /// Block rows, values per block row and stored matrix values of every level, finest first.
+    pub fn level_sizes(&self) -> Vec<(usize, usize, usize)> {
+        self.levels
+            .iter()
+            .map(|level| (level.a.rows, level.a.row_block, level.a.values.len()))
+            .collect()
+    }
+
+    /// The aggregate of each block row of `level`, so a caller can see what was grouped; empty on
+    /// the coarsest level.
+    pub fn aggregates(&self, level: usize) -> &[u32] {
+        self.levels
+            .get(level)
+            .map_or(&[], |level| level.aggregates.as_slice())
     }
 }
 

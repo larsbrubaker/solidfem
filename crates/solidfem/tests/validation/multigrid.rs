@@ -1,7 +1,9 @@
 // The multigrid preconditioner against Jacobi on real 10-node stiffness: symmetry and positive
 // definiteness, the rigid-body modes at every node, the closed-form cases reaching the same
-// answers, identical bits however setup and solve are sliced, and cancellation during setup and
-// during the solve.
+// answers, identical bits across repeated runs and however setup and solve are sliced, and
+// cancellation during setup and during the solve. Iteration counts staying flat under refinement
+// is the one ignored test (the meshes are too large for a debug run):
+// `cargo test --release -p solidfem --test validation multigrid::iterations -- --ignored --nocapture`
 
 use solidfem::elastic::{
     assemble_stiffness, rigid_body_modes, Material, Model, ModelError, MultigridOptions,
@@ -13,7 +15,7 @@ use solidfem::solve::{CsrMatrix, Multigrid, MultigridSetup, Preconditioner, Setu
 use crate::support::{bar, faces_at, fix_root, mean_displacement};
 
 const MULTIGRID: PreconditionerChoice = PreconditionerChoice::Multigrid(MultigridOptions {
-    strength_threshold: 0.25,
+    neighbour_reach: 2.0,
     coarse_dofs: 1500,
     max_levels: 12,
     smoother_degree: 3,
@@ -28,7 +30,7 @@ fn steel() -> Material {
 }
 
 /// The assembled stiffness of `mesh_size` shifted to be positive definite, with its rigid modes.
-fn shifted_stiffness() -> (CsrMatrix, Vec<f64>) {
+fn shifted_stiffness() -> (CsrMatrix, Vec<f64>, Vec<[f64; 3]>) {
     let mesh = bar([10.0, 1.0, 1.0], [10, 3, 3]);
     let material = steel();
     let mut matrix =
@@ -42,12 +44,12 @@ fn shifted_stiffness() -> (CsrMatrix, Vec<f64>) {
     }
     let fixed = vec![false; mesh.nodes().len()];
     let modes = rigid_body_modes(mesh.nodes(), &fixed).expect("one flag per node");
-    (matrix, modes)
+    (matrix, modes, mesh.nodes().to_vec())
 }
 
-fn built_multigrid(matrix: &CsrMatrix, modes: &[f64]) -> Multigrid {
-    let mut setup =
-        MultigridSetup::new(matrix, modes, MultigridOptions::default()).expect("valid setup");
+fn built_multigrid(matrix: &CsrMatrix, modes: &[f64], positions: &[[f64; 3]]) -> Multigrid {
+    let mut setup = MultigridSetup::new(matrix, modes, positions, MultigridOptions::default())
+        .expect("valid setup");
     assert_eq!(
         setup.step(usize::MAX, &mut || false),
         Ok(SetupStatus::Finished)
@@ -71,8 +73,8 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 
 #[test]
 fn the_preconditioner_is_symmetric_and_positive_definite() {
-    let (matrix, modes) = shifted_stiffness();
-    let multigrid = built_multigrid(&matrix, &modes);
+    let (matrix, modes, positions) = shifted_stiffness();
+    let multigrid = built_multigrid(&matrix, &modes, &positions);
     let n = matrix.size();
     // Tolerance: the cycle performs at most about 20 products over the matrix's scalar entries,
     // each entry contributing at most one rounding unit relative to the magnitudes combined, so
@@ -288,6 +290,103 @@ fn two_materials_in_series_agree_with_jacobi() {
     for (a, b) in jacobi.iter().zip(&multigrid) {
         for axis in 0..3 {
             assert!((a[axis] - b[axis]).abs() <= 2e-5 * max_motion);
+        }
+    }
+}
+
+/// Iterations and level count of the multigrid at residual 1e-9 on a clamped end-loaded box,
+/// coarsened down to 300 values so even the smallest mesh has real levels.
+fn iterations_on(size: [f64; 3], divisions: [usize; 3]) -> (u64, usize) {
+    let model = clamped_end_loaded(size, divisions, steel(), [0.0, 0.0, -1.0]);
+    let choice = PreconditionerChoice::Multigrid(MultigridOptions {
+        coarse_dofs: 300,
+        ..MultigridOptions::default()
+    });
+    let mut study = StaticStudy::new(
+        model,
+        StudyOptions {
+            preconditioner: choice,
+            ..StudyOptions::default()
+        },
+        &mut || false,
+    )
+    .expect("valid");
+    loop {
+        match study.step(500, &mut || false).expect("solves") {
+            StepOutcome::Converged(_) => break,
+            StepOutcome::Running(_) => {}
+            StepOutcome::Cancelled(_) => panic!("nothing cancelled"),
+        }
+    }
+    let report = study.report();
+    (report.iterations, report.multigrid.map_or(0, |m| m.levels))
+}
+
+#[test]
+#[ignore = "large meshes; run in release, see the header of this file"]
+fn iterations_stay_roughly_flat_under_refinement_on_a_cantilever_and_a_thin_plate() {
+    // The bound, stated before measuring: the multigrid's convergence factor must not depend on
+    // the mesh size, so iterations are bounded as the mesh refines, where Jacobi's roughly double
+    // per refinement. The finest count may be at most twice the coarsest plus twenty: a factor
+    // for the proportion of boundary layer changing with the mesh, the slack for the smallest
+    // mesh being few iterations, and neither enough to hide growth with refinement.
+    for (name, size, refinements) in [
+        (
+            "cantilever",
+            [10.0, 1.0, 1.0],
+            [[12, 3, 3], [24, 6, 6], [36, 9, 9]],
+        ),
+        (
+            "thin plate",
+            [100.0, 100.0, 0.8],
+            [[10, 10, 2], [20, 20, 2], [40, 40, 2]],
+        ),
+    ] {
+        let counts: Vec<(u64, usize)> = refinements
+            .iter()
+            .map(|divisions| iterations_on(size, *divisions))
+            .collect();
+        println!("VALIDATION multigrid iterations {name}: (iterations, levels) {counts:?}");
+        assert!(
+            counts[0].1 >= 3,
+            "{name}: the smallest mesh has too few levels: {counts:?}"
+        );
+        assert!(
+            counts[2].0 <= 2 * counts[0].0 + 20,
+            "{name}: iterations {counts:?} grow with the mesh"
+        );
+    }
+}
+
+#[test]
+fn repeated_runs_give_identical_bits() {
+    let run = || {
+        let mesh = bar([6.0, 1.0, 1.0], [8, 3, 3]);
+        let mut model = Model::new(mesh.clone(), steel());
+        fix_root(&mut model);
+        for face in faces_at(&mesh, 6.0) {
+            model.add_traction(face, [0.0, 3.0, -7.0]);
+        }
+        let options = StudyOptions {
+            preconditioner: MULTIGRID,
+            ..StudyOptions::default()
+        };
+        let mut study = StaticStudy::new(model, options, &mut || false).expect("valid");
+        loop {
+            match study.step(100, &mut || false).expect("solves") {
+                StepOutcome::Converged(_) => break,
+                StepOutcome::Running(_) => {}
+                StepOutcome::Cancelled(_) => panic!("nothing cancelled"),
+            }
+        }
+        study.solution(&mut || false).expect("converged")
+    };
+    let (first, second) = (run(), run());
+    assert_eq!(first.report.iterations, second.report.iterations);
+    assert_eq!(first.displacements.len(), second.displacements.len());
+    for (a, b) in first.displacements.iter().zip(&second.displacements) {
+        for axis in 0..3 {
+            assert_eq!(a[axis].to_bits(), b[axis].to_bits());
         }
     }
 }

@@ -3,10 +3,13 @@
 //! prolongator, spectral estimate, smoothing, the two halves of the Galerkin product) keeping a
 //! row cursor, so `step(budget, cancel)` can stop after any row and continue later with exactly
 //! the same operations as an uninterrupted run. The coarsest level ends in a dense factorization
-//! taken one column at a time.
+//! taken one column at a time. The aggregation phases are in `setup_aggregation.rs`.
 
-use super::aggregate::{block_norm, strong_row, Aggregation};
-use super::block::{invert_spd_block, Accumulator, BlockCsr, DenseCholesky};
+use super::aggregate::Aggregation;
+use super::block::{
+    apply_block_diagonal, invert_spd_block, norm2, normalize, start_value, Accumulator, BlockCsr,
+    DenseCholesky,
+};
 use super::cycle::{Level, Multigrid};
 use super::transfer::{
     galerkin_row, orthonormalize_aggregate, product_row, prolongator_columns, smooth_row,
@@ -15,14 +18,22 @@ use super::transfer::{
 use super::{MultigridError, MultigridOptions, NEAR_NULL_MODES};
 use crate::csr::CsrMatrix;
 
+#[path = "setup_aggregation.rs"]
+mod aggregation;
+
 /// Above this many values a level is too large to factor densely (a factor's work grows with the
 /// cube of its size and a browser must not stall), so the coarsest level falls back to its
 /// smoother.
 const DENSE_LIMIT: usize = 3000;
 
-/// A level that coarsens by less than this factor would not shrink the hierarchy geometrically;
-/// the hierarchy stops there rather than stack levels of nearly the same size.
-const MIN_COARSENING: f64 = 1.25;
+/// A level whose coarse values come to more than this fraction of its own has not coarsened: its
+/// operator would be larger, not smaller, once six-value blocks and the wider stencil count.
+const MAX_COARSE_FRACTION: f64 = 0.7;
+
+/// A stalled level widens its neighbour reach by this factor and aggregates again, at most
+/// [`MAX_RETRIES`] times, before the hierarchy stops there.
+const RETRY_WIDENING: f64 = 1.5;
+const MAX_RETRIES: usize = 3;
 
 /// Power iterations for the spectral estimate. Each costs one matrix product; twenty brings the
 /// estimate within the margin below for matrices of this kind.
@@ -67,12 +78,14 @@ enum Flow {
 /// A multigrid hierarchy under construction.
 pub struct MultigridSetup {
     options: MultigridOptions,
-    threshold: f64,
+    reach: f64,
+    retries: usize,
+    positions: Vec<[f64; 3]>,
+    coarse_positions: Vec<[f64; 3]>,
     levels: Vec<Level>,
     current: BlockCsr,
     near_null: Vec<f64>,
     inverse_diagonal: Vec<f64>,
-    diagonal_norms: Vec<f64>,
     strong_starts: Vec<usize>,
     strong_columns: Vec<u32>,
     aggregation: Option<Aggregation>,
@@ -103,10 +116,12 @@ pub struct MultigridSetup {
 
 impl MultigridSetup {
     /// Starts building a hierarchy over `matrix`. `near_null` holds six values for every scalar
-    /// row, `(row, mode)` at `6 * row + mode`, and a wrong length is refused here by name.
+    /// row, `(row, mode)` at `6 * row + mode`, `positions` one point per block row (node), and a
+    /// wrong length of either is refused here by name.
     pub fn new(
         matrix: &CsrMatrix,
         near_null: &[f64],
+        positions: &[[f64; 3]],
         options: MultigridOptions,
     ) -> Result<Self, MultigridError> {
         let expected = NEAR_NULL_MODES * matrix.size();
@@ -117,14 +132,22 @@ impl MultigridSetup {
             });
         }
         let current = BlockCsr::from_nodal(matrix)?;
+        if positions.len() != current.rows {
+            return Err(MultigridError::PositionLength {
+                expected: current.rows,
+                found: positions.len(),
+            });
+        }
         Ok(MultigridSetup {
             options,
-            threshold: options.strength_threshold,
+            reach: options.neighbour_reach,
+            retries: 0,
+            positions: positions.to_vec(),
+            coarse_positions: Vec::new(),
             levels: Vec::new(),
             near_null: near_null.to_vec(),
             current,
             inverse_diagonal: Vec::new(),
-            diagonal_norms: Vec::new(),
             strong_starts: Vec::new(),
             strong_columns: Vec::new(),
             aggregation: None,
@@ -237,7 +260,6 @@ impl MultigridSetup {
         let rb = self.current.row_block;
         if self.cursor == 0 {
             self.inverse_diagonal = vec![0.0; self.current.rows * rb * rb];
-            self.diagonal_norms = vec![0.0; self.current.rows];
         }
         while self.cursor < self.current.rows {
             if *budget == 0 {
@@ -259,7 +281,6 @@ impl MultigridSetup {
                 }
             };
             let block = self.current.block(at);
-            self.diagonal_norms[row] = block_norm(block);
             let output = &mut self.inverse_diagonal[row * rb * rb..(row + 1) * rb * rb];
             if let Err(pivot) = invert_spd_block(block, rb, output) {
                 return Err(MultigridError::NotPositiveDefinite {
@@ -283,152 +304,6 @@ impl MultigridSetup {
             self.phase = Phase::Strength;
         }
         Ok(Flow::Advanced)
-    }
-
-    fn run_strength(
-        &mut self,
-        budget: &mut usize,
-        cancel: &mut dyn FnMut() -> bool,
-    ) -> Result<Flow, MultigridError> {
-        while self.cursor < self.current.rows {
-            if *budget == 0 {
-                return Ok(Flow::Paused);
-            }
-            if cancel() {
-                return Ok(Flow::Cancelled);
-            }
-            strong_row(
-                &self.current,
-                &self.diagonal_norms,
-                self.threshold,
-                self.cursor,
-                &mut self.strong_columns,
-            );
-            self.strong_starts.push(self.strong_columns.len());
-            self.cursor += 1;
-            *budget -= 1;
-        }
-        self.cursor = 0;
-        self.aggregation = Some(Aggregation::new(self.current.rows));
-        self.phase = Phase::SeedPass;
-        Ok(Flow::Advanced)
-    }
-
-    fn run_seed(
-        &mut self,
-        budget: &mut usize,
-        cancel: &mut dyn FnMut() -> bool,
-    ) -> Result<Flow, MultigridError> {
-        while self.cursor < self.current.rows {
-            if *budget == 0 {
-                return Ok(Flow::Paused);
-            }
-            if cancel() {
-                return Ok(Flow::Cancelled);
-            }
-            let row = self.cursor;
-            let start = self.strong_starts[row];
-            let end = self.strong_starts[row + 1];
-            if let Some(aggregation) = &mut self.aggregation {
-                aggregation.seed(row, &self.strong_columns[start..end]);
-            }
-            self.cursor += 1;
-            *budget -= 1;
-        }
-        self.cursor = 0;
-        self.phase = Phase::JoinPass;
-        Ok(Flow::Advanced)
-    }
-
-    fn run_join(
-        &mut self,
-        budget: &mut usize,
-        cancel: &mut dyn FnMut() -> bool,
-    ) -> Result<Flow, MultigridError> {
-        while self.cursor < self.current.rows {
-            if *budget == 0 {
-                return Ok(Flow::Paused);
-            }
-            if cancel() {
-                return Ok(Flow::Cancelled);
-            }
-            let row = self.cursor;
-            let start = self.strong_starts[row];
-            let end = self.strong_starts[row + 1];
-            if let Some(aggregation) = &mut self.aggregation {
-                aggregation.join(row, &self.current, &self.strong_columns[start..end]);
-            }
-            self.cursor += 1;
-            *budget -= 1;
-        }
-        self.cursor = 0;
-        self.phase = Phase::SweepPass;
-        Ok(Flow::Advanced)
-    }
-
-    fn run_sweep(
-        &mut self,
-        budget: &mut usize,
-        cancel: &mut dyn FnMut() -> bool,
-    ) -> Result<Flow, MultigridError> {
-        while self.cursor < self.current.rows {
-            if *budget == 0 {
-                return Ok(Flow::Paused);
-            }
-            if cancel() {
-                return Ok(Flow::Cancelled);
-            }
-            let row = self.cursor;
-            let start = self.strong_starts[row];
-            let end = self.strong_starts[row + 1];
-            if let Some(aggregation) = &mut self.aggregation {
-                aggregation.sweep(row, &self.strong_columns[start..end]);
-            }
-            self.cursor += 1;
-            *budget -= 1;
-        }
-        self.cursor = 0;
-        self.phase = Phase::Group;
-        Ok(Flow::Advanced)
-    }
-
-    /// Lists the members of each aggregate, in row order. Linear in the row count, one shot.
-    fn run_group(&mut self) -> Flow {
-        let aggregates = self.aggregate_count();
-        let coarsens = self.current.rows as f64 >= MIN_COARSENING * aggregates as f64;
-        if !coarsens || aggregates == 0 {
-            // Coarsening has stalled: this level stops the hierarchy.
-            self.is_coarsest = true;
-            self.phase = Phase::Spectral;
-            return Flow::Advanced;
-        }
-        let rows = self.current.rows;
-        let mut starts = vec![0usize; aggregates + 1];
-        if let Some(aggregation) = &self.aggregation {
-            for aggregate in &aggregation.aggregate {
-                starts[*aggregate as usize + 1] += 1;
-            }
-        }
-        for i in 0..aggregates {
-            starts[i + 1] += starts[i];
-        }
-        let mut filled = starts.clone();
-        let mut members = vec![0u32; rows];
-        if let Some(aggregation) = &self.aggregation {
-            for (row, aggregate) in aggregation.aggregate.iter().enumerate() {
-                let aggregate = *aggregate as usize;
-                members[filled[aggregate]] = row as u32;
-                filled[aggregate] += 1;
-            }
-        }
-        self.member_starts = starts;
-        self.members = members;
-        let block = self.current.row_block * NEAR_NULL_MODES;
-        self.tentative_values = Vec::with_capacity(rows * block);
-        self.tentative_positions = vec![0; rows];
-        self.coarse_null = Vec::with_capacity(aggregates * 36);
-        self.phase = Phase::Tentative;
-        Flow::Advanced
     }
 
     fn aggregate_count(&self) -> usize {
@@ -623,6 +498,7 @@ impl MultigridSetup {
             lambda_max,
             prolongator: None,
             coarse: factor,
+            aggregates: Vec::new(),
         };
         self.levels.push(level);
     }
@@ -652,9 +528,12 @@ impl MultigridSetup {
             if cancel() {
                 return Ok(Flow::Cancelled);
             }
+            let neighbours = &self.strong_columns
+                [self.strong_starts[self.cursor]..self.strong_starts[self.cursor + 1]];
             smooth_row(
                 &self.current,
                 &self.tentative,
+                neighbours,
                 &self.inverse_diagonal,
                 omega,
                 self.cursor,
@@ -774,6 +653,10 @@ impl MultigridSetup {
             lambda_max,
             prolongator: Some(std::mem::take(&mut self.prolongator)),
             coarse: None,
+            aggregates: self
+                .aggregation
+                .take()
+                .map_or(Vec::new(), |aggregation| aggregation.aggregate),
         };
         self.levels.push(level);
         self.a_times_p = BlockCsr::default();
@@ -782,46 +665,11 @@ impl MultigridSetup {
         self.accumulator = None;
         self.aggregation = None;
         self.near_null = std::mem::take(&mut self.coarse_null);
-        self.threshold *= 0.5;
+        self.positions = std::mem::take(&mut self.coarse_positions);
+        self.reach = self.options.neighbour_reach;
+        self.retries = 0;
         self.is_coarsest = false;
         self.cursor = 0;
         self.phase = Phase::Diagonal;
-    }
-}
-
-/// A deterministic start value for the power iteration: positive and uncorrelated with node
-/// numbering, so it has a component along any eigenvector the matrix can have. Integer mixing
-/// keeps it bit-identical on every platform.
-fn start_value(index: usize) -> f64 {
-    let mixed = (index as u64 + 1).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    0.5 + (mixed >> 11) as f64 / ((1u64 << 53) as f64)
-}
-
-fn apply_block_diagonal(inverse: &[f64], block: usize, x: &[f64], y: &mut [f64]) {
-    let rows = x.len() / block;
-    for row in 0..rows {
-        let d = &inverse[row * block * block..(row + 1) * block * block];
-        for p in 0..block {
-            let mut sum = 0.0;
-            for q in 0..block {
-                sum += d[p * block + q] * x[row * block + q];
-            }
-            y[row * block + p] = sum;
-        }
-    }
-}
-
-fn norm2(x: &[f64]) -> f64 {
-    let mut sum = 0.0;
-    for v in x {
-        sum += v * v;
-    }
-    sum.sqrt()
-}
-
-fn normalize(x: &mut [f64]) {
-    let norm = norm2(x);
-    for v in x {
-        *v /= norm;
     }
 }

@@ -12,17 +12,27 @@
 //! there, which gets a unit diagonal so it stays positive definite and those values never couple
 //! to anything.
 //!
-//! **Strength of connection on thin plates.** A block connection `i-j` counts as strong when
-//! `||A_ij||_F >= theta * sqrt(||A_ii||_F ||A_jj||_F)`, with the threshold halved each level, scaled
-//! by the diagonal blocks so the measure does not change with units or element sizes. On a plate
-//! whose elements are much wider than the wall is thick, through-thickness couplings dominate this
-//! ratio, so a threshold high enough to reject the in-plane couplings makes level one aggregate
-//! stacks through the wall, and the coarse levels then see the bending problem, where the
-//! rotations of the near-null space are the bending modes. The default of 0.25 is chosen on the
-//! plate: a low threshold aggregates across the plate's width and the bending modes are lost
-//! (on a 20,000-unknown 100 x 100 x 0.8 mm plate, 0.08 took 1,577 iterations); 0.25 took 109, at
-//! the cost of an operator complexity of 18, because semi-coarsening through the wall shrinks a
-//! level far less than aggregating in-plane does.
+//! **Strength of connection.** Whether two block rows belong together is decided geometrically: a
+//! stencil neighbour is strong when it lies within `neighbour_reach` times the row's closest
+//! stencil neighbour, on the level's block positions (node coordinates, then aggregate
+//! centroids). Thin walls are why: in a flat 10-node element nearly every pair of nodes couples
+//! through the through-wall strain, so the matrix entries cannot separate through-wall neighbours
+//! from in-plane ones, and any threshold on block norms either merges across the wall's width or
+//! stalls on corner-midside pairs (measured on a 20,000-unknown plate: mean aggregate 2.6 nodes
+//! and operator complexity 18 at one threshold, 18.5 nodes spanning the width and 1,577
+//! iterations at another; on a cantilever, 2.5 nodes per aggregate and 1,620 singletons).
+//! Distance needs no threshold on values: where the through-wall spacing is the closest, a row
+//! keeps only through-wall neighbours (aggregates become stacks through the wall, inspected at
+//! zero in-plane extent), and on a compact part the same test takes the surrounding patch. A
+//! level that still stalls widens its reach and aggregates again, at most three times, before the
+//! hierarchy stops there.
+//!
+//! **Prolongator smoothing is filtered.** Weak couplings are lumped into the diagonal instead of
+//! widening the prolongator, which is what bounds the coarse stencil: without it the 20,000-unknown
+//! plate's first coarse level stored 8.6 times the finest level's values, with it 0.9 times. Only
+//! the prolongator sees the filtered matrix; the coarse operators are Galerkin products of the true
+//! matrix and the smoother uses the true matrix, so the preconditioner stays symmetric positive
+//! definite.
 //!
 //! **Smoother.** Chebyshev polynomials in the block-Jacobi preconditioned operator, the same
 //! polynomial before and after the coarse correction. It needs only an upper bound on the spectrum
@@ -57,10 +67,10 @@ pub const NEAR_NULL_MODES: usize = 6;
 /// Settings for the multigrid preconditioner.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct MultigridOptions {
-    /// Strength threshold at the finest level, halved each level below it. Blocks weaker than
-    /// this fraction of the diagonal norms are not aggregated together. High thresholds make thin
-    /// plates semi-coarsen through the wall, trading memory and setup time for iterations.
-    pub strength_threshold: f64,
+    /// How far, as a multiple of a block row's closest stencil neighbour, a neighbour may be and
+    /// still count as strongly connected. A row whose nearest neighbours are through a thin wall
+    /// keeps only neighbours through the wall.
+    pub neighbour_reach: f64,
     /// Coarsening stops once a level has at most this many values; it is then factored directly.
     pub coarse_dofs: usize,
     /// The most levels to build.
@@ -75,7 +85,7 @@ pub struct MultigridOptions {
 impl Default for MultigridOptions {
     fn default() -> Self {
         MultigridOptions {
-            strength_threshold: 0.25,
+            neighbour_reach: 2.0,
             coarse_dofs: 1500,
             max_levels: 12,
             smoother_degree: 3,
@@ -124,6 +134,13 @@ pub enum MultigridError {
     },
     /// The cancel check stopped setup.
     Cancelled,
+    /// The positions array does not hold one entry for every block row.
+    PositionLength {
+        /// Block rows of the matrix.
+        expected: usize,
+        /// Positions supplied.
+        found: usize,
+    },
     /// A result was asked for before setup finished.
     NotFinished,
 }
@@ -148,6 +165,10 @@ impl fmt::Display for MultigridError {
                 f,
                 "multigrid level {level} block {block} is not positive definite (pivot {pivot}): \
                  something is free to move that should be held"
+            ),
+            MultigridError::PositionLength { expected, found } => write!(
+                f,
+                "the multigrid has {found} block positions where the matrix needs {expected}"
             ),
             MultigridError::Cancelled => write!(f, "the multigrid setup was cancelled"),
             MultigridError::NotFinished => write!(f, "the multigrid setup has not finished"),

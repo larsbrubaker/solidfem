@@ -94,10 +94,19 @@ pub(super) fn accumulate_product_row(
     }
 }
 
-/// Appends row `row` of the smoothed prolongator `P = T - omega D^-1 A T`.
+/// Appends row `row` of the smoothed prolongator `P = T - omega D^-1 A_f T`, with `A_f` the
+/// filtered matrix: couplings outside the strong neighbours `neighbours` (sorted) are added to the
+/// diagonal instead of spreading the coarse function along them. The filtering keeps the
+/// prolongator as narrow as the strong stencil, which is what keeps the coarse operator small
+/// when weak couplings would otherwise fill it in. Lumping onto the diagonal keeps the row's
+/// action on a translation. Only the prolongator sees this matrix: the coarse operator is the
+/// Galerkin product with the true matrix and the smoother uses the true matrix, so the
+/// preconditioner stays symmetric positive definite.
+#[allow(clippy::too_many_arguments)] // One row of one product; a struct would only rename these.
 pub(super) fn smooth_row(
     matrix: &BlockCsr,
     tentative: &BlockCsr,
+    neighbours: &[u32],
     inverse_diagonal: &[f64],
     omega: f64,
     row: usize,
@@ -112,7 +121,19 @@ pub(super) fn smooth_row(
     let t_at = t_range.start;
     let t_column = tentative.columns[t_at];
     accumulator.entry(t_column);
-    accumulate_product_row(matrix, row, tentative, accumulator);
+    let mid = matrix.col_block;
+    for at in matrix.row_range(row) {
+        let column = matrix.columns[at];
+        let source = if column as usize == row || neighbours.binary_search(&column).is_ok() {
+            column as usize
+        } else {
+            row
+        };
+        for inner in tentative.row_range(source) {
+            let out = accumulator.entry(tentative.columns[inner]);
+            add_product(out, matrix.block(at), rb, mid, tentative.block(inner), cb);
+        }
+    }
     let dinv = &inverse_diagonal[row * rb * rb..(row + 1) * rb * rb];
     let mut scaled = vec![0.0; rb * cb];
     let t_block = tentative.block(t_at);
