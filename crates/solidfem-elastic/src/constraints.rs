@@ -4,6 +4,7 @@
 //! points remove every rigid motion, while fewer leave a rotation about a line or a point and a
 //! singular stiffness that would otherwise surface as garbage.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use solidfem_mesh::QuadraticTetMesh;
@@ -152,4 +153,104 @@ fn bounding_size(positions: &[[f64; 3]], nodes: &[u32]) -> f64 {
         }
     }
     distance(low, high)
+}
+
+/// Checks that every body is held when some components are prescribed individually: the fixed
+/// nodes' components and the prescribed components together must span all six rigid motions of
+/// each body. A pivoted elimination of the rigid-motion values at the held components gives the
+/// rank, the same near-collinearity threshold as the node check deciding when a pivot is gone.
+pub(crate) fn check_held_dofs(
+    mesh: &QuadraticTetMesh,
+    fixed: &[bool],
+    prescribed: &BTreeMap<(u32, usize), f64>,
+) -> Result<(), ModelError> {
+    let positions = mesh.nodes();
+    for body in mesh.face_connected_bodies() {
+        let mut in_body = vec![false; positions.len()];
+        let mut nodes = Vec::new();
+        for t in &body {
+            for n in mesh.tets()[*t as usize] {
+                if !in_body[n as usize] {
+                    in_body[n as usize] = true;
+                    nodes.push(n);
+                }
+            }
+        }
+        nodes.sort_unstable();
+        let size = bounding_size(positions, &nodes).max(f64::MIN_POSITIVE);
+        let mut center = [0.0; 3];
+        for n in &nodes {
+            for (axis, value) in center.iter_mut().enumerate() {
+                *value += positions[*n as usize][axis];
+            }
+        }
+        for value in &mut center {
+            *value /= nodes.len() as f64;
+        }
+        let mut rows: Vec<[f64; 6]> = Vec::new();
+        let mut add = |node: u32, axis: usize| {
+            let p = positions[node as usize];
+            let (x, y, z) = (
+                (p[0] - center[0]) / size,
+                (p[1] - center[1]) / size,
+                (p[2] - center[2]) / size,
+            );
+            rows.push(match axis {
+                0 => [1.0, 0.0, 0.0, 0.0, z, -y],
+                1 => [0.0, 1.0, 0.0, -z, 0.0, x],
+                _ => [0.0, 0.0, 1.0, y, -x, 0.0],
+            });
+        };
+        for n in &nodes {
+            if fixed[*n as usize] {
+                for axis in 0..3 {
+                    add(*n, axis);
+                }
+            }
+        }
+        for (node, axis) in prescribed.keys() {
+            if (*node as usize) < positions.len() && in_body[*node as usize] && *axis < 3 {
+                add(*node, *axis);
+            }
+        }
+        let rank = pivot_rank(&mut rows);
+        if rank < 6 {
+            return Err(ModelError::DofsDoNotHold {
+                first_tet: body[0],
+                rank,
+            });
+        }
+    }
+    Ok(())
+}
+
+/// The rank of six-column rows by elimination with column pivoting among the rows, a pivot counted
+/// when it is above `COLLINEAR_FRACTION`, the node check's notion of a real offset.
+fn pivot_rank(rows: &mut [[f64; 6]]) -> usize {
+    let mut rank = 0;
+    for column in 0..6 {
+        let Some(best) = (rank..rows.len()).max_by(|a, b| {
+            rows[*a][column]
+                .abs()
+                .total_cmp(&rows[*b][column].abs())
+                .then(b.cmp(a))
+        }) else {
+            break;
+        };
+        if rows[best][column].abs() <= COLLINEAR_FRACTION {
+            continue;
+        }
+        rows.swap(rank, best);
+        let pivot = rows[rank];
+        for row in rows[rank + 1..].iter_mut() {
+            let factor = row[column] / pivot[column];
+            if factor != 0.0 {
+                for k in column..6 {
+                    row[k] -= factor * pivot[k];
+                }
+            }
+        }
+        rank += 1;
+    }
+    rank
 }

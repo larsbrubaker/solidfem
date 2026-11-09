@@ -12,6 +12,8 @@ mod determinism;
 mod multigrid;
 #[path = "validation/pipeline.rs"]
 mod pipeline;
+#[path = "validation/prescribed.rs"]
+mod prescribed;
 #[path = "validation/refusals.rs"]
 mod refusals;
 // The mesher's own test shapes, so a test here meshes the same input bit for bit.

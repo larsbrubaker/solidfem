@@ -4,7 +4,7 @@
 //! under-report it, and a wrong "this part is fine" is the worst failure the library can have.
 //!
 //! A [`Model`] holds a mesh, a [`MaterialField`] evaluated at every integration point, fixed
-//! nodes, nodal forces and face tractions. [`StaticStudy::new`] validates it (refusing a model
+//! nodes, individually prescribed displacement components, nodal forces and face tractions. [`StaticStudy::new`] validates it (refusing a model
 //! that cannot be held or has no effective load, before any solving), eliminates the fixed nodes
 //! and assembles; [`StaticStudy::step`] then runs the solve in bounded slices with a cancel check,
 //! and [`StaticStudy::solution`] recovers displacements and von Mises stress. A host with no

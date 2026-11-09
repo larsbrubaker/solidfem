@@ -123,3 +123,43 @@ fn a_verdict_says_which_of_the_four_it_is() {
         .to_string()
         .starts_with("OUT OF SCOPE"));
 }
+
+#[test]
+fn winkler_bach_gives_the_hand_worked_inner_fibre_stress() {
+    // ri 20, ro 40, F 1000, b 10: A 200, R 30, rn = 20 / ln 2 = 28.854, e = 1.146, M = 30000.
+    let sigma = solidfem_bench::benchmarks::cases::winkler_inner_stress(1000.0, 20.0, 40.0, 10.0);
+    assert!((sigma - 62.94).abs() < 0.05, "{sigma}");
+}
+
+#[test]
+fn lewis_and_the_fillet_factor_give_their_hand_worked_values() {
+    let lewis = solidfem_bench::benchmarks::cases::lewis_stress();
+    // 1000 / (20 * 4 * 0.322).
+    assert!((lewis - 38.82).abs() < 0.01, "{lewis}");
+    // Dolan-Broghamer for this tooth, worked by hand with t = 6.75, r = 1.2, l = 8.0: about 1.39.
+    let k = solidfem_bench::benchmarks::cases::fillet_concentration();
+    assert!((k - 1.39).abs() < 0.02, "{k}");
+}
+
+#[test]
+fn the_out_of_scope_parts_never_produce_a_number() {
+    use solidfem_bench::benchmarks::cases::all_cases;
+    use solidfem_bench::benchmarks::pipeline::run_case;
+    for (id, needle) in [
+        ("column-buckling", "buckling"),
+        ("snapfit-large", "geometric nonlinearity"),
+    ] {
+        let case = all_cases()
+            .into_iter()
+            .find(|case| case.id == id)
+            .expect("the case exists");
+        let mut no_surface =
+            |_: &solidfem_bench::benchmarks::cases::Density| Err("no surface".to_string());
+        let result = run_case(&case, &mut no_surface, 1.0, &mut |_: &str| {});
+        assert!(result.rows.is_empty(), "{id} solved something");
+        match result.verdict {
+            Verdict::OutOfScope(reason) => assert!(reason.contains(needle), "{reason}"),
+            other => panic!("{id} should be out of scope, got {other}"),
+        }
+    }
+}

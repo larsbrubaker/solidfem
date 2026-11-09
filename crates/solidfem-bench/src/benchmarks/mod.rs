@@ -1,5 +1,5 @@
 //! The real-part benchmarks: does this library help with real work, or only pass friendly tests?
-//! Each case in `cases.rs` is a part built by a real CAD operation and remeshed by a real surface
+//! Each case in `cases/` (one file per part) is a part built by a real CAD operation and remeshed by a real surface
 //! remesher, then meshed by this workspace's mesher with layers through thin walls, solved through
 //! 10-node elements with multigrid at two or three densities, and compared with a closed form or a
 //! published reference, with limits derived in the case before it first ran. `pipeline.rs` does

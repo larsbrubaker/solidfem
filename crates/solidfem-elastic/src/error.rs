@@ -59,6 +59,17 @@ pub enum ModelError {
     Cancelled,
     /// A result was asked for before the solve converged.
     NotFinished,
+    /// A prescribed displacement names an axis other than 0, 1 or 2.
+    AxisOutOfRange { axis: usize },
+    /// A prescribed displacement names a node that is also fixed outright.
+    PrescribedOnFixedNode { node: u32 },
+    /// With prescribed components, a body is not held against all six rigid motions.
+    DofsDoNotHold {
+        /// The lowest tetrahedron index in the piece.
+        first_tet: u32,
+        /// The rigid motions the held components do remove, out of six.
+        rank: usize,
+    },
 }
 
 impl fmt::Display for ModelError {
@@ -96,6 +107,21 @@ impl fmt::Display for ModelError {
             ModelError::Solver(error) => write!(f, "{error}"),
             ModelError::Cancelled => write!(f, "the study was cancelled"),
             ModelError::NotFinished => write!(f, "the solve has not converged yet"),
+            ModelError::AxisOutOfRange { axis } => {
+                write!(
+                    f,
+                    "a prescribed displacement names axis {axis}: use 0, 1 or 2"
+                )
+            }
+            ModelError::PrescribedOnFixedNode { node } => write!(
+                f,
+                "node {node} is both fixed and given a prescribed displacement: use one"
+            ),
+            ModelError::DofsDoNotHold { first_tet, rank } => write!(
+                f,
+                "the piece containing tetrahedron {first_tet} is held against only {rank} of its \
+                 six rigid motions: prescribe or fix more components so it cannot move freely"
+            ),
         }
     }
 }

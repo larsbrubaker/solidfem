@@ -3,7 +3,7 @@
 //! minutes unless the variable overrides it), prints a table per part and a final verdict for
 //! each: PASS, FAIL, NOT ASSESSED (a solve hit its cap, with no error quoted) or OUT OF SCOPE.
 //! `<surface-dir>` holds the remeshed surfaces in the text format `solidfem-gate file` reads, one
-//! file per part and density, named in `benchmarks/cases.rs`. Run in release.
+//! file per part and density, named in `benchmarks/cases/`. Run in release.
 
 use std::io::Write as _;
 use std::path::Path;
@@ -37,6 +37,20 @@ fn main() {
         .into_iter()
         .filter(|case| wanted.is_empty() || wanted.iter().any(|id| id == case.id))
         .collect();
+    let cases: Vec<Case> = if std::env::var("BENCH_FINEST_ONLY").is_ok() {
+        // A diagnostic run of only the finest density of each case; its verdict means nothing.
+        cases
+            .into_iter()
+            .map(|mut case| {
+                case.densities = case
+                    .densities
+                    .split_off(case.densities.len().saturating_sub(1));
+                case
+            })
+            .collect()
+    } else {
+        cases
+    };
     let mut summary = Vec::new();
     for case in &cases {
         println!("=== {} ({})", case.title, case.id);

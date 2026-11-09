@@ -110,6 +110,7 @@ fn apply(mesh: &QuadraticTetMesh) -> Result<Supports, String> {
             .into_iter()
             .map(|f| (f, [0.0, 0.0, -F / area]))
             .collect(),
+        ..Supports::default()
     })
 }
 
@@ -158,6 +159,7 @@ fn case(judge: fn(&[DensityResult]) -> Verdict) -> Case {
         layers: 0,
         apply,
         measure,
+        iteration_budget: None,
         judge,
     }
 }
@@ -211,6 +213,18 @@ fn a_support_on_a_loaded_face_is_a_named_refusal() {
     let result = run_case(&case, &mut surface_of, 120.0, &mut |_: &str| {});
     match &result.verdict {
         Verdict::Fail(reason) => assert!(reason.contains("fixed node"), "{reason}"),
+        other => panic!("expected FAIL, got {other}"),
+    }
+}
+
+#[test]
+fn a_solve_past_its_iteration_budget_fails_by_name() {
+    let mut case = case(|_| Verdict::Pass);
+    case.iteration_budget = Some(2);
+    let mut surface_of = |_: &Density| Ok(box_surface(8, 3, 3));
+    let result = run_case(&case, &mut surface_of, 120.0, &mut |_: &str| {});
+    match &result.verdict {
+        Verdict::Fail(reason) => assert!(reason.contains("iteration budget"), "{reason}"),
         other => panic!("expected FAIL, got {other}"),
     }
 }

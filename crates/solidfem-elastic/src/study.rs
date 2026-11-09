@@ -12,8 +12,14 @@
 //! is built after assembly from the assembled matrix and rigid-body modes taken from the node
 //! coordinates, restricted to the free nodes, and [`StudyBuilder::step`] advances that setup in
 //! the same slices as assembly.
+//!
+//! [`Model::prescribe_displacement`] fixes one component of a node to a value (a roller, a symmetry
+//! plane or an enforced displacement). The component is eliminated symmetrically after assembly so
+//! the system stays symmetric positive definite, its rigid-body values are removed from the
+//! multigrid near-null space, and a study then checks its held components by rank instead of by
+//! three non-collinear held nodes.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use solidfem_mesh::{BoundaryFace, QuadraticTetMesh};
 use solidfem_solve::{
@@ -22,7 +28,7 @@ use solidfem_solve::{
 };
 
 use crate::assembly::{add_element_stiffness, free_stiffness_pattern, FIXED};
-use crate::constraints::check_constraints;
+use crate::constraints::{check_constraints, check_held_dofs};
 use crate::error::ModelError;
 use crate::loads::add_traction;
 use crate::material::MaterialField;
@@ -41,6 +47,7 @@ pub struct Model<M: MaterialField> {
     fixed: BTreeSet<u32>,
     nodal_forces: Vec<(u32, [f64; 3])>,
     tractions: Vec<(BoundaryFace, [f64; 3])>,
+    prescribed: BTreeMap<(u32, usize), f64>,
 }
 
 impl<M: MaterialField> Model<M> {
@@ -53,6 +60,7 @@ impl<M: MaterialField> Model<M> {
             fixed: BTreeSet::new(),
             nodal_forces: Vec::new(),
             tractions: Vec::new(),
+            prescribed: BTreeMap::new(),
         }
     }
 
@@ -74,6 +82,16 @@ impl<M: MaterialField> Model<M> {
     /// Adds a force at `node`.
     pub fn add_nodal_force(&mut self, node: u32, force: [f64; 3]) {
         self.nodal_forces.push((node, force));
+    }
+
+    /// Fixes one displacement component of `node` to `value`, leaving its other components free:
+    /// a roller or symmetry plane (`value` zero) or an enforced displacement. The last call for a
+    /// given node and axis wins. Validated when the study is built: an axis other than 0, 1 or 2,
+    /// a non-finite value, a node that does not exist or a node also given to [`Model::fix_node`]
+    /// is an error. With any prescribed component the model is held when the fixed nodes and
+    /// prescribed components together remove all six rigid motions of each body.
+    pub fn prescribe_displacement(&mut self, node: u32, axis: usize, value: f64) {
+        self.prescribed.insert((node, axis), value);
     }
 
     /// Adds a uniform traction (force per area) over a boundary face.
@@ -154,6 +172,7 @@ pub struct StaticStudy<M: MaterialField> {
     pcg: Pcg<StudyPreconditioner>,
     clock: Option<Clock>,
     report: Report,
+    prescribed_nodes: Vec<(u32, usize, f64)>,
 }
 
 impl<M: MaterialField> StaticStudy<M> {
@@ -189,7 +208,8 @@ impl<M: MaterialField> StaticStudy<M> {
     /// the solve converges, so it is a preview, not a result.
     pub fn displacements(&self) -> Vec<[f64; 3]> {
         let x = self.pcg.estimate();
-        self.free
+        let mut displacements: Vec<[f64; 3]> = self
+            .free
             .iter()
             .map(|index| {
                 if *index == FIXED {
@@ -199,7 +219,12 @@ impl<M: MaterialField> StaticStudy<M> {
                     [x[at], x[at + 1], x[at + 2]]
                 }
             })
-            .collect()
+            .collect();
+        // A prescribed component is exact, not the solver's estimate of it.
+        for (node, axis, value) in &self.prescribed_nodes {
+            displacements[*node as usize][*axis] = *value;
+        }
+        displacements
     }
 
     /// Sizes, iterations and times so far.
@@ -313,6 +338,9 @@ pub struct StudyBuilder<M: MaterialField> {
     clock: Option<Clock>,
     assembly_seconds: f64,
     preconditioner_seconds: f64,
+    /// Each prescribed component as (free degree of freedom, value), sorted by degree of freedom.
+    prescribed: Vec<(usize, f64)>,
+    prescribed_applied: bool,
 }
 
 impl<M: MaterialField> StudyBuilder<M> {
@@ -328,7 +356,11 @@ impl<M: MaterialField> StudyBuilder<M> {
                 .get_mut(*node as usize)
                 .ok_or(ModelError::NodeOutOfRange { node: *node })? = true;
         }
-        check_constraints(&model.mesh, &is_fixed)?;
+        if model.prescribed.is_empty() {
+            check_constraints(&model.mesh, &is_fixed)?;
+        } else {
+            check_held_dofs(&model.mesh, &is_fixed, &model.prescribed)?;
+        }
         let load = build_load(&model)?;
 
         let mut free = vec![FIXED; node_count];
@@ -345,7 +377,8 @@ impl<M: MaterialField> StudyBuilder<M> {
                 rhs.extend_from_slice(&load[3 * node..3 * node + 3]);
             }
         }
-        if rhs.iter().all(|v| *v == 0.0) {
+        let prescribed = prescribed_dofs(&model, &free)?;
+        if rhs.iter().all(|v| *v == 0.0) && prescribed.iter().all(|(_, value)| *value == 0.0) {
             return Err(ModelError::NoEffectiveLoad);
         }
         let matrix = free_stiffness_pattern(&model.mesh, &free, free_count);
@@ -365,6 +398,8 @@ impl<M: MaterialField> StudyBuilder<M> {
             clock,
             assembly_seconds,
             preconditioner_seconds: 0.0,
+            prescribed,
+            prescribed_applied: false,
         })
     }
 
@@ -392,6 +427,9 @@ impl<M: MaterialField> StudyBuilder<M> {
         result?;
         self.next = end;
         if self.next == total {
+            if !self.prescribed_applied {
+                self.apply_prescribed();
+            }
             if let PreconditionerChoice::Multigrid(options) = self.preconditioner {
                 self.advance_setup(options, max_elements, cancel)?;
             }
@@ -423,7 +461,11 @@ impl<M: MaterialField> StudyBuilder<M> {
         }
         let start = now(&mut self.clock);
         if self.setup.is_none() {
-            let modes = free_rigid_body_modes(self.model.mesh.nodes(), &self.free, self.free_count);
+            let mut modes =
+                free_rigid_body_modes(self.model.mesh.nodes(), &self.free, self.free_count);
+            for (dof, _) in &self.prescribed {
+                modes[*dof * 6..*dof * 6 + 6].fill(0.0);
+            }
             let positions: Vec<[f64; 3]> = self
                 .model
                 .mesh
@@ -449,6 +491,37 @@ impl<M: MaterialField> StudyBuilder<M> {
         Ok(())
     }
 
+    /// Eliminates the prescribed components symmetrically, leaving their rows and columns as a
+    /// decoupled diagonal entry so the system stays symmetric positive definite, and moves what
+    /// they force on the other unknowns to the right-hand side.
+    fn apply_prescribed(&mut self) {
+        self.prescribed_applied = true;
+        let mut constrained = vec![false; self.rhs.len()];
+        for (dof, _) in &self.prescribed {
+            constrained[*dof] = true;
+        }
+        for (dof, value) in &self.prescribed {
+            let (columns, values) = self.matrix.row(*dof);
+            let entries: Vec<(u32, f64)> = columns
+                .iter()
+                .copied()
+                .zip(values.iter().copied())
+                .filter(|(column, _)| *column as usize != *dof)
+                .collect();
+            for (column, entry) in entries {
+                let c = column as usize;
+                if !constrained[c] {
+                    self.rhs[c] -= entry * *value;
+                }
+                self.matrix.add(c, *dof as u32, -entry);
+                self.matrix.add(*dof, column, -entry);
+            }
+        }
+        for (dof, value) in &self.prescribed {
+            self.rhs[*dof] = self.matrix.get(*dof, *dof as u32) * *value;
+        }
+    }
+
     /// The mesh being assembled.
     pub fn mesh(&self) -> &QuadraticTetMesh {
         self.model.mesh()
@@ -472,6 +545,11 @@ impl<M: MaterialField> StudyBuilder<M> {
             preconditioner_seconds,
             ..
         } = self;
+        let prescribed_nodes = model
+            .prescribed
+            .iter()
+            .map(|((node, axis), value)| (*node, *axis, *value))
+            .collect();
         let start = now(&mut clock);
         let mut multigrid_stats = None;
         let preconditioner = match setup {
@@ -503,8 +581,35 @@ impl<M: MaterialField> StudyBuilder<M> {
             pcg,
             clock,
             report,
+            prescribed_nodes,
         })
     }
+}
+
+/// Each prescribed component as (free degree of freedom, value), sorted by degree of freedom, or
+/// the refusal: an axis or node out of range, a non-finite value, or a node also fixed outright.
+fn prescribed_dofs<M: MaterialField>(
+    model: &Model<M>,
+    free: &[u32],
+) -> Result<Vec<(usize, f64)>, ModelError> {
+    let mut dofs = Vec::with_capacity(model.prescribed.len());
+    for ((node, axis), value) in &model.prescribed {
+        if *axis > 2 {
+            return Err(ModelError::AxisOutOfRange { axis: *axis });
+        }
+        if !value.is_finite() {
+            return Err(ModelError::NonFiniteLoad);
+        }
+        let index = *free
+            .get(*node as usize)
+            .ok_or(ModelError::NodeOutOfRange { node: *node })?;
+        if index == FIXED {
+            return Err(ModelError::PrescribedOnFixedNode { node: *node });
+        }
+        dofs.push((3 * index as usize + *axis, *value));
+    }
+    dofs.sort_by_key(|(dof, _)| *dof);
+    Ok(dofs)
 }
 
 /// Reads the clock, or zero with none.

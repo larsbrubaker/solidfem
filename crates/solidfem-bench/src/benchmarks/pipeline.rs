@@ -1,7 +1,7 @@
 //! The pipeline each real-part benchmark runs at each mesh density: a closed surface, this
 //! workspace's volume mesher with through-wall layers and a size function, 10-node elements, the
 //! multigrid solve under a time cap, and a load-balance check from the recovered stresses.
-//! `cases.rs` says what each part is; `verdict.rs` decides what its numbers mean.
+//! `cases/` says what each part is; `verdict.rs` decides what its numbers mean.
 //!
 //! **The load balance is measured, not assumed.** The applied load is summed here from each loaded
 //! face's own area and traction, independently of the solver's consistent load vector; the
@@ -36,6 +36,9 @@ pub struct Supports {
     pub fixed: Vec<u32>,
     /// Boundary faces with a uniform traction (force per area).
     pub tractions: Vec<(BoundaryFace, [f64; 3])>,
+    /// Individually prescribed displacement components: (node, axis, value). A roller or symmetry
+    /// plane is a prescribed zero; an enforced displacement is its value.
+    pub prescribed: Vec<(u32, usize, f64)>,
 }
 
 /// One density's solved result, what the tables print and the judges read.
@@ -273,6 +276,7 @@ fn solve_density(
         case.material,
         &supports,
         cap_seconds,
+        case.iteration_budget,
         quadrature,
     ) {
         Ok(solved) => solved,
@@ -284,9 +288,17 @@ fn solve_density(
             }
         }
     };
-    let reaction = match support_reaction(&mesh, &solution, &is_fixed, quadrature) {
-        Ok(reaction) => reaction,
-        Err(error) => return DensityOutcome::Refused(format!("reaction recovery: {error}")),
+    let (reaction, reaction_magnitude) =
+        match support_reaction(&mesh, &solution, &is_fixed, &supports, quadrature) {
+            Ok(reaction) => reaction,
+            Err(error) => return DensityOutcome::Refused(format!("reaction recovery: {error}")),
+        };
+    // An enforced displacement is its own loading: with no applied traction the reactions alone
+    // set the scale of the balance check.
+    let gross = if supports.tractions.is_empty() {
+        reaction_magnitude
+    } else {
+        gross
     };
     let balance = LoadBalance::new(applied, reaction, gross);
     let values = match (case.measure)(&mesh, &solution) {
@@ -318,6 +330,7 @@ fn solve(
     material: Material,
     supports: &Supports,
     cap_seconds: f64,
+    iteration_budget: Option<u64>,
     quadrature: Quadrature,
 ) -> Result<(Solution, Report), SolveEnd> {
     let mut model = Model::new(mesh, material);
@@ -327,6 +340,9 @@ fn solve(
     }
     for (face, traction) in &supports.tractions {
         model.add_traction(*face, *traction);
+    }
+    for (node, axis, value) in &supports.prescribed {
+        model.prescribe_displacement(*node, *axis, *value);
     }
     let start = Instant::now();
     let clock: Clock = Box::new(move || start.elapsed().as_secs_f64());
@@ -352,6 +368,14 @@ fn solve(
         }
         if solve_start.elapsed().as_secs_f64() >= cap_seconds {
             return Err(SolveEnd::Capped(study.report()));
+        }
+        if let Some(budget) = iteration_budget {
+            let spent = study.report().iterations;
+            if spent >= budget {
+                return Err(SolveEnd::Refused(format!(
+                    "over the iteration budget: {spent} iterations reached the budget of {budget}"
+                )));
+            }
         }
     }
     let solution = study
@@ -396,15 +420,20 @@ pub fn face_normal(mesh: &QuadraticTetMesh, face: &BoundaryFace) -> [f64; 3] {
     ]
 }
 
-/// The sum over the fixed nodes of the internal nodal forces integrated from the point stresses:
-/// the force the supports exert on the part, since no loaded face touches a fixed node.
+/// The force the supports exert on the part and the sum of the magnitudes of its components at
+/// each held value. At a fully fixed node the reaction is the internal nodal force integrated
+/// from the point stresses, since no loaded face touches a fixed node (the pipeline refuses one
+/// that does). At an individually prescribed component the reaction is that internal force
+/// less the consistent nodal share of any traction on a face through the node, because a
+/// roller can sit under a loaded face.
 fn support_reaction(
     mesh: &QuadraticTetMesh,
     solution: &Solution,
     is_fixed: &[bool],
+    supports: &Supports,
     quadrature: Quadrature,
-) -> Result<[f64; 3], String> {
-    let mut reaction = [0.0; 3];
+) -> Result<([f64; 3], f64), String> {
+    let mut internal = vec![[0.0; 3]; mesh.nodes().len()];
     let rule = quadrature.points();
     for stress in &solution.point_stresses {
         let tet = &mesh.tets()[stress.tet as usize];
@@ -415,13 +444,40 @@ fn support_reaction(
         let measure = q.weight * geometry.det_j / 6.0;
         let s = stress.stress;
         for (local, node) in tet.iter().enumerate() {
-            if is_fixed[*node as usize] {
-                let g = geometry.gradients[local];
-                reaction[0] += measure * (s[0] * g[0] + s[3] * g[1] + s[5] * g[2]);
-                reaction[1] += measure * (s[3] * g[0] + s[1] * g[1] + s[4] * g[2]);
-                reaction[2] += measure * (s[5] * g[0] + s[4] * g[1] + s[2] * g[2]);
+            let g = geometry.gradients[local];
+            let force = &mut internal[*node as usize];
+            force[0] += measure * (s[0] * g[0] + s[3] * g[1] + s[5] * g[2]);
+            force[1] += measure * (s[3] * g[0] + s[1] * g[1] + s[4] * g[2]);
+            force[2] += measure * (s[5] * g[0] + s[4] * g[1] + s[2] * g[2]);
+        }
+    }
+    let mut external = vec![[0.0; 3]; mesh.nodes().len()];
+    for (face, traction) in &supports.tractions {
+        // The consistent load of a uniform traction on a straight 6-node face is zero at its
+        // corners and a third of the face resultant at each midside.
+        let area = face_area(mesh, face);
+        for node in &face.nodes[3..] {
+            for axis in 0..3 {
+                external[*node as usize][axis] += traction[axis] * area / 3.0;
             }
         }
     }
-    Ok(reaction)
+    let (mut reaction, mut magnitude) = ([0.0; 3], 0.0);
+    for (node, force) in internal.iter().enumerate() {
+        if is_fixed[node] {
+            for axis in 0..3 {
+                reaction[axis] += force[axis];
+                magnitude += force[axis].abs();
+            }
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for (node, axis, _) in &supports.prescribed {
+        if seen.insert((*node, *axis)) {
+            let share = internal[*node as usize][*axis] - external[*node as usize][*axis];
+            reaction[*axis] += share;
+            magnitude += share.abs();
+        }
+    }
+    Ok((reaction, magnitude))
 }

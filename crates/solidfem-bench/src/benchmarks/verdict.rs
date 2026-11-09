@@ -1,7 +1,7 @@
 //! The judgments of the real-part benchmark runner, free of any meshing or solving so they can be
 //! tested alone: the four verdicts a part may get, the mesh-convergence and stress-singularity
 //! reading of a series of results at finer and finer meshes, and the load-balance check that every
-//! case must pass. `cases.rs` applies them to what `pipeline.rs` measured.
+//! case must pass. the case files in `cases/` apply them to what `pipeline.rs` measured.
 //!
 //! **Convergence versus singularity.** A peak stress over refinement is read through the growth
 //! exponent `s` in `peak ~ h^-s`, measured between consecutive densities as
