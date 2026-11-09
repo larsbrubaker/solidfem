@@ -8,7 +8,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'os';
 import { join } from 'path';
 import { answer, type SiteOptions } from '../site.ts';
-import { wasmModuleUrl } from './asset-url.ts';
+import { exampleSurfaceUrl, wasmModuleUrl } from './asset-url.ts';
 
 const PAGES = 'https://larsbrubaker.github.io/solidfem/';
 const demo = join(import.meta.dir, '..');
@@ -41,6 +41,22 @@ describe('asset URLs under a subpath', () => {
     expect(wasmModuleUrl('http://localhost:3040/')).toBe(
       'http://localhost:3040/public/pkg/solidfem_wasm.js',
     );
+  });
+
+  test('example surfaces resolve below the subpath, wherever the page is entered', () => {
+    const expected = `${PAGES}public/parts/snap_h1.0.txt`;
+    expect(exampleSurfaceUrl(PAGES, 'snap_h1.0.txt')).toBe(expected);
+    expect(exampleSurfaceUrl(`${PAGES}index.html`, 'snap_h1.0.txt')).toBe(expected);
+    expect(exampleSurfaceUrl('http://localhost:3040/', 'snap_h1.0.txt')).toBe(
+      'http://localhost:3040/public/parts/snap_h1.0.txt',
+    );
+  });
+
+  test.skipIf(!built)('every example surface the catalog names is in the built site', () => {
+    const catalog = JSON.parse(readFileSync(join(demo, 'src/testdata/catalog.json'), 'utf-8'));
+    for (const part of catalog.examples) {
+      expect(existsSync(join(dist, 'public/parts', part.asset))).toBe(true);
+    }
   });
 
   test('the page names only URLs relative to itself', () => {

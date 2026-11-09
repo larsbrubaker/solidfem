@@ -6,7 +6,7 @@
 //
 // Why a budget per engine phase: one unit means different work in each (elements while assembling
 // or recovering, iterations while solving), so a budget learned in one phase says nothing about
-// the next. Each phase starts low and grows only while slices stay under target. A slice that
+// the next, and an example part's meshing passes are phases of their own. Each phase starts low and grows only while slices stay under target. A slice that
 // runs long cuts the budget at once, straight to what would have hit the target, so one overlong
 // frame never repeats.
 //
@@ -81,7 +81,7 @@ export interface DriverHooks {
   onError(message: string): void;
 }
 
-const RUNNING = new Set(['assembling', 'solving', 'recovering']);
+const RUNNING = new Set(['meshing', 'refining', 'preparing', 'assembling', 'solving', 'recovering']);
 
 export class StudyDriver {
   readonly controller = new BudgetController();
@@ -108,13 +108,7 @@ export class StudyDriver {
    * once with `immediate` (the first study on load).
    */
   request(args: unknown[], immediate = false): void {
-    this.generation += 1;
-    this.engine.cancel();
-    this.state = 'cancelled';
-    if (this.timer !== null) {
-      this.clock.clearTimer(this.timer);
-      this.timer = null;
-    }
+    this.halt();
     if (immediate) {
       this.begin(args);
       return;
@@ -124,6 +118,20 @@ export class StudyDriver {
       this.timer = null;
       if (generation === this.generation) this.begin(args);
     }, DEBOUNCE_MS);
+  }
+
+  /**
+   * Stops the running study now, and any pending restart, without starting another: no further
+   * slice or view update comes from it, so nothing of the old study reaches the page.
+   */
+  halt(): void {
+    this.generation += 1;
+    this.engine.cancel();
+    this.state = 'cancelled';
+    if (this.timer !== null) {
+      this.clock.clearTimer(this.timer);
+      this.timer = null;
+    }
   }
 
   private begin(args: unknown[]): void {

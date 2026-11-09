@@ -1,6 +1,6 @@
 // Static build of the demo page: bundles src/main.ts into dist/, then copies index.html, the
-// styles, the wasm package (public/pkg, built first by `bun run build:wasm`) and the favicon
-// beside it. The bundle loads the wasm package by URL at run time (src/main.ts), so wasm-pack's
+// styles, the wasm package (public/pkg, built first by `bun run build:wasm`), the favicon and the
+// example parts' surfaces (public/parts) beside it. The bundle loads the wasm package by URL at run time (src/main.ts), so wasm-pack's
 // output is copied rather than bundled.
 //
 // Usage: bun run build.ts
@@ -45,6 +45,7 @@ writeFileSync(join(DIST, "index.html"), html);
 cpSync(join(ROOT, "styles"), join(DIST, "styles"), { recursive: true });
 cpSync(join(ROOT, "public/pkg"), join(DIST, "public/pkg"), { recursive: true });
 cpSync(join(ROOT, "public/favicon.svg"), join(DIST, "public/favicon.svg"));
+cpSync(join(ROOT, "public/parts"), join(DIST, "public/parts"), { recursive: true });
 // GitHub Pages would otherwise run Jekyll over the site.
 writeFileSync(join(DIST, ".nojekyll"), "");
 

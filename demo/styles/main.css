@@ -477,3 +477,13 @@ select {
 
   .demo-controls { align-self: auto; }
 }
+
+/* An example part's verdict, shown before any of its numbers. */
+.status-line { display: none; margin: 0.4rem 0; padding: 0.5rem 0.65rem; border-radius: 6px; font-size: 0.92rem; font-weight: 600; }
+.status-line.pass { display: block; background: #e7f4ec; color: #1a6b3c; }
+.status-line.limited { display: block; background: #fdf6e3; color: #7a5a10; }
+.status-line.fail { display: block; background: #fbe8ea; color: #a12b3a; }
+/* The bar and example controls swap by display; their children keep the panel's layout. */
+.control-set { display: contents; }
+.control-set.hidden { display: none; }
+.part-about { font-size: 0.86rem; color: var(--text-secondary); line-height: 1.35; }

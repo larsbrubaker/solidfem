@@ -254,3 +254,31 @@ describe('StudyDriver', () => {
     expect(engine.steps.length).toBe(0);
   });
 });
+
+describe('stopping a study for a part change', () => {
+  test('halt stops the slices and never updates the view again', () => {
+    const calls: string[] = [];
+    let frame: (() => void) | null = null;
+    const clock = {
+      now: () => 0,
+      setTimer: () => 1,
+      clearTimer: () => {},
+      requestFrame: (fn: () => void) => { frame = fn; return 1; },
+    };
+    const engine = {
+      start: () => 'meshing',
+      step: () => { calls.push('step'); return 'meshing'; },
+      cancel: () => { calls.push('cancel'); },
+    };
+    const driver = new StudyDriver(engine, clock, {
+      onStart: () => {},
+      onSlice: () => { calls.push('slice'); },
+      onError: () => {},
+    });
+    driver.request([], true);
+    driver.halt();
+    expect(driver.currentState).toBe('cancelled');
+    (frame as unknown as () => void)();
+    expect(calls).toEqual(['cancel', 'cancel']);
+  });
+});

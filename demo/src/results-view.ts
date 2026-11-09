@@ -43,6 +43,9 @@ export interface Summary {
   textbook?: 'compared' | 'none';
   rows?: ComparisonRow[];
   explanation?: string;
+  /** While an example part is being meshed: how far the current pass is. */
+  meshDone?: number;
+  meshTotal?: number;
 }
 
 /** How a row's difference column reads. */
@@ -99,8 +102,11 @@ export function tableView(summary: Summary): TableView {
   };
 }
 
-/** The calm warning shown beside a finished result outside the model, or null when it is inside. */
-export function modelWarning(summary: Summary): string | null {
+/**
+ * The calm warning shown beside a finished result outside the model, or null when it is inside.
+ * An example part has no textbook on the page to speak about.
+ */
+export function modelWarning(summary: Summary, example = false): string | null {
   if (!outsideModel(summary) || !summary.validity) return null;
   const v = summary.validity;
   const reasons: string[] = [];
@@ -115,7 +121,10 @@ export function modelWarning(summary: Summary): string | null {
   }
   const why = reasons.map((reason, i) => (i === 0 ? reason : `and ${reason}`)).join(', ');
   const sentence = why.charAt(0).toUpperCase() + why.slice(1);
-  return `Outside this model. ${sentence}. These numbers and the textbook comparison do not apply here: they come from the same linear theory, so their agreement means nothing. Reduce the load to see a valid result.`;
+  const consequence = example
+    ? 'These numbers do not apply here.'
+    : 'These numbers and the textbook comparison do not apply here: they come from the same linear theory, so their agreement means nothing.';
+  return `Outside this model. ${sentence}. ${consequence} Reduce the load to see a valid result.`;
 }
 
 function radiansToDegrees(radians: number | null): number | null {

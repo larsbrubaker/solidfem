@@ -2,7 +2,9 @@
 //! result can be reproduced by anyone. A bad request is a named error, not a panic. Uses the
 //! snap-fit beam, the smallest part.
 
-use solidfem_bench::surfaces::{all_parts, remesh_density, surface_text, SurfaceError};
+use solidfem_bench::surfaces::{
+    all_parts, demo_only_parts, remesh_density, surface_text, SurfaceError,
+};
 use solidmesh_mesh::CancelToken;
 
 /// The surface written at `snap_h1.0` regenerates identically, and its header line states the
@@ -54,4 +56,45 @@ fn a_size_the_remesher_cannot_meet_is_a_named_refusal() {
     };
     assert!(matches!(&error, SurfaceError::Refused { stem, .. } if stem == "snap_impossible"));
     assert!(error.to_string().contains("snap_impossible"), "{error}");
+}
+
+/// The demo page's surfaces (`demo/public/parts/`) are exactly what the generator writes, so the
+/// page's parts are the benchmark's parts and the file is not a hand-kept copy. Regenerate them
+/// with `solidfem-surfaces demo/public/parts <stem> ...` when this fails after a generator change.
+#[test]
+fn the_demo_surfaces_are_what_the_generator_produces() {
+    let directory = concat!(env!("CARGO_MANIFEST_DIR"), "/../../demo/public/parts");
+    let cancel = CancelToken::new();
+    let parts: Vec<_> = solidfem_bench::surfaces::all_parts()
+        .into_iter()
+        .chain(demo_only_parts())
+        .collect();
+    let mut checked = 0;
+    for entry in std::fs::read_dir(directory).expect("the demo's surfaces") {
+        let path = entry.expect("a directory entry").path();
+        let stem = path
+            .file_stem()
+            .expect("a surface file has a stem")
+            .to_string_lossy()
+            .into_owned();
+        let (part, density) = parts
+            .iter()
+            .find_map(|part| {
+                part.densities
+                    .iter()
+                    .find(|density| density.stem == stem)
+                    .map(|density| (part, density))
+            })
+            .unwrap_or_else(|| panic!("{stem} is not a surface the generator writes"));
+        let mesh = part.mesh(&cancel).expect("the part builds");
+        let remeshed = remesh_density(&mesh, part, density, &cancel).expect("the part remeshes");
+        let committed = std::fs::read_to_string(&path).expect("the committed surface");
+        assert_eq!(
+            committed,
+            surface_text(&remeshed.surface),
+            "{stem} differs from what the generator writes; rerun solidfem-surfaces"
+        );
+        checked += 1;
+    }
+    assert!(checked > 0, "no demo surfaces were found");
 }

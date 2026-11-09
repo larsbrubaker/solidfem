@@ -6,3 +6,8 @@
 export function wasmModuleUrl(pageUrl: string): string {
   return new URL('./public/pkg/solidfem_wasm.js', pageUrl).href;
 }
+
+/** The URL of an example part's surface file, for a page at `pageUrl`. */
+export function exampleSurfaceUrl(pageUrl: string, asset: string): string {
+  return new URL(`./public/parts/${asset}`, pageUrl).href;
+}

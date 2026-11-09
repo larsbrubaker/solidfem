@@ -27,8 +27,8 @@
       <p class="tagline">Structural analysis in the browser</p>
     </div>
     <div class="honesty">
-      <p><strong>What you can try.</strong> Solid bars and thick-walled tubes only. Their mesh follows the part, and results are checked against textbook answers.</p>
-      <p><strong>Not supported yet.</strong> Arbitrary shapes and thin-walled parts.</p>
+      <p><strong>What you can try.</strong> Solid bars and thick-walled tubes, checked against textbook answers, and a set of real example parts meshed and solved here in your browser, each with the benchmark's verdict on how far to trust it. Some are trustworthy and some are not yet: the part's status line says which.</p>
+      <p><strong>Not supported yet.</strong> Your own shapes, and thin-walled parts beyond these examples.</p>
       <p><strong>Estimates only.</strong> Material values are typical, so results are estimates. Not for safety-critical use.</p>
     </div>
     <div class="sidebar-footer">
@@ -39,8 +39,8 @@
   <main id="main-content">
     <div class="demo-page">
       <div class="demo-header">
-        <h2>How does this bar hold up?</h2>
-        <p>Change the part and the load, and see the stress and bending as the solve runs. Drag to orbit.</p>
+        <h2 id="demo-title">How does this bar hold up?</h2>
+        <p id="demo-sub">Change the part and the load, and see the stress and bending as the solve runs. Drag to orbit.</p>
       </div>
       <div class="demo-layout">
         <div class="demo-canvas-area" id="viewer">
@@ -54,7 +54,7 @@
                 <span id="legend-low">&mdash;</span>
               </div>
             </div>
-            <div class="legend-note">Top colour: peak stress outside the clamps. Clamp corners can go higher.</div>
+            <div class="legend-note" id="legend-note">Top colour: peak stress outside the clamps. Clamp corners can go higher.</div>
           </div>
           <div class="exaggeration">
             <span id="exaggeration"></span>
@@ -66,15 +66,16 @@
 
         <section class="results" id="results" aria-live="polite">
           <div class="results-head">
-            <h3>Compared with the textbook</h3>
+            <h3 id="results-title">Compared with the textbook</h3>
             <div class="status"><span class="state-pill" id="state">Starting</span> <span id="progress"></span></div>
           </div>
+          <p class="status-line" id="status-line" role="status"></p>
           <p class="model-warning" id="model-warning" role="status"></p>
           <div class="comparison-table" id="comparison"></div>
           <p class="comparison-note" id="comparison-note"></p>
           <div class="peak-row">
             <div class="peak">
-              <span class="k">Peak stress outside the clamps</span>
+              <span class="k" id="peak-label">Peak stress outside the clamps</span>
               <span class="v" id="peak-stress">&mdash;</span>
             </div>
             <div class="peak">
@@ -83,7 +84,7 @@
             </div>
           </div>
           <p class="note-line" id="safety-verdict"></p>
-          <p class="note-line">
+          <p class="note-line" id="peak-note">
             Peak stress is the highest stress in the part away from the clamps. A clamp's corners are left out because their stress is a model artefact: it grows without limit as the mesh gets finer. Safety factor is the material's yield stress divided by that peak; below 1 the part would yield.
           </p>
           <p class="error-line" id="message"></p>

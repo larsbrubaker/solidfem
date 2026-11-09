@@ -353,7 +353,7 @@ pub use gear_reference::{
     beam_section_ratios, gear_structured_reference, half_model_supports, solve_structured,
     structured_tooth, GearReferenceRow, ToothGrid, ROOT_PEAK_REFERENCE_GRIDS,
 };
-pub use hollow_box::{disk_triangle_overlap, PATCH_W_REFERENCE};
+pub use hollow_box::{disk_triangle_overlap, LOAD_DISK, PATCH_W_REFERENCE};
 pub use hollow_box_reference::{structured_reference, ReferenceRow};
 pub use hook::winkler_inner_stress;
 pub use plate::ktn_finite_width;

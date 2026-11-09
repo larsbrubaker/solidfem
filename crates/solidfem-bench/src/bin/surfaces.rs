@@ -17,7 +17,8 @@ usage: solidfem-surfaces <output-dir> [name ...]
 
 Builds each real-part benchmark surface and writes it to <output-dir>/<stem>.txt, for example
 gear_n0.6.txt. A name selects a whole part (gear) or one density (gear_n0.6); with no names every
-surface is generated. A surface the remesher refuses is reported and the rest still generate; the
+benchmark surface is generated. A coarser surface used only by the demo page, such as
+hollow_demo_h4.0, is generated only when named. A surface the remesher refuses is reported and the rest still generate; the
 exit status is non-zero if any was refused. Run in release: the finest densities take minutes.
 
 To run the benchmarks on the result, give the same directory to solidfem-benchmarks:

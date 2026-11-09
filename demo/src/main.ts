@@ -1,5 +1,7 @@
 // The page's entry point: loads the wasm package, builds the controls from catalogJson(), runs the
-// study through src/scheduler.ts and shows each result in the viewer, the legend and the tables.
+// study through src/scheduler.ts and shows each result in the viewer, the legend and the tables. A
+// visitor either changes a bar or tube (the original controls) or picks an example part; the
+// words for those are in src/examples.ts and the engine's table.
 // The rules live with their tests: ranges and clamping in src/catalog.ts, slices and restarts in
 // src/scheduler.ts, the ramp in src/colormap.ts, the exaggeration in src/animation.ts, the number
 // text in src/format.ts, what the results panel says in src/results-view.ts; this file only
@@ -8,7 +10,7 @@
 // There is no worker: the solve runs on the main thread in small slices (src/scheduler.ts) between
 // frames, so a control change takes effect at once and the page never freezes.
 
-import { wasmModuleUrl } from './asset-url.ts';
+import { exampleSurfaceUrl, wasmModuleUrl } from './asset-url.ts';
 import { Viewer } from './viewer.ts';
 import { createDropdown, createSegmented, createSlider, type Slider, type SliderSpec } from './controls.ts';
 import {
@@ -20,10 +22,16 @@ import { exaggerationScale } from './animation.ts';
 import { rampCssGradient } from './colormap.ts';
 import { exaggerationLabel, formatDuration, formatNumber, stateLabel } from './format.ts';
 import { modelWarning, safetyMessage, safetyText, tableView, type Summary } from './results-view.ts';
-import { StudyDriver, type Clock } from './scheduler.ts';
+import { StudyDriver, type Clock, type Engine } from './scheduler.ts';
+import {
+  AS_TESTED, LOG_SLIDER_POSITIONS as LOAD_POSITIONS, aboutText, chooserOptions, exampleSafetyMessage,
+  largestExtent, loadScaleAt, loadScalePosition, loadScaleText, meshingText, statusView, type ExamplePart,
+} from './examples.ts';
 
 interface DemoInstance {
   start(...args: any[]): string;
+  startExample(id: string, surface: string, material: number, loadScale: number): string;
+  setLoadScale(factor: number): void;
   step(budget: number): string;
   cancel(): void;
   summaryJson(): string;
@@ -33,6 +41,8 @@ interface DemoInstance {
   vonMises(): Float32Array;
   displacements(): Float32Array;
   rotations(): Float32Array;
+  heldPoints(): Float32Array;
+  loadArrows(): Float32Array;
 }
 
 interface WasmModule {
@@ -118,6 +128,11 @@ async function main() {
   let hasResult = false;
   let lastSliceMs = 0;
   let lastSummary: Summary | null = null;
+  let mode: 'bar' | 'example' = 'bar';
+  let example: ExamplePart = catalog.examples[0];
+  let exampleMaterial = AS_TESTED;
+  let exampleLoadScale = 1;
+  const surfaces = new Map<string, string>();
 
   // Honest on a reduced-motion request: no animation until the visitor asks for it.
   const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -136,8 +151,9 @@ async function main() {
     return `${Math.round(fraction * 100)} % (${formatNumber(thickness)} mm)`;
   }
 
-  const controls = el('controls');
-  controls.append(
+  const barControls = document.createElement('div');
+  barControls.className = 'control-set';
+  barControls.append(
     createSegmented('Part', [{ value: 'solid', text: 'Solid bar' }, { value: 'tube', text: 'Thick-walled tube' }], choice.section,
       v => change(c => { c.section = v as Section; }, true)).element,
     sliders.length.element, sliders.width.element, sliders.height.element, sliders.wall.element,
@@ -149,6 +165,143 @@ async function main() {
       v => change(c => { c.load = v as Load; }, true)).element,
     sliders.magnitude.element,
   );
+
+  const about = document.createElement('p');
+  about.className = 'part-about';
+  const loadSlider = createSlider('Load size', exampleLoadSpec(), exampleLoadScale, v => changeExampleLoad(v));
+  const exampleControls = document.createElement('div');
+  exampleControls.className = 'control-set hidden';
+  exampleControls.append(
+    createDropdown('Example part', chooserOptions(catalog.examples), example.id, v => pickExample(v)),
+    about,
+    createDropdown('Material', [
+      { value: String(AS_TESTED), text: 'As the benchmark tested it' },
+      ...catalog.materials.map((m, i) => ({ value: String(i), text: m.name })),
+    ], String(AS_TESTED), v => changeExampleMaterial(Number(v))),
+    loadSlider.element,
+  );
+
+  const controls = el('controls');
+  controls.append(
+    createSegmented('Try', [{ value: 'bar', text: 'A bar or tube' }, { value: 'example', text: 'Example parts' }], 'bar',
+      v => switchMode(v as 'bar' | 'example')).element,
+    barControls, exampleControls,
+  );
+
+  function exampleLoadSpec(): SliderSpec {
+    return {
+      min: 0, max: LOAD_POSITIONS, step: 1,
+      toValue: loadScaleAt, toPosition: loadScalePosition,
+      format: value => loadScaleText(example, value),
+    };
+  }
+
+  function refreshExampleControls() {
+    about.textContent = aboutText(example);
+    loadSlider.update(exampleLoadSpec(), exampleLoadScale);
+    const status = statusView(example);
+    const line = el('status-line');
+    line.textContent = status.text;
+    line.className = `status-line ${status.tone}`;
+  }
+
+  /** Empties the view and the results as soon as the part changes: nothing of the old one stays. */
+  function clearForNewPart() {
+    driver.halt();
+    hasResult = false;
+    lastSummary = null;
+    viewer.clear();
+    el('peak-stress').textContent = '—';
+    el('safety-factor').textContent = '—';
+    el('safety-verdict').textContent = '';
+    el('comparison').innerHTML = '';
+    el('comparison-note').textContent = '';
+    el('legend-low').textContent = '—';
+    el('legend-high').textContent = '—';
+    el('legend').classList.add('muted');
+    el('exaggeration').textContent = '';
+    showWarning(null);
+  }
+
+  /** Changes between the bar and the example parts: the page's words, controls and panels. */
+  function switchMode(next: 'bar' | 'example') {
+    if (next === mode) return;
+    mode = next;
+    clearForNewPart();
+    barControls.classList.toggle('hidden', next === 'example');
+    exampleControls.classList.toggle('hidden', next === 'bar');
+    el('demo-title').textContent = next === 'bar' ? 'How does this bar hold up?' : 'How does this part hold up?';
+    el('demo-sub').textContent = next === 'bar'
+      ? 'Change the part and the load, and see the stress and bending as the solve runs. Drag to orbit.'
+      : 'Pick an example part. It is meshed and solved here in your browser, and the status line says how far to trust it. Drag to orbit.';
+    el('results-title').textContent = next === 'bar' ? 'Compared with the textbook' : 'What the benchmark found';
+    el('peak-label').textContent = next === 'bar' ? 'Peak stress outside the clamps' : 'Peak stress away from where it is held';
+    el('legend-note').textContent = next === 'bar'
+      ? 'Top colour: peak stress outside the clamps. Clamp corners can go higher.'
+      : 'Top colour: peak stress away from where it is held. Where it is held can go higher.';
+    el('peak-note').textContent = next === 'bar'
+      ? 'Peak stress is the highest stress in the part away from the clamps. A clamp\'s corners are left out because their stress is a model artefact: it grows without limit as the mesh gets finer. Safety factor is the material\'s yield stress divided by that peak; below 1 the part would yield.'
+      : 'Peak stress is the highest stress on the part, leaving out only the elements touching a full fixture, where the stress is a model artefact. This page solves a coarser mesh than the benchmark, so its numbers can differ from the verdict above.';
+    el('status-line').className = next === 'bar' ? 'status-line' : el('status-line').className;
+    if (next === 'bar') {
+      el('comparison').innerHTML = '';
+      el('comparison-note').textContent = '';
+      setStaleness(true);
+      showState('cancelled');
+      driver.request(startArguments(catalog, choice));
+    } else {
+      refreshExampleControls();
+      void requestExample();
+    }
+  }
+
+  function pickExample(id: string) {
+    example = catalog.examples.find(part => part.id === id) ?? example;
+    exampleLoadScale = 1;
+    clearForNewPart();
+    refreshExampleControls();
+    void requestExample();
+  }
+
+  function changeExampleMaterial(material: number) {
+    exampleMaterial = material;
+    void requestExample();
+  }
+
+  /** A load-size change: the engine rescales the result it has, with no new solve. */
+  function changeExampleLoad(scale: number) {
+    exampleLoadScale = scale;
+    engine.setLoadScale(scale);
+    if (hasResult) {
+      const summary = readSummary();
+      renderResults(summary);
+      showExamplePart(summary, true);
+    }
+  }
+
+  /** Downloads the chosen part's surface (once), then starts its study. */
+  async function requestExample() {
+    const part = example;
+    setStaleness(true);
+    showWarning(null);
+    el('message').textContent = '';
+    showState('cancelled');
+    try {
+      let surface = surfaces.get(part.id);
+      if (surface === undefined) {
+        const response = await fetch(exampleSurfaceUrl(window.location.href, part.asset));
+        if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+        surface = await response.text();
+        surfaces.set(part.id, surface);
+      }
+      if (mode === 'example' && part.id === example.id) {
+        driver.request(['example', part.id, surface, exampleMaterial, exampleLoadScale]);
+      }
+    } catch (error) {
+      el('message').textContent = `Could not download this part's surface: ${String(error)}`;
+      showState('failed');
+    }
+  }
 
   function refreshSliders() {
     const c = combinationOf(catalog, choice.section, choice.restraint, choice.load);
@@ -185,7 +338,16 @@ async function main() {
     requestFrame: fn => window.requestAnimationFrame(fn),
   };
 
-  const driver = new StudyDriver(engine, clock, {
+  /** The bar studies take `Demo.start`; an example takes `startExample` with its surface. */
+  const studyEngine: Engine = {
+    start: (...args: any[]) => args[0] === 'example'
+      ? engine.startExample(args[1], args[2], args[3], args[4])
+      : engine.start(...args),
+    step: budget => engine.step(budget),
+    cancel: () => engine.cancel(),
+  };
+
+  const driver = new StudyDriver(studyEngine, clock, {
     onStart(state) {
       startedAt = performance.now();
       showState(state);
@@ -194,18 +356,25 @@ async function main() {
         return;
       }
       el('message').textContent = '';
+      if (state === 'failed') {
+        el('message').textContent = readSummary().failure ?? 'The part was refused.';
+        return;
+      }
       // Before there is any result, show the undeformed part in grey rather than an empty view.
-      if (!hasResult) showPart(readSummary(), false);
+      if (!hasResult && mode === 'bar') showPart(readSummary(), false);
     },
     onSlice(state, refresh, sliceMs) {
       lastSliceMs = sliceMs;
       if (refresh) {
         const summary = readSummary();
         renderResults(summary);
-        if (state !== 'assembling') setStaleness(false);
+        if (state !== 'assembling' && !meshingText(summary)) setStaleness(false);
         if (state === 'done' || (summary.maxStress ?? 0) > 0) {
-          showPart(summary, true);
+          if (mode === 'example') showExamplePart(summary, true);
+          else showPart(summary, true);
           hasResult = true;
+        } else if (mode === 'example' && state === 'assembling' && !hasResult) {
+          showExamplePart(summary, false);
         }
         if (state === 'failed') el('message').textContent = summary.failure ?? 'The solve failed.';
       }
@@ -224,6 +393,30 @@ async function main() {
   }
 
   /** Copies the engine's arrays into the viewer; a study with no stress yet draws grey. */
+  function showExamplePart(summary: Summary, colored: boolean) {
+    const positions = engine.positions();
+    if (positions.length === 0) return;
+    const low = summary.minStress ?? 0;
+    const peak = summary.peakStressOutsideClamps ?? 0;
+    const high = peak > low ? peak : Math.max(summary.maxStress ?? 0, low);
+    const size = largestExtent(positions);
+    const scale = exaggerationScale(summary.maxDisplacement ?? 0, size, summary.maxRotation ?? 0);
+    viewer.showExample({
+      positions,
+      indices: engine.indices(),
+      displacements: engine.displacements(),
+      rotations: engine.rotations(),
+      vonMises: colored ? engine.vonMises() : new Float32Array(0),
+      rampLow: low,
+      rampHigh: high,
+      scale,
+    }, example.id, { heldPoints: engine.heldPoints(), loadArrows: engine.loadArrows() }, example.view);
+    el('legend-low').textContent = colored ? `${formatNumber(low)} MPa` : '—';
+    el('legend-high').textContent = colored ? `${formatNumber(high)} MPa` : '—';
+    el('legend').classList.toggle('muted', !colored);
+    el('exaggeration').textContent = exaggerationLabel(scale, summary.maxDisplacement);
+  }
+
   function showPart(summary: Summary, colored: boolean) {
     const low = summary.minStress ?? 0;
     const peak = summary.peakStressOutsideClamps ?? 0;
@@ -250,13 +443,20 @@ async function main() {
   }
 
   function renderResults(summary: Summary) {
-    if (summary.state === 'assembling') return;
-    renderTable(summary);
+    if (summary.state === 'assembling' || meshingText(summary)) return;
+    if (mode === 'example') {
+      el('comparison').innerHTML = '';
+      el('comparison-note').textContent = '';
+    } else {
+      renderTable(summary);
+    }
     el('peak-stress').textContent = `${formatNumber(summary.peakStressOutsideClamps)} MPa`;
     el('safety-factor').textContent = safetyText(summary);
-    el('safety-verdict').textContent = safetyMessage(summary);
+    el('safety-verdict').textContent = mode === 'example'
+      ? exampleSafetyMessage(exampleMaterial !== AS_TESTED, summary.safetyFactor, safetyMessage(summary))
+      : safetyMessage(summary);
     el('results').classList.toggle('solving', summary.state !== 'done');
-    showWarning(modelWarning(summary));
+    showWarning(modelWarning(summary, mode === 'example'));
   }
 
   function showWarning(text: string | null) {
@@ -269,14 +469,17 @@ async function main() {
   function showState(state: string) {
     const label = stateLabel(state);
     el('state').textContent = label;
-    const running = state === 'assembling' || state === 'solving' || state === 'recovering' || state === 'cancelled';
+    const meshing = state === 'meshing' || state === 'refining' || state === 'preparing';
+    const running = meshing || state === 'assembling' || state === 'solving' || state === 'recovering' || state === 'cancelled';
     el('viewer-state').textContent = running && hasResult ? `${label}: showing the last result` : running ? `${label}…` : '';
     el('viewer-state').classList.toggle('visible', running);
     const summary = lastSummary;
     const iterations = summary && summary.iterations !== undefined && state !== 'cancelled' ? summary.iterations : 0;
     const done = state === 'done' ? `Finished in ${formatDuration(performance.now() - startedAt)}.` : '';
+    const meshingProgress = lastSummary ? meshingText({ state, meshDone: lastSummary.meshDone, meshTotal: lastSummary.meshTotal }) : null;
     el('progress').textContent = state === 'cancelled'
       ? 'Waiting for the controls to settle…'
+      : meshing ? (meshingProgress ?? label)
       : `Iterations: ${iterations}. Last slice: ${lastSliceMs.toFixed(1)} ms. ${done}`.trim();
   }
 

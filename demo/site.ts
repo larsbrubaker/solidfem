@@ -25,6 +25,7 @@ const MIME_TYPES: Record<string, string> = {
   ".wasm": "application/wasm",
   ".json": "application/json",
   ".svg": "image/svg+xml",
+  ".txt": "text/plain",
   ".png": "image/png",
   ".ico": "image/x-icon",
 };

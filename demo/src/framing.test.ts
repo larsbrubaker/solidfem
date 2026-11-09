@@ -3,7 +3,7 @@
 // never undoes what the visitor did with the camera.
 
 import { describe, expect, test } from 'bun:test';
-import { CameraFraming, MIN_VIEWPORT_PIXELS, fitDistance, partBounds, type CameraPose, type Vec3 } from './framing.ts';
+import { CameraFraming, MIN_VIEWPORT_PIXELS, fitDistance, boundsOfPositions, clearRect, partBounds, viewShift, type CameraPose, type Vec3 } from './framing.ts';
 
 const FOV = 36;
 const SETUP = { length: 100, width: 10, height: 20, restraint: 'one_end' };
@@ -173,5 +173,73 @@ describe('showing parts', () => {
   test('a bar\'s bounds cover its diagonal and the room for its plates and arrow', () => {
     expect(BOUNDS.centre).toEqual([50, 5, 10]);
     expect(BOUNDS.radius).toBeCloseTo(0.5 * Math.sqrt(100 * 100 + 10 * 10 + 20 * 20) + 2 * 20, DIGITS);
+  });
+});
+
+describe('the bounds of an example part', () => {
+  test('are centred on its surface and enclose it', () => {
+    const bounds = boundsOfPositions('hook', new Float32Array([0, 0, 0, 2, 4, 6]));
+    expect(bounds.key).toBe('hook');
+    expect(bounds.centre).toEqual([1, 2, 3]);
+    expect(bounds.radius).toBeGreaterThanOrEqual(0.5 * Math.hypot(2, 4, 6));
+  });
+});
+
+describe('a part beside the legend', () => {
+  const FOV = 36;
+  const legend = { left: 10, top: 10, right: 200, bottom: 190 };
+  const strip = (w: number, h: number) => ({ left: 10, top: h - 50, right: w - 10, bottom: h - 10 });
+  const pose = { position: [0, -10, 0] as const, target: [0, 0, 0] as const };
+  /** The part's sphere on screen, in the clear rectangle: its centre in pixels and its radius. */
+  function onScreen(w: number, h: number, obstructions: { left: number; top: number; right: number; bottom: number }[], radius: number) {
+    const framing = new CameraFraming(FOV);
+    framing.viewportChanged(w, h, pose, obstructions);
+    const placement = framing.showPart({ key: 'k', centre: [0, 0, 0], radius }, pose)!;
+    const distance = Math.hypot(...placement.position);
+    const pixels = (radius / (distance * Math.tan((FOV * Math.PI) / 360))) * (h / 2);
+    return { x: w / 2 - framing.viewOffset.x, y: h / 2 - framing.viewOffset.y, pixels };
+  }
+  function clearOf(circle: { x: number; y: number; pixels: number }, r: { left: number; top: number; right: number; bottom: number }): boolean {
+    return circle.x + circle.pixels <= r.left || circle.x - circle.pixels >= r.right
+      || circle.y + circle.pixels <= r.top || circle.y - circle.pixels >= r.bottom;
+  }
+  // Non-bar proportions: a long flat plate, a compact block, a small clip.
+  const parts = [
+    new Float32Array([0, 0, 0, 300, 100, 2]),
+    new Float32Array([-10, 24, 0, 10, 44, 20]),
+    new Float32Array([0, 0, 0, 20, 5, 2]),
+  ];
+
+  for (const [name, w, h] of [['a wide desktop view', 1100, 620], ['a phone', 360, 320], ['a portrait phone', 360, 640]] as const) {
+    test(`stays clear of the legend and the strip on ${name}`, () => {
+      const obstructions = [legend, strip(w, h)];
+      for (const positions of parts) {
+        const bounds = boundsOfPositions('p', positions);
+        const circle = onScreen(w, h, obstructions, bounds.radius);
+        expect(clearOf(circle, legend)).toBe(true);
+        expect(clearOf(circle, strip(w, h))).toBe(true);
+        expect(circle.x - circle.pixels).toBeGreaterThanOrEqual(0);
+        expect(circle.x + circle.pixels).toBeLessThanOrEqual(w);
+        expect(circle.y - circle.pixels).toBeGreaterThanOrEqual(0);
+        expect(circle.y + circle.pixels).toBeLessThanOrEqual(h);
+      }
+    });
+  }
+
+  test('an obstruction outside the view changes nothing', () => {
+    const viewport = { width: 800, height: 600 };
+    const clear = clearRect(viewport, [{ left: 900, top: 0, right: 950, bottom: 40 }]);
+    expect(clear).toEqual({ left: 0, top: 0, right: 800, bottom: 600 });
+    expect(viewShift(viewport, clear)).toEqual({ x: 0, y: 0 });
+  });
+
+  test('a part with its own direction opens from it, even after the visitor has orbited another', () => {
+    const framing = new CameraFraming(FOV);
+    framing.viewportChanged(800, 600, pose);
+    framing.showPart({ key: 'a', centre: [0, 0, 0], radius: 5 }, pose);
+    const placed = framing.showPart({ key: 'b', centre: [0, 0, 0], radius: 5, direction: [0, 0, 1] }, pose)!;
+    expect(placed.position[0]).toBeCloseTo(0, 9);
+    expect(placed.position[1]).toBeCloseTo(0, 9);
+    expect(placed.position[2]).toBeGreaterThan(0);
   });
 });

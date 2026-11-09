@@ -29,6 +29,9 @@ const PATCH: f64 = 3.0;
 pub(super) const FORCE: f64 = 10.0;
 const PATCH_AREA: f64 = PI * PATCH * PATCH;
 
+/// The disk the load acts on: its centre on the top face and its radius.
+pub const LOAD_DISK: ([f64; 2], f64) = ([0.5 * SIDE, 0.5 * SIDE], PATCH);
+
 /// The iteration budget, enforced: a solve over this count is a named failure. The hardest plate
 /// here took about 540 iterations at 170 thousand free values; 3000 is five times
 /// that for a harder thin closed shell.
@@ -149,7 +152,7 @@ pub(super) fn patch_deflection(
 }
 
 fn apply(mesh: &QuadraticTetMesh) -> Result<Supports, String> {
-    let patch = disk_patch(mesh, [0.5 * SIDE, 0.5 * SIDE]);
+    let patch = disk_patch(mesh, LOAD_DISK.0);
     Ok(Supports {
         fixed: plane_nodes(mesh, 2, 0.0),
         tractions: disk_tractions(mesh, &patch, 1.0)?,

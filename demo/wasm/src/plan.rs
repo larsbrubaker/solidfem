@@ -120,6 +120,9 @@ pub struct Comparison {
 pub enum NoTextbookAnswer {
     /// Saint-Venant has no closed form for the torsion of this closed section.
     TubeTwist,
+    /// An example part: the benchmark's verdict on the page speaks to it, not a row-by-row
+    /// comparison from this page's coarse mesh.
+    ExamplePart,
 }
 
 impl NoTextbookAnswer {
@@ -129,6 +132,10 @@ impl NoTextbookAnswer {
             NoTextbookAnswer::TubeTwist => {
                 "A closed thick-walled tube in twist has no simple textbook formula, so only the \
                  simulated result is shown."
+            }
+            NoTextbookAnswer::ExamplePart => {
+                "This page solves a coarser mesh of the part than the benchmark did, so it shows \
+                 the simulated result and the benchmark's verdict, not a textbook comparison."
             }
         }
     }

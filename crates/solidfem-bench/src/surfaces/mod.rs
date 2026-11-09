@@ -209,13 +209,74 @@ pub fn all_parts() -> Vec<SurfacePart> {
     ]
 }
 
+/// Surfaces generated only for the demo page, coarser than any benchmark density because a
+/// browser has to solve them in a wait a visitor will sit through. No benchmark reads these: they
+/// are selected by name on the command line and never written by a run with no names. The demo's
+/// entry says, in words, what such a surface costs in accuracy, since no verdict covers it.
+pub fn demo_only_parts() -> Vec<SurfacePart> {
+    type Build = fn(&CancelToken) -> Result<Mesh, SurfaceError>;
+    let one =
+        |name: &'static str, deviation: f64, build: Build, stem: &str, size: Sizing| SurfacePart {
+            name,
+            deviation,
+            densities: vec![SurfaceDensity {
+                stem: stem.to_string(),
+                size,
+            }],
+            build,
+        };
+    vec![
+        one(
+            "hollow_demo",
+            0.05,
+            shapes::hollow_box,
+            "hollow_demo_h4.0",
+            Sizing::Uniform(4.0),
+        ),
+        one(
+            "plate_demo",
+            0.02,
+            shapes::plate_with_hole,
+            "plate_demo_n2.0",
+            DEMO_PLATE_SIZING,
+        ),
+        one(
+            "gear_demo",
+            0.02,
+            shapes::gear_tooth,
+            "gear_demo_n1.4",
+            DEMO_GEAR_SIZING,
+        ),
+    ]
+}
+
+/// The demo's plate: the benchmark's grading round the hole, coarser near it and far from it.
+pub const DEMO_PLATE_SIZING: Sizing = Sizing::AroundPoint {
+    centre: [150.0, 50.0],
+    r0: 5.0,
+    near: 2.0,
+    grade: 0.4,
+    far: 15.0,
+};
+
+/// The demo's gear tooth: the benchmark's grading round the tooth, coarser throughout.
+pub const DEMO_GEAR_SIZING: Sizing = Sizing::AroundPoint {
+    centre: [0.0, 38.0],
+    r0: 10.0,
+    near: 1.4,
+    grade: 0.3,
+    far: 4.5,
+};
+
 /// The parts `names` select: a part's name selects all its densities, a stem such as `gear_n0.6`
-/// selects that one. No names selects everything.
+/// selects that one. No names selects every benchmark surface; the demo-only surfaces
+/// ([`demo_only_parts`]) are selected only by name.
 pub fn select(names: &[String]) -> Result<Vec<SurfacePart>, SurfaceError> {
     let mut parts = all_parts();
     if names.is_empty() {
         return Ok(parts);
     }
+    parts.extend(demo_only_parts());
     let known: Vec<String> = parts
         .iter()
         .flat_map(|part| {

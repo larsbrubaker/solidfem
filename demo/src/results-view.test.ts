@@ -113,3 +113,16 @@ describe('the safety factor message', () => {
     expect(safetyMessage(summary('done', inside, { safetyFactor: 5 }))).toContain('below');
   });
 });
+
+describe('an example part outside the model', () => {
+  test('warns without speaking of a textbook comparison the page does not show', () => {
+    const summary = {
+      state: 'done', validity: {
+        withinModel: false, exceedsYield: true, excessiveDeflection: false, excessiveTwist: false,
+        deflectionLimit: null, twistRadians: null, twistLimitRadians: null,
+      },
+    };
+    expect(modelWarning(summary, true)).not.toContain('textbook');
+    expect(modelWarning(summary)).toContain('textbook');
+  });
+});

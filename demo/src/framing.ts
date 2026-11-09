@@ -12,6 +12,11 @@
 //   lands exactly on the new one; one the visitor has orbited, panned or zoomed keeps its direction,
 //   its target and its zoom relative to the fit. A change that leaves the fitting distance alone,
 //   like any resize of a landscape view, moves nothing.
+//
+// The legend and the exaggeration strip sit on top of the view, so the part is fitted to what they
+// leave clear: the largest rectangle beside them (`clearRect`), with the view shifted so the part's
+// centre lands in the middle of it (`viewShift`). The part is held in a sphere, so this holds for
+// any shape of part, and a phone's narrow view gives up the same room as a wide one.
 
 export type Vec3 = readonly [number, number, number];
 
@@ -33,11 +38,27 @@ export interface PartBounds {
   key: string;
   centre: Vec3;
   radius: number;
+  /** From the part towards the camera for this part, overriding the visitor's last direction. */
+  direction?: Vec3;
 }
 
 export interface Viewport {
   width: number;
   height: number;
+}
+
+/** A rectangle of the view in CSS pixels from its top-left corner. */
+export interface Rect {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** How far to shift the drawn view so the part's centre lands in the clear rectangle's middle. */
+export interface ViewShift {
+  x: number;
+  y: number;
 }
 
 /** What a size report changes: the size to draw at (null to ignore it) and any camera move. */
@@ -84,17 +105,73 @@ export function partBounds(setup: { length: number; width: number; height: numbe
   };
 }
 
-/** How far back a camera must be for a sphere to fit both across and up the view. */
-export function fitDistance(radius: number, fovDegrees: number, aspect: number): number {
+/** The bounds of an example part, from its surface: a sphere round it with a margin for the arrows. */
+export function boundsOfPositions(key: string, positions: Float32Array, direction?: Vec3): PartBounds {
+  const low: [number, number, number] = [Infinity, Infinity, Infinity];
+  const high: [number, number, number] = [-Infinity, -Infinity, -Infinity];
+  for (let i = 0; i + 2 < positions.length; i += 3) {
+    for (let axis = 0; axis < 3; axis++) {
+      low[axis] = Math.min(low[axis], positions[i + axis]);
+      high[axis] = Math.max(high[axis], positions[i + axis]);
+    }
+  }
+  const radius = 0.5 * Math.hypot(high[0] - low[0], high[1] - low[1], high[2] - low[2]);
+  return {
+    key,
+    centre: [0.5 * (low[0] + high[0]), 0.5 * (low[1] + high[1]), 0.5 * (low[2] + high[2])],
+    radius: radius * 1.25,
+    direction,
+  };
+}
+
+/** The largest rectangle of the view beside `obstructions`, each cut off in turn. */
+export function clearRect(viewport: Viewport, obstructions: Rect[]): Rect {
+  let clear: Rect = { left: 0, top: 0, right: viewport.width, bottom: viewport.height };
+  for (const o of obstructions) {
+    const sides: Rect[] = [
+      { ...clear, right: Math.min(clear.right, o.left) },
+      { ...clear, left: Math.max(clear.left, o.right) },
+      { ...clear, bottom: Math.min(clear.bottom, o.top) },
+      { ...clear, top: Math.max(clear.top, o.bottom) },
+    ];
+    const room = (r: Rect) => Math.min(r.right - r.left, r.bottom - r.top);
+    const overlaps = o.left < clear.right && o.right > clear.left && o.top < clear.bottom && o.bottom > clear.top;
+    if (overlaps) clear = sides.reduce((best, side) => (room(side) > room(best) ? side : best));
+  }
+  return clear;
+}
+
+/** The view shift that puts the view's centre at the middle of `clear`. */
+export function viewShift(viewport: Viewport, clear: Rect): ViewShift {
+  return {
+    x: 0.5 * viewport.width - 0.5 * (clear.left + clear.right),
+    y: 0.5 * viewport.height - 0.5 * (clear.top + clear.bottom),
+  };
+}
+
+/** The clear rectangle's smaller side as a share of the view's height. */
+export function clearShare(viewport: Viewport, clear: Rect): number {
+  return Math.min(clear.right - clear.left, clear.bottom - clear.top) / viewport.height;
+}
+
+/**
+ * How far back a camera must be for a sphere to fit. `share` is the room the sphere has as a share
+ * of the view's height; without it, the whole view: across and up.
+ */
+export function fitDistance(radius: number, fovDegrees: number, aspect: number, share?: number): number {
   const fov = (fovDegrees * Math.PI) / 180;
   const fitHeight = radius / Math.sin(fov / 2);
   // The field of view is vertical, so a portrait view has to back away to fit the part across.
-  return (fitHeight / Math.min(aspect, 1)) * FIT_MARGIN;
+  return (fitHeight / (share ?? Math.min(aspect, 1))) * FIT_MARGIN;
 }
 
 /** The camera decisions for one viewer; see the file header for the rules. */
 export class CameraFraming {
   private aspect: number | null = null;
+  /** The clear share of the view's height, once obstructions are known. */
+  private share: number | undefined = undefined;
+  /** Where the part's centre is drawn relative to the view's centre. */
+  private shift: ViewShift = { x: 0, y: 0 };
   private bounds: PartBounds | null = null;
   /** Whether `bounds` has its placement yet; false while a part waits for a real size. */
   private placed = false;
@@ -102,6 +179,11 @@ export class CameraFraming {
   private hasPlacedOnce = false;
 
   constructor(private fovDegrees: number) {}
+
+  /** The view shift that keeps the part clear of the panels, for the last reported size. */
+  get viewOffset(): ViewShift {
+    return this.shift;
+  }
 
   /** A part is known but the view has no real size to place it against yet. */
   get waitingForViewport(): boolean {
@@ -117,24 +199,31 @@ export class CameraFraming {
   }
 
   /** Takes the container's size, as reported, whenever it may have changed. */
-  viewportChanged(clientWidth: number, clientHeight: number, pose: CameraPose): ViewportChange {
+  viewportChanged(clientWidth: number, clientHeight: number, pose: CameraPose, obstructions: Rect[] = []): ViewportChange {
     if (clientWidth < MIN_VIEWPORT_PIXELS || clientHeight < MIN_VIEWPORT_PIXELS) {
       return { viewport: null, placement: null };
     }
+    const viewport = { width: clientWidth, height: clientHeight };
+    const clear = clearRect(viewport, obstructions);
     const aspect = clientWidth / clientHeight;
     const previous = this.aspect;
+    const previousShare = this.share;
     this.aspect = aspect;
+    this.share = obstructions.length > 0 ? clearShare(viewport, clear) : undefined;
+    this.shift = viewShift(viewport, clear);
     return {
-      viewport: { width: clientWidth, height: clientHeight },
-      placement: this.bounds === null ? null : this.replace(previous, aspect, this.bounds, pose),
+      viewport,
+      placement: this.bounds === null ? null : this.replace(previous, previousShare, aspect, this.bounds, pose),
     };
   }
 
   /** The move a new view shape calls for, if any. */
-  private replace(previous: number | null, aspect: number, bounds: PartBounds, pose: CameraPose): CameraPlacement | null {
+  private replace(
+    previous: number | null, previousShare: number | undefined, aspect: number, bounds: PartBounds, pose: CameraPose,
+  ): CameraPlacement | null {
     if (!this.placed || previous === null) return this.place(aspect, bounds, pose);
-    const before = fitDistance(bounds.radius, this.fovDegrees, previous);
-    const after = fitDistance(bounds.radius, this.fovDegrees, aspect);
+    const before = fitDistance(bounds.radius, this.fovDegrees, previous, previousShare);
+    const after = fitDistance(bounds.radius, this.fovDegrees, aspect, this.share);
     if (before === after) return null;
     const offset = subtract(pose.position, pose.target);
     const distance = Math.hypot(offset[0], offset[1], offset[2]) * (after / before);
@@ -148,8 +237,10 @@ export class CameraFraming {
 
   /** Aims the camera at a part from the opening view, or from the visitor's direction after that. */
   private place(aspect: number, bounds: PartBounds, pose: CameraPose): CameraPlacement {
-    const distance = fitDistance(bounds.radius, this.fovDegrees, aspect);
-    const direction = normalized(this.hasPlacedOnce ? subtract(pose.position, bounds.centre) : OPENING_DIRECTION);
+    const distance = fitDistance(bounds.radius, this.fovDegrees, aspect, this.share);
+    const direction = normalized(
+      bounds.direction ?? (this.hasPlacedOnce ? subtract(pose.position, bounds.centre) : OPENING_DIRECTION),
+    );
     this.placed = true;
     this.hasPlacedOnce = true;
     return {

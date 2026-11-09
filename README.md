@@ -34,14 +34,16 @@ it stands.
   possible.
 - Solves are resumable and cancellable, and slicing a solve differently does not change its answer.
 - Solid bars and thick-walled tubes, as the demo offers them, compared with the textbook on the
-  page.
+  page, and the real-part benchmark shapes offered as example parts, each with the benchmark's
+  verdict shown on the page.
 - Exact Delaunay tetrahedralization of a point set, and meshing the solid inside a closed surface
   with its shape kept exactly.
 
 **Does not work yet**
 
-- **Arbitrary parts and thin-walled parts are not ready.** The demo offers only bars and tubes on
-  purpose, because their meshes follow the part.
+- **Your own parts and arbitrary thin-walled parts are not ready.** The demo's controls change
+  only bars and tubes, whose meshes follow the part, and its example parts are the fixed benchmark
+  shapes, which may fail their benchmark; each says so.
 - **The volume-mesher gate has passed on two surfaces, which is not a general claim.** That gate
   (`solidfem-gate`) runs this library's mesher into its solver on a 100 x 100 x 0.8 mm plate with
   two element layers through the wall, against beam theory, using the multigrid preconditioner.
@@ -87,7 +89,12 @@ None of these is on crates.io yet.
 The [live demo](https://larsbrubaker.github.io/solidfem/) runs the solver in the browser: pick a
 bar or a thick-walled tube, change the material and the load, and watch the stress, the bending and
 the comparison with the textbook update as the solve runs on the page's main thread, in small
-slices, with no worker.
+slices, with no worker. Under "Example parts" it also offers the real-part benchmark shapes (a thin
+strip, a thick ring, a plate with a hole, L-brackets, NAFEMS LE1 and LE10, a hook, a snap-fit, a
+hollow box and a gear tooth): each is meshed and solved in the browser at its benchmark's coarsest
+mesh or, for the plate, the hollow box and the gear, a coarser demo-only one whose own error is
+stated, with where it is held and loaded marked on
+the part and a status line stating the benchmark's verdict, pass or fail.
 
 It lives in `demo/`: `demo/wasm` is the engine, the page is TypeScript built with
 [Bun](https://bun.sh), and `.github/workflows/deploy-demo.yml` publishes it to GitHub Pages on

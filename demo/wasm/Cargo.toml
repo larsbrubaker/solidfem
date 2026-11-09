@@ -7,9 +7,10 @@
 # cover it like any crate. It is not under crates/ because it is not a library anyone depends on,
 # and it is never published (`publish = false`).
 #
-# It calls only solidfem's documented API, through the `solidfem` facade; `src/lib.rs` says what
-# it adds (the offered parts, the textbook formulas, the slicing state machine and the render
-# arrays).
+# It calls solidfem's documented API through the `solidfem` facade, and `solidfem-bench` for the
+# real-part benchmark cases (the holds, loads and materials of the example parts), so the demo
+# solves exactly what the benchmarks judge; `src/lib.rs` says what it adds (the offered parts, the
+# textbook formulas, the slicing state machine and the render arrays).
 [package]
 name = "solidfem-demo-wasm"
 description = "WebAssembly bindings for the solidfem demo page"
@@ -26,6 +27,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 solidfem = { path = "../../crates/solidfem" }
+solidfem-bench = { path = "../../crates/solidfem-bench" }
 wasm-bindgen = "0.2"
 js-sys = "0.3"
 # Routes Rust panic messages (with location) to console.error: without it a panic surfaces only as

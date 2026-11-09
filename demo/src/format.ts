@@ -58,6 +58,9 @@ export function formatDuration(ms: number): string {
 /** The label for an engine state. */
 export function stateLabel(state: string): string {
   switch (state) {
+    case 'meshing': return 'Meshing the part';
+    case 'refining': return 'Refining the mesh';
+    case 'preparing': return 'Placing the holds and loads';
     case 'assembling': return 'Building the model';
     case 'solving': return 'Solving';
     case 'recovering': return 'Computing stresses';

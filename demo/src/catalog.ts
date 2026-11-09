@@ -8,6 +8,8 @@
 // choices and a linear slider would leave the small loads in the first pixels. Each load kind
 // remembers its own magnitude: a push of 500 N and a twist of 500 N mm mean different things.
 
+import type { ExamplePart } from './examples.ts';
+
 export type Section = 'solid' | 'tube';
 export type Restraint = 'one_end' | 'both_ends';
 export type Load = 'push' | 'twist';
@@ -43,6 +45,7 @@ export interface Catalog {
   maxElements: number;
   materials: Material[];
   combinations: Combination[];
+  examples: ExamplePart[];
 }
 
 /** What the visitor has chosen; `magnitudes` keeps one value per load kind. */

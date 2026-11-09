@@ -12,8 +12,8 @@
 use std::time::Instant;
 
 use solidfem::elastic::{
-    point_geometry, Clock, Material, Model, PreconditionerChoice, Quadrature, Report, Solution,
-    StaticStudy, StepOutcome, StudyOptions,
+    point_geometry, Clock, Material, Model, PointStress, PreconditionerChoice, Quadrature, Report,
+    Solution, StaticStudy, StepOutcome, StudyOptions,
 };
 use solidfem::mesh::{BoundaryFace, QuadraticTetMesh};
 use solidfem::meshing::quadratic_from_solid;
@@ -111,6 +111,15 @@ pub struct CaseResult {
 /// A message naming the file when it cannot be read or parsed.
 pub fn read_surface(path: &str) -> Result<Surface, String> {
     let text = std::fs::read_to_string(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    parse_surface(&text, path)
+}
+
+/// Parses a surface in that text format; `path` names it in any error. The demo page reads the
+/// same files through this, from a fetch rather than a disk.
+///
+/// # Errors
+/// A message naming `path` when the text cannot be parsed.
+pub fn parse_surface(text: &str, path: &str) -> Result<Surface, String> {
     let mut tokens = text.split_ascii_whitespace();
     let mut next = |what: &str| {
         tokens
@@ -272,10 +281,7 @@ fn solve_density(
         Ok(supports) => supports,
         Err(error) => return DensityOutcome::Refused(format!("supports and loads: {error}")),
     };
-    let mut is_fixed = vec![false; mesh.nodes().len()];
-    for node in &supports.fixed {
-        is_fixed[*node as usize] = true;
-    }
+    let is_fixed = fixed_mask(&mesh, &supports);
     if supports
         .tractions
         .iter()
@@ -286,7 +292,6 @@ fn solve_density(
                 .to_string(),
         );
     }
-    let (applied, gross) = applied_load(&mesh, &supports);
     let (solution, report) = match solve(
         mesh.clone(),
         case.material,
@@ -304,19 +309,10 @@ fn solve_density(
             }
         }
     };
-    let (reaction, reaction_magnitude) =
-        match support_reaction(&mesh, &solution, &is_fixed, &supports, quadrature) {
-            Ok(reaction) => reaction,
-            Err(error) => return DensityOutcome::Refused(format!("reaction recovery: {error}")),
-        };
-    // An enforced displacement is its own loading: with no applied traction the reactions alone
-    // set the scale of the balance check.
-    let gross = if supports.tractions.is_empty() {
-        reaction_magnitude
-    } else {
-        gross
+    let balance = match load_balance(&mesh, &supports, &solution.point_stresses, quadrature) {
+        Ok(balance) => balance,
+        Err(error) => return DensityOutcome::Refused(format!("reaction recovery: {error}")),
     };
-    let balance = LoadBalance::new(applied, reaction, gross);
     let values = match (case.measure)(&mesh, &solution) {
         Ok(values) => values,
         Err(error) => return DensityOutcome::Refused(format!("measurement: {error}")),
@@ -436,6 +432,38 @@ pub fn face_normal(mesh: &QuadraticTetMesh, face: &BoundaryFace) -> [f64; 3] {
     ]
 }
 
+/// Which nodes `supports` fixes in all three directions.
+fn fixed_mask(mesh: &QuadraticTetMesh, supports: &Supports) -> Vec<bool> {
+    let mut is_fixed = vec![false; mesh.nodes().len()];
+    for node in &supports.fixed {
+        is_fixed[*node as usize] = true;
+    }
+    is_fixed
+}
+
+/// The applied load against the support reactions recovered from `point_stresses`. An enforced
+/// displacement is its own loading: with no applied traction the reactions alone set the scale.
+///
+/// # Errors
+/// When an integration point's element geometry cannot be evaluated, naming the fault.
+pub fn load_balance(
+    mesh: &QuadraticTetMesh,
+    supports: &Supports,
+    point_stresses: &[PointStress],
+    quadrature: Quadrature,
+) -> Result<LoadBalance, String> {
+    let is_fixed = fixed_mask(mesh, supports);
+    let (applied, gross) = applied_load(mesh, supports);
+    let (reaction, reaction_magnitude) =
+        support_reaction(mesh, point_stresses, &is_fixed, supports, quadrature)?;
+    let gross = if supports.tractions.is_empty() {
+        reaction_magnitude
+    } else {
+        gross
+    };
+    Ok(LoadBalance::new(applied, reaction, gross))
+}
+
 /// The force the supports exert on the part and the sum of the magnitudes of its components at
 /// each held value. At a fully fixed node the reaction is the internal nodal force integrated
 /// from the point stresses, since no loaded face touches a fixed node (the pipeline refuses one
@@ -444,14 +472,14 @@ pub fn face_normal(mesh: &QuadraticTetMesh, face: &BoundaryFace) -> [f64; 3] {
 /// roller can sit under a loaded face.
 fn support_reaction(
     mesh: &QuadraticTetMesh,
-    solution: &Solution,
+    point_stresses: &[PointStress],
     is_fixed: &[bool],
     supports: &Supports,
     quadrature: Quadrature,
 ) -> Result<([f64; 3], f64), String> {
     let mut internal = vec![[0.0; 3]; mesh.nodes().len()];
     let rule = quadrature.points();
-    for stress in &solution.point_stresses {
+    for stress in point_stresses {
         let tet = &mesh.tets()[stress.tet as usize];
         let nodes = tet.map(|n| mesh.nodes()[n as usize]);
         let q = &rule[stress.point as usize];

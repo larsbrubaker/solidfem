@@ -344,6 +344,7 @@ dependencies = [
  "console_error_panic_hook",
  "js-sys",
  "solidfem",
+ "solidfem-bench",
  "wasm-bindgen",
 ]
 

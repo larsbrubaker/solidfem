@@ -1,7 +1,8 @@
 // The Three.js viewer the page draws the study in: z up (the engine's convention), orbit controls,
 // flat-shaded stress colours from src/colormap.ts, the bending animation from src/animation.ts,
 // and the markings that say what is happening to the part: a hatched plate at each fixed end and
-// an arrow (push) or curved arrow (twist) at the load. The part stays on screen across a restart;
+// an arrow (push) or curved arrow (twist) at the load, or for an example part the dots and arrows
+// the engine picks (src/example-markers.ts). The part stays on screen across a restart;
 // the page calls `showPart` when it has something new to draw. Where the camera goes is decided in
 // src/framing.ts, which this file feeds with the container's size and the camera's pose.
 //
@@ -14,7 +15,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { animationPhase, displacePositions } from './animation.ts';
 import { fillColors } from './colormap.ts';
-import { CameraFraming, partBounds, type CameraPlacement, type CameraPose } from './framing.ts';
+import { CameraFraming, boundsOfPositions, partBounds, type CameraPlacement, type CameraPose, type Rect } from './framing.ts';
+import { buildExampleMarkers, type ExampleMarkerData } from './example-markers.ts';
 import type { Load, Restraint } from './catalog.ts';
 
 /** What the viewer draws for one result. */
@@ -42,6 +44,9 @@ export interface PartSetup {
 }
 
 const COLORS = { neutral: 0x9aa6b8, plate: 0x14213d, hatch: 0xf6f7f9, arrow: 0xd1495b, edge: 0x14213d };
+
+/** Panel edges are rounded to this many pixels when fitting the part. */
+const OBSTRUCTION_STEP_PIXELS = 8;
 
 /** The camera's vertical field of view. */
 const FOV_DEGREES = 36;
@@ -143,17 +148,62 @@ export class Viewer {
 
     this.resize = new ResizeObserver(() => this.fit());
     this.resize.observe(container);
+    for (const selector of ['.legend', '.exaggeration']) {
+      const panel = container.querySelector(selector);
+      if (panel) this.resize.observe(panel);
+    }
     this.fit();
     this.animate();
   }
 
   private fit() {
-    const { viewport, placement } = this.framing.viewportChanged(this.container.clientWidth, this.container.clientHeight, this.pose());
+    const { viewport, placement } = this.framing.viewportChanged(
+      this.container.clientWidth, this.container.clientHeight, this.pose(), this.obstructions(),
+    );
     if (!viewport) return;
     this.renderer.setSize(viewport.width, viewport.height);
     this.camera.aspect = viewport.width / viewport.height;
+    const shift = this.framing.viewOffset;
+    this.camera.setViewOffset(viewport.width, viewport.height, shift.x, shift.y, viewport.width, viewport.height);
     this.camera.updateProjectionMatrix();
     this.applyPlacement(placement);
+  }
+
+  /** The panels over the view, rounded outward so a label's small changes do not move the camera. */
+  private obstructions(): Rect[] {
+    const view = this.container.getBoundingClientRect();
+    return ['.legend', '.exaggeration'].flatMap(selector => {
+      const panel = this.container.querySelector(selector);
+      if (!panel) return [];
+      const box = panel.getBoundingClientRect();
+      const step = OBSTRUCTION_STEP_PIXELS;
+      return [{
+        left: Math.floor((box.left - view.left) / step) * step,
+        top: Math.floor((box.top - view.top) / step) * step,
+        right: Math.ceil((box.right - view.left) / step) * step,
+        bottom: Math.ceil((box.bottom - view.top) / step) * step,
+      }];
+    });
+  }
+
+  /** Removes the part and its markings, leaving an empty view for the next part. */
+  clear() {
+    if (this.mesh) {
+      this.scene.remove(this.mesh);
+      disposeTree(this.mesh);
+      this.mesh = null;
+    }
+    if (this.lines) {
+      this.scene.remove(this.lines);
+      disposeTree(this.lines);
+      this.lines = null;
+    }
+    disposeTree(this.markings);
+    this.markings.clear();
+    this.loadMarker = null;
+    this.loadVertex = -1;
+    this.current = null;
+    this.markingsFor = '';
   }
 
   private pose(): CameraPose {
@@ -200,6 +250,28 @@ export class Viewer {
 
   /** Shows a result, replacing the shown part only when its mesh changed. */
   showPart(view: PartView, setup: PartSetup) {
+    this.drawResult(view);
+    this.placeMarkings(view, setup);
+    this.applyPlacement(this.framing.showPart(partBounds(setup), this.pose()));
+  }
+
+  /** Shows an example part's result with its own markers, framed to its surface. */
+  showExample(view: PartView, key: string, markers: ExampleMarkerData, direction: readonly [number, number, number]) {
+    this.drawResult(view);
+    const mark = `example|${key}`;
+    if (mark !== this.markingsFor) {
+      this.markingsFor = mark;
+      disposeTree(this.markings);
+      this.markings.clear();
+      this.loadMarker = null;
+      this.loadVertex = -1;
+      this.markings.add(buildExampleMarkers(markers));
+    }
+    this.applyPlacement(this.framing.showPart(boundsOfPositions(mark, view.positions, direction), this.pose()));
+  }
+
+  /** Puts a result's mesh and colours on screen, replacing the mesh only when it changed. */
+  private drawResult(view: PartView) {
     const sameMesh = this.current !== null && this.current.indices.length === view.indices.length
       && this.current.positions.length === view.positions.length && this.sameData(this.current.positions, view.positions)
       && this.sameData(this.current.indices, view.indices);
@@ -213,8 +285,6 @@ export class Viewer {
     }
     colors.needsUpdate = true;
     this.current = view;
-    this.placeMarkings(view, setup);
-    this.applyPlacement(this.framing.showPart(partBounds(setup), this.pose()));
   }
 
   private sameData(a: ArrayLike<number>, b: ArrayLike<number>): boolean {

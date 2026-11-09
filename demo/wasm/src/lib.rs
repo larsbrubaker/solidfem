@@ -8,21 +8,29 @@
 //! `catalog.rs` holds what is offered, `section.rs` and `plan.rs` the textbook, `part.rs` the
 //! mesh, `engine.rs` the slicing, `view.rs` the render arrays and `validity.rs` whether a result
 //! is inside what the linear model can describe, so the native tests run the same code the
-//! browser does.
+//! browser does. `examples.rs` is the table of example parts and what the page says about each,
+//! and `example_study.rs` carries one from its surface file to a [`engine::DemoStudy`], through
+//! the benchmark case's own holds and loads ([`Demo::start_example`] starts one).
 
 pub mod catalog;
 pub mod engine;
+pub mod example_study;
+pub mod examples;
 pub mod part;
 pub mod plan;
 pub mod section;
 pub mod validity;
 pub mod view;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use js_sys::{Float32Array, Uint32Array};
 use wasm_bindgen::prelude::*;
 
 use catalog::{LoadKind, Restraint, SectionKind, StudyRequest, DISPLAY_NAME, MATERIALS};
 use engine::{DemoStudy, StudyState};
+use example_study::{ExampleMaterial, ExampleState, ExampleStudy};
 use plan::{PlanError, Textbook};
 
 /// Installs the panic hook once.
@@ -79,19 +87,64 @@ pub fn catalog_json() -> String {
         ));
     }
     format!(
-        "{{\"displayName\":{},\"maxElements\":{},\"materials\":[{}],\"combinations\":[{}]}}",
+        "{{\"displayName\":{},\"maxElements\":{},\"materials\":[{}],\"combinations\":[{}],\
+         \"examples\":[{}]}}",
         json_string(DISPLAY_NAME),
         plan::MAX_ELEMENTS,
         materials.join(","),
-        combinations.join(",")
+        combinations.join(","),
+        examples::EXAMPLES
+            .iter()
+            .map(example_json)
+            .collect::<Vec<_>>()
+            .join(",")
     )
+}
+
+/// One row of the example table as JSON.
+fn example_json(part: &examples::ExamplePart) -> String {
+    format!(
+        "{{\"id\":{},\"name\":{},\"tests\":{},\"held\":{},\"loaded\":{},\"asset\":{},\
+         \"load\":{},\"verdict\":{},\"status\":{},\"view\":[{},{},{}]}}",
+        json_string(part.id),
+        json_string(part.name),
+        json_string(part.tests),
+        json_string(part.held),
+        json_string(part.loaded),
+        json_string(part.surface_file),
+        json_string(part.load),
+        json_string(part.verdict.name()),
+        json_string(part.status),
+        json_number(part.view[0]),
+        json_number(part.view[1]),
+        json_number(part.view[2]),
+    )
+}
+
+/// What the page is driving: a bar from the catalog or an example part.
+enum Active {
+    Bar(Box<DemoStudy>),
+    Example(Box<ExampleStudy>),
+}
+
+impl Active {
+    /// The solve behind this study, once there is one.
+    fn study(&self) -> Option<&DemoStudy> {
+        match self {
+            Active::Bar(study) => Some(study),
+            Active::Example(example) => example.study(),
+        }
+    }
 }
 
 /// The study the page is driving.
 #[wasm_bindgen]
 pub struct Demo {
-    study: Option<DemoStudy>,
+    study: Option<Active>,
     last_refusal: Option<String>,
+    /// The render arrays of the current estimate: one page refresh reads several of them, and
+    /// building them once keeps that refresh inside its frame. Cleared by whatever can change them.
+    view_cache: RefCell<Option<Rc<view::ViewData>>>,
 }
 
 impl Default for Demo {
@@ -108,6 +161,7 @@ impl Demo {
         Demo {
             study: None,
             last_refusal: None,
+            view_cache: RefCell::new(None),
         }
     }
 
@@ -133,6 +187,7 @@ impl Demo {
     ) -> Result<String, JsValue> {
         self.study = None;
         self.last_refusal = None;
+        self.view_cache.replace(None);
         let request = StudyRequest {
             section: parse_section(section)?,
             length,
@@ -147,7 +202,7 @@ impl Demo {
         match DemoStudy::start(request) {
             Ok(study) => {
                 let state = state_name(study.state());
-                self.study = Some(study);
+                self.study = Some(Active::Bar(Box::new(study)));
                 Ok(state.to_string())
             }
             Err(error @ PlanError::TooLarge { .. }) => {
@@ -158,19 +213,63 @@ impl Demo {
         }
     }
 
+    /// Starts an example part from the text of its surface file, cancelling any running study.
+    /// `material` indexes the page's materials, or is negative for the material the benchmark
+    /// used; `load_scale` is the factor on the benchmark's load. Starting the part already held
+    /// keeps its mesh, so only the solve runs again. Returns the state name, which is
+    /// `"failed"` with `failure` in [`Demo::summary_json`] when the part is refused; an unknown
+    /// id or a material out of range returns an error naming the value.
+    #[wasm_bindgen(js_name = startExample)]
+    pub fn start_example(
+        &mut self,
+        id: &str,
+        surface_text: &str,
+        material: i32,
+        load_scale: f64,
+    ) -> Result<String, JsValue> {
+        let part = examples::find(id)
+            .ok_or_else(|| JsValue::from_str(&format!("unknown example part {id:?}")))?;
+        let retained = match self.study.take() {
+            Some(Active::Example(previous)) => previous.take_meshed(),
+            _ => None,
+        };
+        self.last_refusal = None;
+        self.view_cache.replace(None);
+        let material = example_material(part, material)?;
+        let study = ExampleStudy::start(part, surface_text, material, load_scale, retained);
+        let state = example_state_name(study.state());
+        self.study = Some(Active::Example(Box::new(study)));
+        Ok(state.to_string())
+    }
+
+    /// Shows the example part at `factor` times the benchmark's load, without solving again.
+    #[wasm_bindgen(js_name = setLoadScale)]
+    pub fn set_load_scale(&mut self, factor: f64) {
+        if let Some(Active::Example(example)) = self.study.as_mut() {
+            example.set_load_scale(factor);
+            self.view_cache.replace(None);
+        }
+    }
+
     /// Runs one slice with `budget` units of work (see `engine.rs`); returns the state name:
-    /// `"assembling"`, `"solving"`, `"recovering"`, `"done"`, `"cancelled"`, `"failed"`, or
-    /// `"idle"` with no study.
+    /// `"meshing"`, `"refining"`, `"preparing"` (an example part only), `"assembling"`,
+    /// `"solving"`, `"recovering"`, `"done"`, `"cancelled"`, `"failed"`, or `"idle"` with no
+    /// study.
     pub fn step(&mut self, budget: u32) -> String {
-        self.study.as_mut().map_or("idle".to_string(), |s| {
-            state_name(s.step(budget)).to_string()
-        })
+        self.view_cache.replace(None);
+        match self.study.as_mut() {
+            None => "idle".to_string(),
+            Some(Active::Bar(study)) => state_name(study.step(budget)).to_string(),
+            Some(Active::Example(example)) => example_state_name(example.step(budget)).to_string(),
+        }
     }
 
     /// Cancels the running study; a new `start` replaces it at any time anyway.
     pub fn cancel(&mut self) {
-        if let Some(study) = self.study.as_mut() {
-            study.cancel();
+        match self.study.as_mut() {
+            None => {}
+            Some(Active::Bar(study)) => study.cancel(),
+            Some(Active::Example(example)) => example.cancel(),
         }
     }
 
@@ -187,13 +286,30 @@ impl Demo {
     /// and `deflectionLimit`, `twistRadians`, `twistLimitRadians`, each `null` where it does not
     /// apply; see `validity.rs`) and either `rows` (quantity, unit, place, fea, textbook,
     /// percentDifference) or `textbook: "none"` with `explanation` when the combination has no
-    /// textbook answer. Failure gives `failure` with the message.
+    /// textbook answer. Failure gives `failure` with the message. While an example part is being
+    /// meshed there is no solve yet: `state`, `meshDone`, `meshTotal` and `failure` only.
     #[wasm_bindgen(js_name = summaryJson)]
     pub fn summary_json(&self) -> String {
-        let Some(study) = self.study.as_ref() else {
+        let study = match self.study.as_ref() {
+            None => return "{\"state\":\"idle\"}".to_string(),
+            Some(active) => match active.study() {
+                Some(study) => study,
+                None => {
+                    let Active::Example(example) = active else {
+                        return "{\"state\":\"idle\"}".to_string();
+                    };
+                    let (done, total) = example.mesh_progress();
+                    return format!(
+                        "{{\"state\":{},\"meshDone\":{done},\"meshTotal\":{total},\"failure\":{}}}",
+                        json_string(example_state_name(example.state())),
+                        example.failure().map_or("null".to_string(), json_string),
+                    );
+                }
+            },
+        };
+        let Some(view) = self.view() else {
             return "{\"state\":\"idle\"}".to_string();
         };
-        let view = study.view();
         let (elements, nodes) = study.mesh_size();
         let safety = view.safety_factor.map_or("null".to_string(), json_number);
         let optional = |value: Option<f64>| value.map_or("null".to_string(), json_number);
@@ -260,7 +376,7 @@ impl Demo {
 
     /// Triangle vertex indices, three per triangle.
     pub fn indices(&self) -> Uint32Array {
-        let view = self.study.as_ref().map(|s| s.view());
+        let view = self.view();
         let empty = Vec::new();
         Uint32Array::from(view.as_ref().map_or(empty.as_slice(), |v| &v.indices[..]))
     }
@@ -281,10 +397,72 @@ impl Demo {
         self.array(|v| &v.rotation)
     }
 
+    /// An example part's held node positions, three per node; empty for a bar or before its mesh
+    /// is ready.
+    #[wasm_bindgen(js_name = heldPoints)]
+    pub fn held_points(&self) -> Float32Array {
+        match self.study.as_ref() {
+            Some(Active::Example(example)) => Float32Array::from(example.held_points()),
+            _ => Float32Array::new_with_length(0),
+        }
+    }
+
+    /// An example part's load arrows: tail, unit direction and length, seven numbers each.
+    #[wasm_bindgen(js_name = loadArrows)]
+    pub fn load_arrows(&self) -> Float32Array {
+        match self.study.as_ref() {
+            Some(Active::Example(example)) => Float32Array::from(example.load_arrows()),
+            _ => Float32Array::new_with_length(0),
+        }
+    }
+
+    /// The render arrays of the current estimate, built at most once between changes to it.
+    fn view(&self) -> Option<Rc<view::ViewData>> {
+        if let Some(view) = self.view_cache.borrow().as_ref() {
+            return Some(Rc::clone(view));
+        }
+        let view = Rc::new(self.study.as_ref()?.study().map(DemoStudy::view)?);
+        self.view_cache.replace(Some(Rc::clone(&view)));
+        Some(view)
+    }
+
     fn array(&self, pick: impl Fn(&view::ViewData) -> &Vec<f32>) -> Float32Array {
-        let view = self.study.as_ref().map(|s| s.view());
+        let view = self.view();
         let empty = Vec::new();
         Float32Array::from(view.as_ref().map_or(empty.as_slice(), |v| pick(v)))
+    }
+}
+
+fn example_material(
+    part: &examples::ExamplePart,
+    material: i32,
+) -> Result<ExampleMaterial, JsValue> {
+    if material < 0 {
+        return Ok(ExampleMaterial {
+            material: part.benchmark_material(),
+            yield_strength: None,
+        });
+    }
+    let chosen = MATERIALS
+        .get(material as usize)
+        .ok_or_else(|| JsValue::from_str(&format!("no material number {material}")))?;
+    Ok(ExampleMaterial {
+        material: solidfem::elastic::Material {
+            youngs_modulus: chosen.youngs_modulus,
+            poisson_ratio: chosen.poisson_ratio,
+        },
+        yield_strength: Some(chosen.yield_strength),
+    })
+}
+
+fn example_state_name(state: ExampleState) -> &'static str {
+    match state {
+        ExampleState::Meshing => "meshing",
+        ExampleState::Refining => "refining",
+        ExampleState::Preparing => "preparing",
+        ExampleState::Study(state) => state_name(state),
+        ExampleState::Failed => "failed",
+        ExampleState::Cancelled => "cancelled",
     }
 }
 
