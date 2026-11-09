@@ -5,6 +5,7 @@
 # `solidfem-gate` binary is the end-of-mesher gate: this workspace's mesher into the solver on a
 # 100 x 100 x 0.8 mm plate. The `solidfem-preconditioner` binary compares the preconditioners.
 # The `solidfem-benchmarks` binary runs real parts against closed-form and published references.
+# The `solidfem-surfaces` binary regenerates the surfaces those benchmarks read.
 [package]
 name = "solidfem-bench"
 description = "Measures real triangle meshes, sliver cost and the end-of-mesher gate for solidfem"
@@ -35,6 +36,10 @@ path = "src/bin/preconditioner.rs"
 name = "solidfem-benchmarks"
 path = "src/bin/benchmarks.rs"
 
+[[bin]]
+name = "solidfem-surfaces"
+path = "src/bin/surfaces.rs"
+
 [dependencies]
 robust = "1.2"
 solidfem = { path = "../solidfem", version = "0.1.0" }
@@ -45,9 +50,9 @@ solidfem-mesh = { path = "../solidfem-mesh", version = "0.1.0" }
 # never sees it. Path dependencies with version floors, on the checkout CI puts beside this one.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libm = "0.2.16"
-solidmesh = { path = "../../../solidmesh/crates/geometry-processing", version = "0.2.1" }
-solidmesh-math = { path = "../../../solidmesh/crates/vector-math", version = "0.2.1" }
-solidmesh-mesh = { path = "../../../solidmesh/crates/polygon-mesh", version = "0.2.1" }
+solidmesh = { path = "../../../solidmesh/crates/geometry-processing", version = "0.2.2" }
+solidmesh-math = { path = "../../../solidmesh/crates/vector-math", version = "0.2.2" }
+solidmesh-mesh = { path = "../../../solidmesh/crates/polygon-mesh", version = "0.2.2" }
 
 [lints]
 workspace = true

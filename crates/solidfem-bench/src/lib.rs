@@ -4,7 +4,9 @@
 //! result (`src/bin/sliver.rs` runs it). The end-of-mesher gate, this workspace's mesher into the
 //! solver on a thin plate, is `src/bin/gate.rs`; what it prints on request about the multigrid is
 //! in `gate_diagnostics.rs`. `benchmarks` runs real parts through the whole pipeline against known
-//! references (`src/bin/benchmarks.rs` runs it). The library crates depend on nothing here.
+//! references (`src/bin/benchmarks.rs` runs it). `surfaces` builds and remeshes the surfaces
+//! those benchmarks read (`src/bin/surfaces.rs` runs it). The library crates depend on nothing
+//! here.
 
 #[cfg(not(target_arch = "wasm32"))]
 pub mod corpus;
@@ -14,3 +16,5 @@ pub mod benchmarks;
 pub mod gate_diagnostics;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod sliver;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod surfaces;

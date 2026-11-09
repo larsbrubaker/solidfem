@@ -2,10 +2,10 @@
 //! sizes, where it is held and loaded, what is measured, the reference it is compared with and its
 //! limits. Each limit is derived in the comment on its judge, written before the case first ran.
 //!
-//! The surface files come from a separate generator built on solidmesh's CSG, extrude, revolve and
-//! `remesh_for_analysis`, kept out of this repository because that remesher is not a dependency
-//! this workspace takes. Each case's `Sizing` repeats the size function the generator was given,
-//! so the interior of the volume mesh grades the same way as its surface. Selection regions are
+//! The surface files come from `crate::surfaces`, built on solidmesh's CSG, extrude, revolve and
+//! `remesh_for_analysis` (`solidfem-surfaces` writes them). Each case's `Sizing` is the size
+//! function that generator was given, so the interior of the volume mesh grades the same way as
+//! its surface; the `surfaces` tests hold the two together. Selection regions are
 //! geometric, with a tolerance above the rounding of the remeshed coordinates; a chord across a
 //! curved surface is allowed for where the region is curved.
 

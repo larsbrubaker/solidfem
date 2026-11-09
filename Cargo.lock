@@ -372,7 +372,7 @@ dependencies = [
 
 [[package]]
 name = "solidmesh"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "indexmap",
  "libm",
@@ -385,7 +385,7 @@ dependencies = [
 
 [[package]]
 name = "solidmesh-clipper"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "clipper2-rust",
  "libm",
@@ -394,7 +394,7 @@ dependencies = [
 
 [[package]]
 name = "solidmesh-math"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "libm",
  "serde",
@@ -403,7 +403,7 @@ dependencies = [
 
 [[package]]
 name = "solidmesh-mesh"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "clipper2-rust",
  "libm",
