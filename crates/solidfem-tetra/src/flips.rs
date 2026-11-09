@@ -40,6 +40,9 @@ use crate::predicates::orient;
 /// this large do not occur around an edge of a surface triangulation's Delaunay mesh in practice.
 const MAX_RING: usize = 32;
 
+/// `vertex_tet` of a point a later point's cavity swallowed: it is in no tetrahedron.
+const NO_TET: u32 = u32::MAX;
+
 /// A cost no legal choice reaches, meaning no triangulation of an interval exists.
 const NO_TRIANGULATION: i32 = i32::MAX / 4;
 
@@ -105,11 +108,15 @@ pub(crate) struct Flipper {
     /// The flat patches of the surface, and the mesh faces each ended up covered by.
     pub(crate) patches: Vec<Patch>,
     pub(crate) patch_faces: Vec<Vec<[u32; 3]>>,
-    /// Current depth of neighbouring-edge relief; zero right after a point is added, so flips
-    /// do not undo what the point changed.
+    /// How many levels of neighbouring-edge relief an edge removal may use. Set to zero for a stuck
+    /// patch's retry after a point and for the flip of the chord a point was placed for, where
+    /// relief could flip the new point's star away again; a stuck edge's walks use it in full.
     pub(crate) relief_depth: u32,
-    /// How many points have been added inside the solid.
+    /// How many points have ever been added inside the solid, swallowed ones included: the
+    /// input's vertices are the points before these, and the limit on points counts them.
     pub(crate) steiner_points: usize,
+    /// Added points a later point's cavity took whole, now in no tetrahedron.
+    pub(crate) swallowed_points: usize,
 }
 
 /// A face removal found to be illegal, with the edges of the shared face that block it.
@@ -145,11 +152,16 @@ impl Flipper {
             patches,
             relief_depth: RELIEF_DEPTH,
             steiner_points: 0,
+            swallowed_points: 0,
         }
     }
 
-    /// Every tetrahedron containing vertex `v`, including ghosts, in a fixed order.
+    /// Every tetrahedron containing vertex `v`, including ghosts, in a fixed order; none for a
+    /// point a later cavity swallowed.
     pub(crate) fn tets_around(&mut self, v: u32) -> Vec<u32> {
+        if self.vertex_tet[v as usize] == NO_TET {
+            return Vec::new();
+        }
         if self.visited.len() < self.core.tets.len() {
             self.visited.resize(self.core.tets.len(), 0);
         }
@@ -748,9 +760,30 @@ impl Flipper {
                 new.push([face[0], face[1], face[2], index]);
             }
         }
+        let mut before: Vec<u32> = cavity
+            .iter()
+            .flat_map(|&t| self.core.tets[t as usize])
+            .filter(|&vertex| vertex != GHOST)
+            .collect();
+        before.sort_unstable();
+        before.dedup();
         self.apply(cavity, &new)?;
         self.steiner_points += 1;
+        // A point whose whole star was in the cavity is in no tetrahedron now: nothing may reach
+        // it through a slot that has since been freed or reused.
+        let kept: HashSet<u32> = new.iter().flatten().copied().collect();
+        for vertex in before {
+            if !kept.contains(&vertex) {
+                self.vertex_tet[vertex as usize] = NO_TET;
+                self.swallowed_points += 1;
+            }
+        }
         Ok(())
+    }
+
+    /// How many added points are still in the mesh.
+    pub(crate) fn kept_steiner_points(&self) -> usize {
+        self.steiner_points - self.swallowed_points
     }
 
     /// Whether segment `(x, y)` passes through the interior of the triangle, by exact tests: its

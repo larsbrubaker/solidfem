@@ -153,7 +153,7 @@ impl fmt::Display for TetraError {
                 f,
                 "{missing_edges} surface edges and {missing_faces} surface triangles could not \
                  be recovered (first edge {first_missing_edge:?}, first triangle \
-                 {first_missing_face:?}) after adding {steiner_points} interior points; \
+                 {first_missing_face:?}) with {steiner_points} interior points added; \
                  {constraints_without_room} had no room inside the solid for a point. The \
                  surface may intersect itself, or a wall may be too thin to hold a point"
             ),

@@ -2,6 +2,7 @@
 // can be cancelled and resumed, with the phases reported as they go.
 
 use crate::shapes::{hollow_box, rotated};
+use crate::thick_plate::read_surface;
 use solidfem_tetra::{SolidMesh, StepStatus, SurfaceMesher, SurfacePhase};
 
 fn input() -> (Vec<[f64; 3]>, Vec<[u32; 3]>) {
@@ -79,4 +80,29 @@ fn phases_are_reported_in_order_and_the_report_counts_what_was_present() {
     assert!(report.edges_present_after_delaunay <= report.edges_total);
     assert!(report.faces_present_after_delaunay <= report.faces_total);
     assert_eq!(report.edges_failed + report.faces_failed, 0);
+}
+
+/// A surface that needs points added: the work on a stuck edge is sliced into a unit for each
+/// point and each walk, and the slicing must not show in the result.
+#[test]
+fn a_run_that_adds_points_gives_the_same_bits_however_it_is_sliced() {
+    let (points, triangles) = read_surface(include_str!("le10_n85.txt"));
+    let mesh_in_steps = |step_size: usize| {
+        let mut mesher = SurfaceMesher::new(points.clone(), triangles.clone()).expect("valid");
+        loop {
+            match mesher.step(step_size, &mut || false).expect("recovers") {
+                StepStatus::Done => return (mesher.result().expect("finished"), mesher.report()),
+                StepStatus::Running => {}
+                StepStatus::Cancelled => panic!("nothing asked to cancel"),
+            }
+        }
+    };
+    let whole = mesh_in_steps(usize::MAX);
+    assert!(
+        whole.1.steiner_points > 0,
+        "this surface needs added points"
+    );
+    for step_size in [1, 7] {
+        assert_eq!(mesh_in_steps(step_size), whole, "sliced by {step_size}");
+    }
 }

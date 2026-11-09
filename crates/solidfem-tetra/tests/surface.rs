@@ -17,3 +17,5 @@ mod resumable;
 mod rotations;
 #[path = "surface/shapes.rs"]
 mod shapes;
+#[path = "surface/thick_plate.rs"]
+mod thick_plate;

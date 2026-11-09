@@ -66,6 +66,7 @@ mod refine_mesh;
 mod skins;
 mod steiner;
 mod surface;
+mod surface_check;
 mod triangulator;
 mod wall_fill;
 

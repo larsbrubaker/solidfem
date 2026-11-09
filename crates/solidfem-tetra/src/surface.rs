@@ -23,16 +23,20 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use crate::core::{FACE, GHOST};
+use crate::core::GHOST;
 use crate::error::TetraError;
-use crate::flips::{edge_key, face_key, Flipper};
+use crate::flips::{edge_key, face_key, Flipper, Target};
 use crate::patches::{build_patches, Patch};
 use crate::predicates::orient;
 use crate::recover::{
     crossing_edges, crossing_edges_of_patch, entry_at, label_layers, recover_edge, recover_patch,
-    tets_of_face, Entry,
+    tets_of_face,
 };
-use crate::steiner::{Obstruction, Placed, SolidRegion, MAX_STEINER_PER_CONSTRAINT};
+use crate::steiner::{
+    edge_obstructions, normalized, segment_plane_crossing, triangle_normal, Obstruction, Placed,
+    SolidRegion, MAX_STEINER_PER_CONSTRAINT,
+};
+use crate::surface_check::check_surface;
 use crate::triangulator::{StepStatus, Triangulator, HULL};
 
 /// The most rounds of retrying constraints a pass makes after earlier recoveries opened up room.
@@ -81,7 +85,8 @@ pub struct RecoveryReport {
     pub flips_three_to_two: usize,
     pub flips_four_to_four: usize,
     pub flips_larger_ring: usize,
-    /// Points added strictly inside the solid.
+    /// Points added strictly inside the solid and still in the mesh. A point swallowed by a later
+    /// point's cavity is gone and is not counted.
     pub steiner_points: usize,
     pub edges_failed: usize,
     pub faces_failed: usize,
@@ -160,6 +165,25 @@ struct Recovery {
     no_room: usize,
     settled: usize,
     triangles: Vec<[u32; 3]>,
+    /// The stuck edge getting points on the last pass, between units of work.
+    edge_work: Option<EdgeWork>,
+}
+
+/// A stuck edge part way through getting points. Each stage is one unit, so a host can pause or
+/// cancel between a point and the walks that follow it.
+#[derive(Clone, Copy)]
+struct EdgeWork {
+    u: u32,
+    v: u32,
+    points_left: usize,
+    stage: EdgeStage,
+}
+
+#[derive(Clone, Copy)]
+enum EdgeStage {
+    PlacePoint,
+    WalkFromU,
+    WalkFromV,
 }
 
 /// Builds the solid mesh of a closed surface in resumable steps.
@@ -212,8 +236,8 @@ impl SurfaceMesher {
         })
     }
 
-    /// Advances by up to `max_units` units (a point inserted, or a surface edge or face recovered
-    /// or set aside), checking `cancel` before each.
+    /// Advances by up to `max_units` units (a point inserted, a surface edge or face recovered or
+    /// set aside, or one stage of the work on a stuck edge), checking `cancel` before each.
     ///
     /// # Errors
     /// Any input error from the point set, [`TetraError::SurfaceNotRecovered`] when flips cannot
@@ -305,6 +329,7 @@ impl SurfaceMesher {
             no_room: 0,
             settled: 0,
             triangles: self.triangles.clone(),
+            edge_work: None,
         });
         self.phase = SurfacePhase::RecoveringEdges;
         Ok(())
@@ -316,18 +341,29 @@ impl SurfaceMesher {
 
     fn advance_edges(&mut self) -> Result<(), TetraError> {
         let recovery = self.recovery_mut()?;
+        if let Some(work) = recovery.edge_work.take() {
+            return advance_edge_work(recovery, work);
+        }
         let Some((u, v)) = recovery.edge_rounds.next_item() else {
             recovery.missing_edges = recovery.edge_rounds.retry.iter().copied().collect();
             recovery.settled = 0;
             self.phase = SurfacePhase::RecoveringFaces;
             return Ok(());
         };
-        let steiner_pass = recovery.edge_rounds.steiner_pass;
-        if recover_edge_with_points(recovery, u, v, steiner_pass)? {
-            recovery.edge_rounds.progressed = true;
-            recovery.settled += 1;
+        // Walking in from the other end meets different blockers, so it can succeed where the first
+        // end did not.
+        if recover_edge(&mut recovery.flipper, u, v)? || recover_edge(&mut recovery.flipper, v, u)?
+        {
+            finish_edge(recovery, u, v, true);
+        } else if recovery.edge_rounds.steiner_pass {
+            recovery.edge_work = Some(EdgeWork {
+                u,
+                v,
+                points_left: MAX_STEINER_PER_CONSTRAINT,
+                stage: EdgeStage::PlacePoint,
+            });
         } else {
-            recovery.edge_rounds.retry.push((u, v));
+            finish_edge(recovery, u, v, false);
         }
         Ok(())
     }
@@ -376,7 +412,7 @@ impl SurfaceMesher {
             .iter()
             .map(|&id| recovery.flipper.patches[id].triangles.len())
             .sum();
-        self.report.steiner_points = recovery.flipper.steiner_points;
+        self.report.steiner_points = recovery.flipper.kept_steiner_points();
         self.report.constraints_without_room = recovery.no_room;
         if !recovery.missing_edges.is_empty() || !recovery.missing_patches.is_empty() {
             return Err(TetraError::SurfaceNotRecovered {
@@ -389,7 +425,7 @@ impl SurfaceMesher {
                     .next()
                     .map(|&id| recovery.flipper.patches[id].triangles[0]),
                 constraints_without_room: recovery.no_room,
-                steiner_points: recovery.flipper.steiner_points,
+                steiner_points: recovery.flipper.kept_steiner_points(),
             });
         }
         // Every surface region is covered by locked faces now; a flood across the faces that are
@@ -474,57 +510,106 @@ impl SurfaceMesher {
     }
 }
 
-/// Recovers one feature edge: by flips from either end, then on the last pass by adding points
-/// inside the solid near where its walk is blocked, retrying flips after each.
-fn recover_edge_with_points(
+/// Records how a stuck edge ended: recovered, or back on the list for the next round.
+fn finish_edge(recovery: &mut Recovery, u: u32, v: u32, recovered: bool) {
+    if recovered {
+        recovery.edge_rounds.progressed = true;
+        recovery.settled += 1;
+    } else {
+        recovery.edge_rounds.retry.push((u, v));
+    }
+}
+
+/// One unit of the work on a stuck edge: placing a point inside the solid near where its walk is
+/// blocked, or the walk from one end after a point, whichever is next.
+fn advance_edge_work(recovery: &mut Recovery, work: EdgeWork) -> Result<(), TetraError> {
+    let EdgeWork {
+        u,
+        v,
+        points_left,
+        stage,
+    } = work;
+    let next = |stage, points_left| {
+        Some(EdgeWork {
+            u,
+            v,
+            points_left,
+            stage,
+        })
+    };
+    let following = match stage {
+        EdgeStage::PlacePoint => match place_point_for_edge(recovery, u, v)? {
+            PointOutcome::Recovered => {
+                finish_edge(recovery, u, v, true);
+                None
+            }
+            PointOutcome::Stopped => {
+                finish_edge(recovery, u, v, false);
+                None
+            }
+            PointOutcome::Placed => next(EdgeStage::WalkFromU, points_left),
+        },
+        EdgeStage::WalkFromU => {
+            if recover_edge(&mut recovery.flipper, u, v)? {
+                finish_edge(recovery, u, v, true);
+                None
+            } else {
+                next(EdgeStage::WalkFromV, points_left)
+            }
+        }
+        EdgeStage::WalkFromV => {
+            if recover_edge(&mut recovery.flipper, v, u)? {
+                finish_edge(recovery, u, v, true);
+                None
+            } else if points_left > 1 {
+                next(EdgeStage::PlacePoint, points_left - 1)
+            } else {
+                finish_edge(recovery, u, v, false);
+                None
+            }
+        }
+    };
+    recovery.edge_work = following;
+    Ok(())
+}
+
+/// What placing a point for a stuck edge came to.
+enum PointOutcome {
+    /// The edge exists now.
+    Recovered,
+    /// A point went in; the walks from each end come next, as units of their own.
+    Placed,
+    /// No more points can go in for this edge.
+    Stopped,
+}
+
+/// Places one point inside the solid for stuck edge `(u, v)`. A point placed over a chord's ring
+/// exists to make that ring small enough to flip, so that flip is tried here, with no relief so
+/// the point's star stays. If the point's cavity took the chord or an end of it (an earlier added
+/// point can be swallowed), the flip finds no such edge and does nothing.
+fn place_point_for_edge(
     recovery: &mut Recovery,
     u: u32,
     v: u32,
-    steiner_pass: bool,
-) -> Result<bool, TetraError> {
-    // Walking in from the other end meets different blockers, so it can succeed where the first
-    // end did not.
-    if recover_edge(&mut recovery.flipper, u, v)? || recover_edge(&mut recovery.flipper, v, u)? {
-        return Ok(true);
+) -> Result<PointOutcome, TetraError> {
+    if recovery.flipper.steiner_points >= recovery.steiner_limit {
+        return Ok(PointOutcome::Stopped);
     }
-    if !steiner_pass {
-        return Ok(false);
-    }
-    for _ in 0..MAX_STEINER_PER_CONSTRAINT {
-        if recovery.flipper.steiner_points >= recovery.steiner_limit {
-            break;
-        }
-        let entry = match entry_at(&mut recovery.flipper, u, v)? {
-            Some(entry) => Some(entry),
-            None => entry_at(&mut recovery.flipper, v, u)?,
-        };
-        let Some(entry) = entry else {
-            break;
-        };
-        let points = &recovery.flipper.core.points;
-        let (pu, pv) = (points[u as usize], points[v as usize]);
-        let (obstruction, base) = match entry {
-            Entry::Face(t, slot) => {
-                let face = FACE[slot].map(|p| recovery.flipper.core.tets[t as usize][p]);
-                match recovery.flipper.hull_fold_over(face, u, v) {
-                    Some((a, b)) => (Obstruction::HullFold(a, b), midpoint(pu, pv)),
-                    None => {
-                        let points = &recovery.flipper.core.points;
-                        let [a, b, c] = face.map(|f| points[f as usize]);
-                        (
-                            Obstruction::Face(t, slot),
-                            segment_plane_crossing(pu, pv, a, b, c),
-                        )
-                    }
-                }
-            }
-            Entry::Edge(a, b) => {
-                let (pa, pb) = (points[a as usize], points[b as usize]);
-                (Obstruction::Edge(a, b), midpoint(pa, pb))
-            }
-        };
-        let directions = inward_directions(recovery, u, v);
-        let scale = distance(pu, pv) * 0.5;
+    let entry = match entry_at(&mut recovery.flipper, u, v)? {
+        Some(entry) => Some(entry),
+        None => entry_at(&mut recovery.flipper, v, u)?,
+    };
+    let Some(entry) = entry else {
+        return Ok(PointOutcome::Stopped);
+    };
+    let points = &recovery.flipper.core.points;
+    let (pu, pv) = (points[u as usize], points[v as usize]);
+    let candidates = edge_obstructions(&mut recovery.flipper, entry, u, v);
+    let directions = inward_directions(recovery, u, v);
+    let scale = distance(pu, pv) * 0.5;
+    let mut placed = None;
+    let mut no_room = false;
+    for (obstruction, base) in candidates {
         match recovery.flipper.insert_steiner(
             &recovery.region,
             obstruction,
@@ -533,25 +618,28 @@ fn recover_edge_with_points(
             scale,
         )? {
             Placed::Added => {
-                // Relief would flip the new point's star away again, undoing what it opened.
-                let depth = recovery.flipper.relief_depth;
-                recovery.flipper.relief_depth = 0;
-                let recovered = recover_edge(&mut recovery.flipper, u, v)?
-                    || recover_edge(&mut recovery.flipper, v, u)?;
-                recovery.flipper.relief_depth = depth;
-                if recovered {
-                    return Ok(true);
-                }
-            }
-            Placed::NotPlaced { no_room } => {
-                if no_room {
-                    recovery.no_room += 1;
-                }
+                placed = Some(obstruction);
                 break;
             }
+            Placed::NotPlaced { no_room: none } => no_room = no_room || none,
         }
     }
-    Ok(false)
+    let Some(placed) = placed else {
+        if no_room {
+            recovery.no_room += 1;
+        }
+        return Ok(PointOutcome::Stopped);
+    };
+    if let Obstruction::RingArc { a, b, .. } = placed {
+        let depth = recovery.flipper.relief_depth;
+        recovery.flipper.relief_depth = 0;
+        let flipped = recovery.flipper.remove_edge(a, b, Target::Edge(u, v))?;
+        recovery.flipper.relief_depth = depth;
+        if flipped && recovery.flipper.find_edge(u, v).is_some() {
+            return Ok(PointOutcome::Recovered);
+        }
+    }
+    Ok(PointOutcome::Placed)
 }
 
 /// Recovers one flat patch, by flips and then, on the last pass, with interior points beside
@@ -633,130 +721,13 @@ fn inward_directions(recovery: &Recovery, u: u32, v: u32) -> Vec<[f64; 3]> {
     ]
 }
 
-fn triangle_normal(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> [f64; 3] {
-    let u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
-    let v = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
-    normalized([
-        u[1] * v[2] - u[2] * v[1],
-        u[2] * v[0] - u[0] * v[2],
-        u[0] * v[1] - u[1] * v[0],
-    ])
-}
-
-fn normalized(v: [f64; 3]) -> [f64; 3] {
-    let length = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    if length > 0.0 {
-        [v[0] / length, v[1] / length, v[2] / length]
-    } else {
-        [0.0; 3]
-    }
-}
-
 fn negated(v: [f64; 3]) -> [f64; 3] {
     [-v[0], -v[1], -v[2]]
-}
-
-fn midpoint(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        (a[0] + b[0]) * 0.5,
-        (a[1] + b[1]) * 0.5,
-        (a[2] + b[2]) * 0.5,
-    ]
 }
 
 fn distance(a: [f64; 3], b: [f64; 3]) -> f64 {
     let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
     (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
-}
-
-/// Where the segment `p q` meets the plane of `a b c`, to within rounding: only a position to
-/// offset from, every decision about it is made exactly afterwards.
-fn segment_plane_crossing(
-    p: [f64; 3],
-    q: [f64; 3],
-    a: [f64; 3],
-    b: [f64; 3],
-    c: [f64; 3],
-) -> [f64; 3] {
-    let n = triangle_normal(a, b, c);
-    let dot = |v: [f64; 3]| n[0] * v[0] + n[1] * v[1] + n[2] * v[2];
-    let (dp, dq) = (
-        dot([p[0] - a[0], p[1] - a[1], p[2] - a[2]]),
-        dot([q[0] - a[0], q[1] - a[1], q[2] - a[2]]),
-    );
-    let denominator = dq - dp;
-    let t = if denominator == 0.0 {
-        0.5
-    } else {
-        (-dp / denominator).clamp(0.0, 1.0)
-    };
-    [
-        p[0] + (q[0] - p[0]) * t,
-        p[1] + (q[1] - p[1]) * t,
-        p[2] + (q[2] - p[2]) * t,
-    ]
-}
-
-/// Refuses anything not a closed, manifold, consistently wound surface using every vertex and
-/// with no flat triangle, and returns its undirected edges in a fixed order.
-fn check_surface(
-    points: &[[f64; 3]],
-    triangles: &[[u32; 3]],
-) -> Result<Vec<(u32, u32)>, TetraError> {
-    let mut directed: Vec<(u32, u32)> = Vec::with_capacity(triangles.len() * 3);
-    let mut used = vec![false; points.len()];
-    for (index, triangle) in triangles.iter().enumerate() {
-        for &vertex in triangle {
-            if vertex as usize >= points.len() {
-                return Err(TetraError::SurfaceIndexOutOfRange {
-                    triangle: index,
-                    index: vertex,
-                });
-            }
-            used[vertex as usize] = true;
-        }
-        let [a, b, c] = *triangle;
-        if a == b || b == c || a == c || collinear(points, *triangle) {
-            return Err(TetraError::DegenerateTriangle { triangle: index });
-        }
-        directed.extend_from_slice(&[(a, b), (b, c), (c, a)]);
-    }
-    if let Some(index) = used.iter().position(|&u| !u) {
-        // `index` fits u32: `check_surface` runs before `Triangulator::new` refuses larger inputs,
-        // and a set that large fails that test next, so a clamp here is only cosmetic.
-        return Err(TetraError::UnusedVertex {
-            index: u32::try_from(index).unwrap_or(u32::MAX),
-        });
-    }
-    directed.sort_unstable();
-    for pair in directed.windows(2) {
-        if pair[0] == pair[1] {
-            return Err(TetraError::SurfaceNotClosed {
-                edge: [pair[0].0, pair[0].1],
-            });
-        }
-    }
-    let mut edges = Vec::with_capacity(directed.len() / 2);
-    for &(a, b) in &directed {
-        if directed.binary_search(&(b, a)).is_err() {
-            return Err(TetraError::SurfaceNotClosed { edge: [a, b] });
-        }
-        if a < b {
-            edges.push((a, b));
-        }
-    }
-    Ok(edges)
-}
-
-/// Whether a triangle's corners are exactly on one line: all three 2D projections vanish.
-fn collinear(points: &[[f64; 3]], triangle: [u32; 3]) -> bool {
-    use robust::{orient2d, Coord};
-    let [a, b, c] = triangle.map(|v| points[v as usize]);
-    let area = |i: usize, j: usize| {
-        let project = |p: &[f64; 3]| Coord { x: p[i], y: p[j] };
-        orient2d(project(&a), project(&b), project(&c))
-    };
-    area(0, 1) == 0.0 && area(1, 2) == 0.0 && area(0, 2) == 0.0
 }
 
 /// The solid's tetrahedra, right-handed, in slot order, with non-solid neighbours marked [`HULL`].
@@ -773,6 +744,28 @@ fn extract_solid(flipper: &Flipper, labels: &[i32]) -> SolidMesh {
             count += 1;
         }
     }
+    // A point added and later swallowed by another point's cavity is in no tetrahedron: dropping
+    // it keeps every output point used. Surface vertices keep their numbers, all below the added
+    // points.
+    let surface_count = core.points.len() - flipper.steiner_points;
+    let mut used = vec![false; core.points.len()];
+    used[..surface_count].fill(true);
+    for (slot, tet) in core.tets.iter().enumerate() {
+        if is_solid(slot) {
+            for &v in tet {
+                used[v as usize] = true;
+            }
+        }
+    }
+    let mut point_index = vec![0u32; core.points.len()];
+    let mut points = Vec::with_capacity(core.points.len());
+    for (index, &keep) in used.iter().enumerate() {
+        if keep {
+            // The output point count fits u32 as the triangulation's own does.
+            point_index[index] = points.len() as u32;
+            points.push(core.points[index]);
+        }
+    }
     let mut tets = Vec::with_capacity(count as usize);
     let mut neighbors = Vec::with_capacity(count as usize);
     for (slot, tet) in core.tets.iter().enumerate() {
@@ -780,7 +773,7 @@ fn extract_solid(flipper: &Flipper, labels: &[i32]) -> SolidMesh {
             continue;
         }
         let adjacent = core.neighbors[slot];
-        tets.push([tet[1], tet[0], tet[2], tet[3]]);
+        tets.push([tet[1], tet[0], tet[2], tet[3]].map(|v| point_index[v as usize]));
         neighbors.push([
             output_index[adjacent[1] as usize],
             output_index[adjacent[0] as usize],
@@ -789,7 +782,7 @@ fn extract_solid(flipper: &Flipper, labels: &[i32]) -> SolidMesh {
         ]);
     }
     SolidMesh {
-        points: core.points.clone(),
+        points,
         tets,
         neighbors,
     }
