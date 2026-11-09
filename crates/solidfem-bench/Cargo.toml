@@ -4,6 +4,7 @@
 # `solidfem-sliver` binary measures what bad boundary triangles cost a stress result. The
 # `solidfem-gate` binary is the end-of-mesher gate: this workspace's mesher into the solver on a
 # 100 x 100 x 0.8 mm plate. The `solidfem-preconditioner` binary compares the preconditioners.
+# The `solidfem-benchmarks` binary runs real parts against closed-form and published references.
 [package]
 name = "solidfem-bench"
 description = "Measures real triangle meshes, sliver cost and the end-of-mesher gate for solidfem"
@@ -29,6 +30,10 @@ path = "src/bin/gate.rs"
 [[bin]]
 name = "solidfem-preconditioner"
 path = "src/bin/preconditioner.rs"
+
+[[bin]]
+name = "solidfem-benchmarks"
+path = "src/bin/benchmarks.rs"
 
 [dependencies]
 robust = "1.2"

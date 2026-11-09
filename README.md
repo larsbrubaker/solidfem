@@ -71,7 +71,7 @@ None of these is on crates.io yet.
 | `solidfem-solve` | `crates/solidfem-solve` | Sparse matrices and a preconditioned conjugate gradient solver that runs in bounded slices |
 | `solidfem-elastic` | `crates/solidfem-elastic` | The 10-node tetrahedron, materials, supports and loads, resumable static studies and von Mises results |
 | `solidfem-tetra` | `crates/solidfem-tetra` | Exact Delaunay tetrahedralization of a point set, the solid mesher built on it and through-thickness refinement, resumable in slices |
-| `solidfem-bench` (never published) | `crates/solidfem-bench` | The end-of-mesher gate and measurements of real triangle meshes, the surface remesher and sliver triangles |
+| `solidfem-bench` (never published) | `crates/solidfem-bench` | The end-of-mesher gate, measurements of real triangle meshes, the surface remesher and sliver triangles, and the real-part benchmark runner (`solidfem-benchmarks`) |
 | `solidfem-demo-wasm` (never published) | `demo/wasm` | The WebAssembly engine of the demo page |
 
 ## Demo
