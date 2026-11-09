@@ -4,7 +4,8 @@
 # target is what the browser benchmark loads; it binds nothing beyond plain wasm exports. The
 # `solidfem-corpus` binary measures real triangle meshes and the solidmesh surface remesher, natively
 # only, through the same kind of path dependency with a version floor. The `solidfem-sliver` binary
-# measures what bad boundary triangles cost a stress result.
+# measures what bad boundary triangles cost a stress result. The `solidfem-gate` binary is the
+# end-of-mesher gate: this workspace's mesher into the solver on a 100 x 100 x 0.8 mm plate.
 [package]
 name = "solidfem-bench"
 description = "Measures Quartet meshing into solidfem solves, natively and in the browser"
@@ -31,8 +32,14 @@ path = "src/bin/corpus.rs"
 name = "solidfem-sliver"
 path = "src/bin/sliver.rs"
 
+[[bin]]
+name = "solidfem-gate"
+path = "src/bin/gate.rs"
+
 [dependencies]
 quartet-rust = { path = "../../../quartet-rust", version = "0.1.0" }
+robust = "1.2"
+solidfem = { path = "../solidfem", version = "0.1.0" }
 solidfem-elastic = { path = "../solidfem-elastic", version = "0.1.0" }
 solidfem-mesh = { path = "../solidfem-mesh", version = "0.1.0" }
 

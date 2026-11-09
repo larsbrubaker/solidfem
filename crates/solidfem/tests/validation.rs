@@ -8,6 +8,8 @@ mod support;
 mod cantilever;
 #[path = "validation/determinism.rs"]
 mod determinism;
+#[path = "validation/pipeline.rs"]
+mod pipeline;
 #[path = "validation/refusals.rs"]
 mod refusals;
 #[path = "validation/shell_core.rs"]

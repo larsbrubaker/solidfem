@@ -333,6 +333,8 @@ version = "0.1.0"
 dependencies = [
  "libm",
  "quartet-rust",
+ "robust",
+ "solidfem",
  "solidfem-elastic",
  "solidfem-mesh",
  "solidmesh",
