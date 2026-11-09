@@ -56,6 +56,34 @@ fn the_boundary_is_each_outer_grid_face_cut_in_two() {
 }
 
 #[test]
+fn a_tet_flat_to_rounding_is_refused_by_name_at_every_scale() {
+    // Four corners in one plane but for 1e-16 of a unit, so the determinant is positive only by
+    // an amount the coordinates cannot resolve; the ratio must not depend on the part's size.
+    for scale in [1e-3, 1.0, 1e3] {
+        let positions = vec![
+            [0.0, 0.0, 0.0],
+            [scale, 0.0, 0.0],
+            [0.0, scale, 0.0],
+            [0.25 * scale, 0.25 * scale, 1e-16 * scale],
+        ];
+        assert!(tet_volume(positions[0], positions[1], positions[2], positions[3]) > 0.0);
+        let error = TetMesh::new(positions, vec![[0, 1, 2, 3]]).expect_err("flat to rounding");
+        assert!(
+            matches!(error, MeshError::FlatTet { tet: 0, .. }),
+            "scale {scale}: {error}"
+        );
+    }
+    // A very thin but genuine element is kept: 1e-6 is a million times what rounding can reach.
+    let thin = vec![
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [0.25, 0.25, 1e-6],
+    ];
+    TetMesh::new(thin, vec![[0, 1, 2, 3]]).expect("thin is not flat");
+}
+
+#[test]
 fn an_inverted_tet_is_refused_by_name() {
     let positions = vec![
         [0.0, 0.0, 0.0],

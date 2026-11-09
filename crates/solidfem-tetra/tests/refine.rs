@@ -18,6 +18,8 @@ mod shapes;
 mod sizing;
 #[path = "refine/support.rs"]
 mod support;
+#[path = "refine/sweep.rs"]
+mod sweep;
 #[path = "refine/through.rs"]
 mod through;
 #[path = "refine/wall_skins.rs"]

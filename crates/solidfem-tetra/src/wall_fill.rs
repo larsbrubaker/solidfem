@@ -5,7 +5,7 @@
 //! allow to be cut.
 //!
 //! **What it adds.** A surface triangle much wider than the wall behind it (its longest edge at
-//! least [`WALL_WIDTH_RATIO`](crate::skins::WALL_WIDTH_RATIO) wall thicknesses) proposes interior
+//! least [`WALL_WIDTH_RATIO`] wall thicknesses) proposes interior
 //! points: a barycentric grid across the triangle, at a spacing of twice the wall or a sixteenth
 //! of the triangle's longest edge, whichever is larger (see [`wall_seeds`]), each looking straight across the
 //! wall and naming the same layer points a vertex would, kept apart by the same separation rule. A
@@ -16,17 +16,25 @@
 //! [`MAX_GRID_STEPS`]`^2 / 2` candidates, a handful of points per wall layer per face for typical
 //! CAD surfaces. The rim keeps a band about one grid step wide where no point is proposed, and an
 //! element there may still bridge the wall through a surface edge: that is the surface's own edge
-//! and is reachable only by changing the surface. The tests measure this band on the plain box and
-//! the end-ring tube at two grid steps from the rim, where no sampled mid-wall point is inside a
-//! tetrahedron joining the skins.
+//! and is reachable only by changing the surface. How far such an element reaches is measured,
+//! not bounded: the tests check the plain box and the end-ring tube at two grid steps from the
+//! rim, where no sampled mid-wall point is inside a tetrahedron joining the skins. Nothing here
+//! decides which edges are through a wall; that rule is `skins.rs` and does not use the width.
 
 use crate::layers::SurfaceRays;
 use crate::quality::{cross, dot, length, normalized, subtract};
-use crate::skins::{OPPOSED_COSINE, WALL_WIDTH_RATIO};
+use crate::skins::OPPOSED_COSINE;
 
 /// The most grid steps along the longest edge of one triangle: enough to keep the rim band a small
-/// part of a large face, while keeping the rays and points for a face bounded.
+/// part of a large face, while keeping the rays and points for a face bounded. A judgement.
 const MAX_GRID_STEPS: f64 = 16.0;
+
+/// A triangle proposes columns only when its longest edge is at least this many walls wide. At
+/// two-wall spacing that is four grid steps, the coarsest grid with columns apart from the one
+/// at the triangle's centre; a narrower triangle is left to the vertex rays and the edge splits.
+/// A judgement, not derived further. It only decides where points are added: the classification
+/// of opposite skins (`skins.rs`) does not use it.
+const WALL_WIDTH_RATIO: f64 = 8.0;
 
 /// One proposed column across a wall: where it starts, inward, the far side, and how far it
 /// keeps from its neighbours.

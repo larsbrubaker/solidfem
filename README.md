@@ -42,12 +42,15 @@ it stands.
 
 - **Arbitrary parts and thin-walled parts are not ready.** The demo offers only bars and tubes on
   purpose, because their meshes follow the part.
-- **The volume-mesher gate has passed only on a clean surface.** That gate (`solidfem-gate`) runs
-  this library's mesher into its solver on a 100 x 100 x 0.8 mm plate with two element layers
-  through the wall, against beam theory. With the multigrid preconditioner, a structured plate
-  surface is within 0.04% of the reference. A real remeshed surface, whose two skins have unaligned
-  vertices, still fails the two-layer check, so the path from a general triangle mesh to a
-  trustworthy stress result is unproven.
+- **The volume-mesher gate has passed on two surfaces, which is not a general claim.** That gate
+  (`solidfem-gate`) runs this library's mesher into its solver on a 100 x 100 x 0.8 mm plate with
+  two element layers through the wall, against beam theory, using the multigrid preconditioner.
+  It passes within the 1% limit on a structured plate surface and on one real remeshed surface
+  whose two skins have unaligned vertices. Requesting layers removes every interior edge the
+  mesher's own rule calls through a thin wall, or stops with a named error; a sweep of plates,
+  sections and tubes checks that rule against each shape's own construction. Surface edges are
+  never changed, so at a rim an element can still bridge the wall, and the path from an arbitrary
+  triangle mesh to a trustworthy stress result is still unproven beyond these cases.
 - Multigrid is optional and off by default. Thin plates still need around a thousand or more
   iterations.
 - Only linear statics: no contact, no large deflection, no buckling, no fatigue, no plasticity. A

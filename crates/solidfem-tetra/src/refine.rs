@@ -12,13 +12,14 @@
 //! **Layers stay layers.** A point dividing a wall is smoothed only across that wall, in the plane
 //! the wall's own normal defines, so a layer stays planar however the plane of the ray leans.
 //!
-//! **No interior edge joins opposite skins.** The layer stage ends by removing every interior edge
-//! between opposite skins of a thin wall (`skins.rs`, split where a point can be starred, flipped
-//! away where it cannot), and from then on no later stage can restore one: size points add edges
-//! only to themselves and a flip refuses such an edge. So a column across a wall away from its
-//! rims crosses at least two tetrahedra. An edge no split or flip can remove ends the run in
-//! [`TetraError::ThroughEdgeNotSplit`]. The surface is fixed, so a surface edge at a wall's rim
-//! cannot be cut: a tetrahedron bridging the wall has to touch the rim.
+//! **No interior edge `skins.rs` calls through a wall survives.** The layer stage ends by removing
+//! every such edge (split where a point can be starred, flipped away where it cannot), and from
+//! then on no later stage can restore one: size points add edges only to themselves and a flip
+//! refuses such an edge. An edge no split or flip can remove ends the run in
+//! [`TetraError::ThroughEdgeNotSplit`], so an `Ok` run has none left. The limits are in `skins.rs`:
+//! the surface is fixed, so a tetrahedron can still bridge a wall through a surface edge at a
+//! rim, and the classification is this library's own rule, checked over shapes by
+//! `tests/refine/sweep.rs`.
 //!
 //! **Size-driven insertion.** A tetrahedron whose longest interior edge exceeds
 //! [`SIZE_RATIO`]` * size(centroid)` gets a point: its circumcentre where a walk from it reaches

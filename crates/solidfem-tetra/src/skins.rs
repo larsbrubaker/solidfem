@@ -9,31 +9,23 @@
 //! leaves faces joining the skins, and those faces keep their edges. So the rule is stated on the
 //! edges: no interior edge joins opposite skins.
 //!
-//! **Opposite skins, by the vertex normals.** Two surface vertices are on opposite skins of a thin
-//! wall when all three of these hold:
-//! - their outward normals (angle weighted over their surface triangles) oppose, by at least
-//!   [`OPPOSED_COSINE`];
-//! - the segment between them leaves each vertex going inward, against its own normal;
-//! - the wall measured along the normals, the component of that segment on `n_u - n_v`, is at most
-//!   the thin-wall ratio times the larger of the two local mean surface edge lengths, the same
-//!   measure the layer rays use.
+//! **Opposite skins.** A wrong "opposite" costs a few interior points; a wrong "not opposite"
+//! silently leaves an element through the wall, so the test leans towards calling an edge through.
+//! An interior edge between two surface vertices is through a wall when both of these hold:
+//! - an outward facing at each end opposes one at the other, by at least [`OPPOSED_COSINE`]: the
+//!   two vertex normals (angle weighted over their triangles), or any pair of faces incident to
+//!   the two ends, so a ridge or reflex corner cannot hide a skin behind its average normal;
+//! - the component of the edge on the wall normal, `n_u - n_v`, is at most the thin-wall ratio
+//!   times the larger of the two local mean surface edge lengths.
 //!
-//! A vertex on a ridge averages the faces meeting there, so its normal sits between them: the two
-//! ends of a plate's rim have normals about 90 degrees apart and are never opposite by this test,
-//! and neither are the faces meeting at any convex or reflex corner of a part. The third condition
-//! measures across the wall and ignores how far apart the vertices are along it, because a long
-//! edge leaning through a thin wall is still an edge through it, and it is what leaves a solid
-//! block alone: its faces are further apart than the ratio allows.
-//!
-//! **Opposite skins, by the faces at a rim.** That test cannot see a wall whose skins are large
-//! faces with vertices only at their rims, because every vertex then is a rim vertex and its
-//! average normal is about 45 degrees off either skin. So the same three conditions are also tried
-//! for each pair of surface faces incident to the two vertices, with the faces' own normals, and
-//! with one more condition that keeps chunky parts out: the longer of the two faces' longest edges
-//! must be at least [`WALL_WIDTH_RATIO`] times the wall. A solid block's opposite faces are about
-//! as far apart as they are wide, so they never qualify, and an edge lying in a side face shared by
-//! both vertices (a rim quad's other diagonal) is excluded outright: it runs along the rim, not
-//! through the wall.
+//! Which way the edge leaves each vertex is not asked: at a reflex ridge and on a chord through a
+//! curved wall that test fails on a real wall. The second condition is the size relation between
+//! the chord and the part, and the only one: a block whose surface edges are shorter than half its
+//! thickness never qualifies, and a part meshed so coarsely that one element spans it (an
+//! 8-vertex cube) does and loses its few interior edges, by the option's own definition of thin.
+//! Where "opposite" has no clear answer, this falls on the side of splitting. The one exclusion is
+//! an edge lying in a surface plane both of its ends share (a rim quad's other diagonal): it runs
+//! along that surface, and a point on it could not be inside the solid.
 //!
 //! **The split.** Each such edge is replaced by a chain of `layers_through_walls` pieces, its
 //! interior points placed on the edge by an edge-ring split (`Flipper::split_edge`), the tetrahedra
@@ -41,36 +33,32 @@
 //! coplanar with. Every new edge has a new interior vertex at one end, so a split removes
 //! through-edges and creates none. The stage repeats over what is left while any split is made,
 //! and ends in [`crate::TetraError::ThroughEdgeNotSplit`] if an edge remains, so a run that returns
-//! success has no interior edge joining opposite skins. A ring no point on the edge can be starred
-//! from (a flat tetrahedron holding an interior vertex in its plane) is retriangulated instead,
-//! removing the edge with no point added (`Flipper::remove_through_edge`). An edge joining opposite
-//! skins that remains is a surface edge, at a wall's rim, which the fixed surface does not allow to
-//! be cut, so a tetrahedron bridging a wall has to touch the rim, and the points `wall_fill.rs`
-//! adds are what shorten its reach from there (measured, not bounded, in `wall_fill.rs`).
+//! success has no interior edge this test calls through. A ring no point on the edge can be
+//! starred from (a flat tetrahedron holding an interior vertex in its plane) is retriangulated
+//! instead, removing the edge with no point added (`Flipper::remove_through_edge`).
+//!
+//! **What that does not promise.** Surface edges are fixed, so a surface edge joining the skins at
+//! a wall's rim stays, and a tetrahedron touching it can bridge the wall there; the points
+//! `wall_fill.rs` adds only shorten that reach, measured and not bounded. And the rule above is
+//! this library's own: `tests/refine/sweep.rs` checks it independently, over shapes whose skins
+//! are known from how they were built, and pins how many false successes it finds.
+
+use std::collections::HashMap;
 
 use crate::core::{DEAD, GHOST};
 use crate::error::TetraError;
 use crate::flips::{edge_key, Flipper};
 use crate::quality::{cross, dot, length, normalized, subtract};
 
-/// The cosine of the angle between two outward normals at or beyond which two vertices count as
-/// facing away from each other: 120 degrees. A vertex on a right-angled rim has a normal 45 degrees
-/// from its own skin, so its partner on the other skin is 90 degrees away and clearly not opposite.
+/// The cosine of the angle between two outward normals at or beyond which two faces count as
+/// facing away from each other: 120 degrees. The value is a judgement, between the 90 degrees of
+/// adjacent faces at a right-angled corner, which must not count, and the 180 of parallel skins;
+/// 120 tolerates a chord leaning 60 degrees through a curved wall.
 pub(crate) const OPPOSED_COSINE: f64 = -0.5;
 
-/// A wall is only treated as one by its faces when the longest edge of one of the two faces is at
-/// least this many wall thicknesses wide: thin against the skin, wider than a chunky part can be.
-pub(crate) const WALL_WIDTH_RATIO: f64 = 8.0;
-
-/// Two normals this nearly equal are the same skin facing, at a vertex.
+/// Two normals this nearly equal are the same skin facing, at a vertex: well below the angle
+/// between facets of a curved wall, well above the rounding of a unit normal.
 const SAME_FACING_COSINE: f64 = 1.0 - 1e-6;
-
-/// A surface triangle's facing and width, for the face test of a wall.
-#[derive(Clone, Copy)]
-pub(crate) struct SkinFace {
-    pub(crate) normal: [f64; 3],
-    pub(crate) longest_edge: f64,
-}
 
 /// The normals and local edge lengths that decide which surface vertices face each other.
 /// Empty when through-wall layers were not requested, so nothing is ever opposite.
@@ -78,37 +66,82 @@ pub(crate) struct SkinFace {
 pub(crate) struct OppositeSkins {
     normals: Vec<[f64; 3]>,
     edge_mean: Vec<f64>,
-    /// Each surface vertex's distinct incident faces, the widest of each facing.
-    faces: Vec<Vec<SkinFace>>,
+    /// Each surface vertex's distinct incident facings.
+    faces: Vec<Vec<Facing>>,
     ratio: f64,
 }
 
-/// Each vertex's distinct incident faces, for [`OppositeSkins`], in a stable order: normals are
-/// first seen in the surface's triangle order.
+/// One facing at a surface vertex: a unit normal and the flat patch it belongs to, patches being
+/// surface triangles connected across coplanar edges. Two faces of one plane in different patches
+/// (the base either side of a stem) stay different patches.
+#[derive(Clone, Copy)]
+pub(crate) struct Facing {
+    normal: [f64; 3],
+    patch: u32,
+}
+
+/// Each surface triangle's flat patch, numbered in triangle order so the numbers are the same on
+/// every run; the map from edge to triangles is read only by key.
+fn flat_patches(normals: &[[f64; 3]], boundary: &[[u32; 3]]) -> Vec<u32> {
+    let mut at_edge: HashMap<(u32, u32), Vec<usize>> = HashMap::with_capacity(boundary.len() * 2);
+    for (index, face) in boundary.iter().enumerate() {
+        for (a, b) in [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])] {
+            at_edge.entry((a.min(b), a.max(b))).or_default().push(index);
+        }
+    }
+    let mut patches = vec![u32::MAX; boundary.len()];
+    let mut next = 0_u32;
+    for start in 0..boundary.len() {
+        if patches[start] != u32::MAX {
+            continue;
+        }
+        patches[start] = next;
+        let mut stack = vec![start];
+        while let Some(index) = stack.pop() {
+            let face = boundary[index];
+            for (a, b) in [(face[0], face[1]), (face[1], face[2]), (face[2], face[0])] {
+                let Some(sharing) = at_edge.get(&(a.min(b), a.max(b))) else {
+                    continue;
+                };
+                for &other in sharing {
+                    if patches[other] == u32::MAX
+                        && dot(normals[index], normals[other]) > SAME_FACING_COSINE
+                    {
+                        patches[other] = next;
+                        stack.push(other);
+                    }
+                }
+            }
+        }
+        next += 1;
+    }
+    patches
+}
+
+/// Each vertex's distinct incident facings, for [`OppositeSkins`], in a stable order: first seen
+/// in the surface's triangle order, one entry per flat patch at the vertex.
 pub(crate) fn incident_faces(
     points: &[[f64; 3]],
     boundary: &[[u32; 3]],
     count: usize,
-) -> Vec<Vec<SkinFace>> {
-    let mut faces: Vec<Vec<SkinFace>> = vec![Vec::new(); count];
-    for face in boundary {
-        let p = face.map(|v| points[v as usize]);
-        let normal = normalized(cross(subtract(p[1], p[0]), subtract(p[2], p[0])));
-        let longest_edge = [(0, 1), (1, 2), (2, 0)]
-            .map(|(a, b)| length(subtract(p[a], p[b])))
-            .iter()
-            .fold(0.0_f64, |longest, &edge| longest.max(edge));
+) -> Vec<Vec<Facing>> {
+    let normals: Vec<[f64; 3]> = boundary
+        .iter()
+        .map(|face| {
+            let p = face.map(|v| points[v as usize]);
+            normalized(cross(subtract(p[1], p[0]), subtract(p[2], p[0])))
+        })
+        .collect();
+    let patches = flat_patches(&normals, boundary);
+    let mut faces: Vec<Vec<Facing>> = vec![Vec::new(); count];
+    for (index, face) in boundary.iter().enumerate() {
         for &v in face {
             let distinct = &mut faces[v as usize];
-            match distinct
-                .iter()
-                .position(|f| dot(f.normal, normal) > SAME_FACING_COSINE)
-            {
-                Some(i) => distinct[i].longest_edge = distinct[i].longest_edge.max(longest_edge),
-                None => distinct.push(SkinFace {
-                    normal,
-                    longest_edge,
-                }),
+            if !distinct.iter().any(|f| f.patch == patches[index]) {
+                distinct.push(Facing {
+                    normal: normals[index],
+                    patch: patches[index],
+                });
             }
         }
     }
@@ -119,7 +152,7 @@ impl OppositeSkins {
     pub(crate) fn new(
         normals: Vec<[f64; 3]>,
         edge_mean: Vec<f64>,
-        faces: Vec<Vec<SkinFace>>,
+        faces: Vec<Vec<Facing>>,
         ratio: f64,
     ) -> Self {
         Self {
@@ -136,7 +169,10 @@ impl OppositeSkins {
         self.through_axis(points, u, v).is_some()
     }
 
-    /// The through-wall direction of the edge from `u` to `v` if it joins opposite skins.
+    /// The through-wall direction of the edge from `u` to `v` if it joins opposite skins: the
+    /// vertex normals first (one averaged direction per vertex), then every pair of faces at the
+    /// two ends, so a ridge or reflex corner cannot hide a skin behind its average. An edge lying
+    /// in a surface plane both ends share is the one exception.
     fn through_axis(&self, points: &[[f64; 3]], u: u32, v: u32) -> Option<[f64; 3]> {
         let (nu, nv) = (
             *self.normals.get(u as usize)?,
@@ -144,21 +180,15 @@ impl OppositeSkins {
         );
         let along = subtract(points[v as usize], points[u as usize]);
         let thin = self.ratio * self.edge_mean[u as usize].max(self.edge_mean[v as usize]);
-        if let Some(axis) = opposed_axis(nu, nv, along, thin) {
-            return Some(axis);
-        }
         let (at_u, at_v) = (&self.faces[u as usize], &self.faces[v as usize]);
         if shares_plane(at_u, at_v, along) {
             return None;
         }
-        at_u.iter()
-            .flat_map(|a| at_v.iter().map(move |b| (a, b)))
-            .find_map(|(a, b)| {
-                let axis = opposed_axis(a.normal, b.normal, along, thin)?;
-                let wide_enough =
-                    dot(along, axis).abs() * WALL_WIDTH_RATIO <= a.longest_edge.max(b.longest_edge);
-                wide_enough.then_some(axis)
-            })
+        opposed_axis(nu, nv, along, thin).or_else(|| {
+            at_u.iter()
+                .flat_map(|&a| at_v.iter().map(move |&b| (a.normal, b.normal)))
+                .find_map(|(a, b)| opposed_axis(a, b, along, thin))
+        })
     }
 
     /// Every interior edge joining opposite skins, sorted so the work order is the same every run.
@@ -219,13 +249,11 @@ impl OppositeSkins {
     }
 }
 
-/// The through-wall direction if two outward normals oppose, the segment leaves each vertex going
-/// inward, and the segment's component on the wall normal is at most `thin`.
+/// The through-wall direction if two outward normals oppose and the segment's component on the
+/// wall normal is at most `thin`. Which way the segment leaves each vertex is deliberately not
+/// asked: at a reflex ridge and on a chord through a curved wall that test fails on a real wall.
 fn opposed_axis(nu: [f64; 3], nv: [f64; 3], along: [f64; 3], thin: f64) -> Option<[f64; 3]> {
     if dot(nu, nv) > OPPOSED_COSINE {
-        return None;
-    }
-    if dot(along, nu) >= 0.0 || dot(along, nv) <= 0.0 {
         return None;
     }
     let axis = normalized(subtract(nu, nv));
@@ -237,15 +265,14 @@ fn opposed_axis(nu: [f64; 3], nv: [f64; 3], along: [f64; 3], thin: f64) -> Optio
 /// meant to lean through a wall tilts by far more than this.
 const IN_PLANE_RATIO: f64 = 1e-9;
 
-/// Whether both vertices have a face in one plane and the segment between them lies in it: such
-/// an edge runs along a side wall, not through a wall.
-fn shares_plane(at_u: &[SkinFace], at_v: &[SkinFace], along: [f64; 3]) -> bool {
+/// Whether both vertices lie on one flat patch and the segment between them lies in its plane: such
+/// an edge runs along that surface, not through a wall. Two ends on different patches of one plane
+/// (the base either side of a stem) do not count: their chord passes through the solid.
+fn shares_plane(at_u: &[Facing], at_v: &[Facing], along: [f64; 3]) -> bool {
     let reach = length(along);
     at_u.iter().any(|a| {
         dot(along, a.normal).abs() <= IN_PLANE_RATIO * reach
-            && at_v
-                .iter()
-                .any(|b| dot(a.normal, b.normal) > SAME_FACING_COSINE)
+            && at_v.iter().any(|b| b.patch == a.patch)
     })
 }
 

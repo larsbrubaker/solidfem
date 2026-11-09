@@ -17,12 +17,14 @@
 //! [`Refiner`] takes that finished solid and adds points strictly inside it: layers through thin
 //! walls, points driven by a caller's size function, and a pass that improves the worst
 //! tetrahedra, leaving the surface exactly as it was (`refine.rs`, `layers.rs`, `skins.rs`,
-//! `interior.rs`, `quality.rs`). Requesting layers also guarantees that no interior edge joins the
-//! two skins of a thin wall, recognised from the vertex normals or, where the skins are large
-//! faces with vertices only at their rims, from their faces; such an edge that cannot be split or
-//! flipped away ends the run in [`TetraError::ThroughEdgeNotSplit`]. The surface stays fixed, so a
-//! tetrahedron at a wall's rim can still bridge the wall through a surface edge there; a wall face
-//! too wide for vertex rays to reach is also filled with points through its middle (`wall_fill.rs`).
+//! `interior.rs`, `quality.rs`). Requesting layers also removes every interior edge the rule in
+//! `skins.rs` calls through a thin wall, or ends the run in [`TetraError::ThroughEdgeNotSplit`].
+//! That rule leans towards "through": opposed surface facings at the two ends, and across them no
+//! more than the thin-wall ratio of local surface edge length. It promises nothing at a rim, where
+//! surface edges joining the skins stay fixed and a tetrahedron can bridge the wall through one;
+//! a wall face too wide for vertex rays is also filled with points through its middle
+//! (`wall_fill.rs`). `tests/refine/sweep.rs` measures the rule over shapes whose skins are known
+//! from how they were built, and pins how many runs still succeed with an edge across a wall.
 //!
 //! The rules that span its files:
 //! - **Exact decisions.** Every geometric decision is an exact predicate (`predicates.rs`), so a

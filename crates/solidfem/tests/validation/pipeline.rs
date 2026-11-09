@@ -141,10 +141,13 @@ fn a_surface_sliver_the_mesher_keeps_is_a_named_error_before_the_solver() {
     assert_eq!(mesher.step(usize::MAX, &mut || false), Ok(StepStatus::Done));
     let solid = mesher.result().expect("recovered");
     let unrefined = quadratic_from_solid(&solid, Quadrature::FourPoint);
+    // The recovered mesh's sliver is flat to rounding, refused by name as `FlatTet`; before that
+    // measure existed it reached a later tetrahedron and was reported as `DegenerateTet`.
     assert!(
         matches!(
             unrefined,
-            Err(MeshingError::Mesh(MeshError::DegenerateTet { .. }))
+            Err(MeshingError::Mesh(MeshError::FlatTet { .. }))
+                | Err(MeshingError::Mesh(MeshError::DegenerateTet { .. }))
         ),
         "expected the named refusal of the recovered mesh, got {unrefined:?}"
     );
@@ -159,11 +162,33 @@ fn a_surface_sliver_the_mesher_keeps_is_a_named_error_before_the_solver() {
     );
     let refined = refiner.result().expect("refined");
     match quadratic_from_solid(&refined, Quadrature::FourPoint) {
-        Err(MeshingError::NonPositiveJacobian { tet, .. }) => {
+        Err(MeshingError::NonPositiveJacobian { tet, .. })
+        | Err(MeshingError::Mesh(MeshError::FlatTet { tet, .. })) => {
             assert!(on_sliver(&refined, tet), "the refused tetrahedron {tet}");
         }
         other => panic!("expected the named refusal of the refined mesh, got {other:?}"),
     }
+}
+
+#[test]
+fn a_tetrahedron_flat_to_rounding_is_refused_before_it_reaches_the_solver() {
+    // Exactly right-handed, positive only by 1e-16 of a unit: the determinant's sign says nothing
+    // the coordinates can back up, so the upgrade must refuse rather than accept the sign.
+    let solid = SolidMesh {
+        points: vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.25, 0.25, 1e-16],
+        ],
+        tets: vec![[0, 1, 2, 3]],
+        neighbors: vec![[HULL; 4]],
+    };
+    let error = quadratic_from_solid(&solid, Quadrature::FourPoint).expect_err("flat");
+    assert!(
+        matches!(error, MeshingError::Mesh(MeshError::FlatTet { tet: 0, .. })),
+        "got {error}"
+    );
 }
 
 #[test]

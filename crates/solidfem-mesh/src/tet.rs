@@ -15,6 +15,35 @@ pub fn tet_volume(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> f64 {
     det / 6.0
 }
 
+/// Below this ratio of a tetrahedron's determinant to its longest edge cubed, the sign of its
+/// volume is rounding and nothing else. The positions themselves carry rounding of `u * M`, with
+/// `u` the unit roundoff (1.1e-16) and `M` the largest coordinate magnitude, so the three edge
+/// vectors are each `2 u M` uncertain and the determinant `6 u M L^2`; relative to `L^3` that is
+/// `6 u (M / L)`, which reaches 1e-12 for an element about 1500 times smaller than its coordinates.
+/// A shape below this limit is therefore not resolved by the numbers, and its angles are far under
+/// a degree, so no real element is lost. The ratio is scale invariant: scaling a part leaves it.
+pub const FLAT_RELATIVE_VOLUME: f64 = 1e-12;
+
+/// The determinant of a tetrahedron over its longest edge cubed: its shape, independent of size.
+fn relative_volume(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3], volume: f64) -> f64 {
+    let length_squared = |p: [f64; 3], q: [f64; 3]| {
+        (p[0] - q[0]) * (p[0] - q[0])
+            + (p[1] - q[1]) * (p[1] - q[1])
+            + (p[2] - q[2]) * (p[2] - q[2])
+    };
+    let longest_squared = [
+        length_squared(a, b),
+        length_squared(a, c),
+        length_squared(a, d),
+        length_squared(b, c),
+        length_squared(b, d),
+        length_squared(c, d),
+    ]
+    .into_iter()
+    .fold(0.0_f64, f64::max);
+    6.0 * volume / (longest_squared * longest_squared.sqrt())
+}
+
 /// A validated mesh of four-node tetrahedra.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TetMesh {
@@ -24,8 +53,9 @@ pub struct TetMesh {
 
 impl TetMesh {
     /// Builds a mesh from plain arrays. Refused: no tetrahedra, non-finite positions, indices out
-    /// of range, a tetrahedron without positive volume, an unused node (it would make the
-    /// stiffness singular) and a face shared by more than two tetrahedra (overlapping elements).
+    /// of range, a tetrahedron without positive volume or flat to rounding (positive only because
+    /// of how its determinant rounded, [`FLAT_RELATIVE_VOLUME`]), an unused node (it would make
+    /// the stiffness singular) and a face shared by more than two tetrahedra (overlapping elements).
     pub fn new(positions: Vec<[f64; 3]>, tets: Vec<[u32; 4]>) -> Result<Self, MeshError> {
         if tets.is_empty() {
             return Err(MeshError::Empty);
@@ -54,6 +84,13 @@ impl TetMesh {
                 return Err(MeshError::DegenerateTet {
                     tet: tet_index,
                     volume,
+                });
+            }
+            let relative = relative_volume(a, b, c, d, volume);
+            if relative.is_nan() || relative < FLAT_RELATIVE_VOLUME {
+                return Err(MeshError::FlatTet {
+                    tet: tet_index,
+                    relative_volume: relative,
                 });
             }
         }

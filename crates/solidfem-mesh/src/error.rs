@@ -17,6 +17,10 @@ pub enum MeshError {
     UnusedNode { node: usize },
     /// A tetrahedron has zero or negative volume.
     DegenerateTet { tet: usize, volume: f64 },
+    /// A tetrahedron's volume is positive only by rounding: `relative_volume`, its determinant
+    /// over its longest edge cubed, is below [`crate::tet::FLAT_RELATIVE_VOLUME`], so its sign
+    /// means nothing and the solver would integrate noise.
+    FlatTet { tet: usize, relative_volume: f64 },
     /// Three or more tetrahedra share one face, so they overlap.
     NonManifoldFace { nodes: [u32; 3] },
     /// A box dimension or division is not positive.
@@ -43,6 +47,14 @@ impl fmt::Display for MeshError {
                 f,
                 "tetrahedron {tet} has volume {volume}; every tetrahedron needs positive volume, \
                  with corners ordered so (v1-v0)x(v2-v0)*(v3-v0) > 0"
+            ),
+            MeshError::FlatTet {
+                tet,
+                relative_volume,
+            } => write!(
+                f,
+                "tetrahedron {tet} is flat to rounding (relative volume {relative_volume}); its \
+                 volume has no reliable sign, so it cannot be analysed"
             ),
             MeshError::NonManifoldFace { nodes } => write!(
                 f,
