@@ -55,14 +55,16 @@ it stands.
   triangle mesh to a trustworthy stress result is still unproven beyond these cases.
 - Multigrid is optional and off by default. Thin plates still need around a thousand or more
   iterations.
-- **Real-part benchmarks are mixed.** The `solidfem-benchmarks` runner builds each part, meshes it
-  and judges it against a limit set in advance. Passing: a thin strip, a plate with a hole, a thick
-  ring, NAFEMS LE1 and LE10, a hook, a nominal snap-fit strain, and a 1 mm hollow box pressed on its
-  top (within 2% on refinement and against an independent structured solve). An L-bracket's
-  deflection is mesh-stable but has no accuracy reference, and its sharp corner is reported as a
-  singularity. Failing: a gear tooth, whose finest mesh holds a tetrahedron flat to rounding that
-  the 10-node upgrade refuses; its two coarser meshes put the root fillet peak within 1.1% of an
-  independent structured solve. Buckling and large deflection are reported as out of scope.
+- **Real-part benchmarks pass, on these shapes only.** The `solidfem-benchmarks` runner builds each
+  part, meshes it and judges it against a limit set in advance. Passing: a thin strip, a plate with a
+  hole, a thick ring, NAFEMS LE1 and LE10, a hook, a nominal snap-fit strain, a 1 mm hollow box
+  pressed on its top (within 2% on refinement and against a structured solve), and a gear tooth,
+  whose root fillet peak reads 0.2% to 1.3% from a structured solve across three densities. Both
+  structured solves use this library's own elements and solver, so they check the mesher and the
+  stress recovery, not the element formulation. An L-bracket's deflection is mesh-stable but has no
+  accuracy reference, and its sharp corner is reported as a singularity. The ring and the gear
+  tooth still contain elements flatter than half a degree. Buckling and large deflection are
+  reported as out of scope.
 - Only linear statics: no contact, no large deflection, no buckling, no fatigue, no plasticity. A
   stress past the material's yield says the part would yield, not how it would fail.
 
