@@ -14,21 +14,30 @@
 //! through its interior. Each is removed by an edge removal that creates no new edge through the
 //! triangle, so the crossings strictly decrease.
 //!
+//! **A flat patch.** Exactly coplanar triangles only pin the patch's boundary loops, so nothing
+//! inside is recovered triangle by triangle: every mesh edge piercing the region is removed, and
+//! the in-plane faces the mesh then has inside the boundary become the surface.
+//!
 //! **Refusal.** The flips are local and can be blocked (the Schoenhardt polyhedron admits no
 //! tetrahedralization without a new point). A constraint that makes no progress is retried in a
 //! later round, when others may have opened its way; when a round finishes nothing, what remains
 //! is reported rather than papered over.
 
+use std::collections::HashSet;
+
 use crate::core::GHOST;
 use crate::error::TetraError;
-use crate::flips::{face_key, Flipper, Target};
+use crate::flips::{edge_key, face_key, Flipper, Target};
 use crate::predicates::orient;
 
 /// A flip budget per constraint: every flip is legal, so this only stops an oscillation.
 const MAX_FLIPS_PER_CONSTRAINT: usize = 256;
 
+/// Passes over a patch's piercing edges before giving up on it for this round.
+const MAX_PATCH_PASSES: usize = 32;
+
 /// How the segment from a start vertex enters a tetrahedron.
-enum Entry {
+pub(crate) enum Entry {
     /// Through the interior of the face opposite the start vertex.
     Face(u32, usize),
     /// Through the interior of this edge.
@@ -71,7 +80,7 @@ pub(crate) fn recover_edge(flipper: &mut Flipper, u: u32, v: u32) -> Result<bool
 }
 
 /// Finds where the segment from `u` towards `v` leaves the star of `u`, by exact orientation.
-fn entry_at(flipper: &mut Flipper, u: u32, v: u32) -> Result<Option<Entry>, TetraError> {
+pub(crate) fn entry_at(flipper: &mut Flipper, u: u32, v: u32) -> Result<Option<Entry>, TetraError> {
     for t in flipper.tets_around(u) {
         let tet = flipper.core.tets[t as usize];
         if tet.contains(&GHOST) {
@@ -156,7 +165,7 @@ pub(crate) fn recover_face(
 
 /// The mesh edges passing through the interior of triangle `face`, in a fixed order: gathered from
 /// the tetrahedra around its corners and then outward through tetrahedra sharing a crossing edge.
-fn crossing_edges(flipper: &mut Flipper, face: [u32; 3]) -> Vec<(u32, u32)> {
+pub(crate) fn crossing_edges(flipper: &mut Flipper, face: [u32; 3]) -> Vec<(u32, u32)> {
     let mut frontier: Vec<u32> = Vec::new();
     for &corner in &face {
         frontier.extend(flipper.tets_around(corner));
@@ -194,6 +203,167 @@ fn crossing_edges(flipper: &mut Flipper, face: [u32; 3]) -> Vec<(u32, u32)> {
     }
     crossing.sort_unstable();
     crossing
+}
+
+/// Recovers flat patch `id`: every mesh edge piercing the region removed, its boundary edges
+/// already being mesh edges, then records and locks the mesh faces that cover the region.
+pub(crate) fn recover_patch(flipper: &mut Flipper, id: usize) -> Result<bool, TetraError> {
+    if flipper.patches[id].triangles.len() == 1 {
+        let [a, b, c] = flipper.patches[id].triangles[0];
+        if !recover_face(flipper, a, b, c)? {
+            return Ok(false);
+        }
+        flipper.patch_faces[id] = vec![face_key(a, b, c)];
+        return Ok(true);
+    }
+    for _ in 0..MAX_PATCH_PASSES {
+        let crossing = crossing_edges_of_patch(flipper, id);
+        if crossing.is_empty() {
+            return lock_patch(flipper, id);
+        }
+        let mut flipped = false;
+        for (p, q) in crossing {
+            if flipper.remove_edge(p, q, Target::Patch(id as u32))? {
+                flipped = true;
+            }
+        }
+        if !flipped {
+            return Ok(false);
+        }
+    }
+    Ok(false)
+}
+
+/// Every mesh edge piercing patch `id`, in a fixed order. Gathered from the tetrahedra at the
+/// patch's vertices, spreading through tetrahedra that contain a piercing edge: any such edge
+/// lies in a cluster whose outline in the plane reaches one of the vertices.
+pub(crate) fn crossing_edges_of_patch(flipper: &mut Flipper, id: usize) -> Vec<(u32, u32)> {
+    let mut frontier: Vec<u32> = Vec::new();
+    for vertex in flipper.patches[id].vertices.clone() {
+        frontier.extend(flipper.tets_around(vertex));
+    }
+    frontier.sort_unstable();
+    frontier.dedup();
+    let mut seen: HashSet<u32> = frontier.iter().copied().collect();
+    let mut crossing: Vec<(u32, u32)> = Vec::new();
+    while let Some(t) = frontier.pop() {
+        let tet = flipper.core.tets[t as usize];
+        if tet.contains(&GHOST) {
+            continue;
+        }
+        let mut any = false;
+        for i in 0..4 {
+            for j in i + 1..4 {
+                let (p, q) = (tet[i].min(tet[j]), tet[i].max(tet[j]));
+                if flipper.crosses_patch(p, q, id) {
+                    any = true;
+                    crossing.push((p, q));
+                }
+            }
+        }
+        if any {
+            for i in 0..4 {
+                let n = flipper.core.neighbors[t as usize][i];
+                if seen.insert(n) {
+                    frontier.push(n);
+                }
+            }
+        }
+    }
+    crossing.sort_unstable();
+    crossing.dedup();
+    crossing
+}
+
+/// With nothing piercing the region, its covering mesh faces are found by spreading across mesh
+/// edges in the plane from a face just inside a boundary edge, stopping at the boundary. They
+/// are recorded and locked, with their edges, so later flips cannot break the patch.
+fn lock_patch(flipper: &mut Flipper, id: usize) -> Result<bool, TetraError> {
+    let points_len = flipper.core.points.len();
+    let plane = flipper.patches[id].triangles[0];
+    let boundary: HashSet<u64> = flipper.patches[id]
+        .boundary
+        .iter()
+        .map(|&(a, b)| edge_key(a, b))
+        .collect();
+    let in_plane = |flipper: &Flipper, v: u32| {
+        let [a, b, c] = plane.map(|w| &flipper.core.points[w as usize]);
+        orient(a, b, c, &flipper.core.points[v as usize]) == 0.0
+    };
+    // A point off the plane gives a sign to which side of a line in the plane a point lies on.
+    let Some(off) = (0..points_len as u32).find(|&v| !in_plane(flipper, v)) else {
+        return Ok(false);
+    };
+    let side = |flipper: &Flipper, a: u32, b: u32, x: u32| {
+        let at = |v: u32| &flipper.core.points[v as usize];
+        orient(at(a), at(b), at(off), at(x)).signum()
+    };
+    // The seed: the in-plane face across a boundary edge on the side of its input triangle.
+    let Some(&(u, v)) = flipper.patches[id].boundary.first() else {
+        return Ok(false);
+    };
+    let input = flipper.patches[id]
+        .triangles
+        .iter()
+        .find(|t| t.contains(&u) && t.contains(&v))
+        .copied();
+    let Some(input) = input else {
+        return Ok(false);
+    };
+    let Some(apex) = input.iter().copied().find(|&w| w != u && w != v) else {
+        return Ok(false);
+    };
+    let wanted = side(flipper, u, v, apex);
+    let Some((ring, _)) = flipper.ring_public(u, v) else {
+        return Ok(false);
+    };
+    let Some(seed) = ring
+        .iter()
+        .copied()
+        .find(|&w| w != GHOST && in_plane(flipper, w) && side(flipper, u, v, w) == wanted)
+    else {
+        return Ok(false);
+    };
+    let mut seen: HashSet<[u32; 3]> = HashSet::new();
+    let start = face_key(u, v, seed);
+    seen.insert(start);
+    let mut stack = vec![start];
+    let mut covering = Vec::new();
+    while let Some(face) = stack.pop() {
+        covering.push(face);
+        for (e1, e2, third) in [
+            (face[0], face[1], face[2]),
+            (face[0], face[2], face[1]),
+            (face[1], face[2], face[0]),
+        ] {
+            if boundary.contains(&edge_key(e1, e2)) {
+                continue;
+            }
+            let Some((ring, _)) = flipper.ring_public(e1, e2) else {
+                return Ok(false);
+            };
+            let away = side(flipper, e1, e2, third);
+            let found = ring.iter().copied().find(|&w| {
+                w != GHOST && w != third && in_plane(flipper, w) && side(flipper, e1, e2, w) != away
+            });
+            let Some(across) = found else {
+                return Ok(false);
+            };
+            let next = face_key(e1, e2, across);
+            if seen.insert(next) {
+                stack.push(next);
+            }
+        }
+    }
+    covering.sort_unstable();
+    for face in &covering {
+        flipper.locked_faces.insert(*face);
+        for (a, b) in [(face[0], face[1]), (face[0], face[2]), (face[1], face[2])] {
+            flipper.locked_edges.insert(edge_key(a, b));
+        }
+    }
+    flipper.patch_faces[id] = covering;
+    Ok(true)
 }
 
 /// The two tetrahedra sharing `face` (sorted): one has its apex on the positive side.

@@ -51,6 +51,8 @@ pub enum TetraError {
         missing_faces: usize,
         first_missing_edge: Option<[u32; 2]>,
         first_missing_face: Option<[u32; 3]>,
+        constraints_without_room: usize,
+        steiner_points: usize,
     },
     /// The winding does not leave the solid on the inner side of this triangle.
     SurfaceWindingWrong { triangle: usize },
@@ -134,12 +136,15 @@ impl fmt::Display for TetraError {
                 missing_faces,
                 first_missing_edge,
                 first_missing_face,
+                constraints_without_room,
+                steiner_points,
             } => write!(
                 f,
                 "{missing_edges} surface edges and {missing_faces} surface triangles could not \
-                 be recovered by flips (first edge {first_missing_edge:?}, first triangle \
-                 {first_missing_face:?}); the surface may intersect itself or need a point \
-                 added inside the solid"
+                 be recovered (first edge {first_missing_edge:?}, first triangle \
+                 {first_missing_face:?}) after adding {steiner_points} interior points; \
+                 {constraints_without_room} had no room inside the solid for a point. The \
+                 surface may intersect itself, or a wall may be too thin to hold a point"
             ),
             Self::SurfaceWindingWrong { triangle } => write!(
                 f,

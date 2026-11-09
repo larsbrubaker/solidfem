@@ -348,11 +348,16 @@ pub fn needle_box(length: f64, n: usize) -> Surface {
 /// The Schoenhardt polyhedron: a triangular prism twisted so each side quad folds inward along
 /// its reflex diagonal. Six vertices, eight faces, and no tetrahedralization without a new point.
 pub fn schoenhardt() -> Surface {
+    schoenhardt_of_height(1.0)
+}
+
+/// The same twisted prism with its two triangles `height` apart.
+pub fn schoenhardt_of_height(height: f64) -> Surface {
     let mut s = Surface::default();
     let at = |angle: f64, z: f64| [angle.cos(), angle.sin(), z];
     let twist = 0.6;
     let bottom = [0.0, TAU / 3.0, 2.0 * TAU / 3.0].map(|a| at(a, 0.0));
-    let top = [0.0, TAU / 3.0, 2.0 * TAU / 3.0].map(|a| at(a + twist, 1.0));
+    let top = [0.0, TAU / 3.0, 2.0 * TAU / 3.0].map(|a| at(a + twist, height));
     s.triangle(top[0], top[1], top[2]);
     s.triangle(bottom[0], bottom[2], bottom[1]);
     for i in 0..3 {

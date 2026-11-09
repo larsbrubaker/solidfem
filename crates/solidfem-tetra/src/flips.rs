@@ -29,6 +29,7 @@ use std::collections::HashSet;
 
 use crate::core::{Core, FACE, GHOST};
 use crate::error::TetraError;
+use crate::patches::{project, Patch};
 use crate::predicates::orient;
 
 /// Rings larger than this are not attempted: the interval search is cubic in the ring, and rings
@@ -48,6 +49,8 @@ pub(crate) enum Target {
     Edge(u32, u32),
     /// Refuse new edges through the interior of this triangle.
     Face([u32; 3]),
+    /// Refuse new edges through the region of this flat patch.
+    Patch(u32),
 }
 
 /// How many flips of each kind have been made.
@@ -81,6 +84,14 @@ pub(crate) struct Flipper {
     pub(crate) locked_edges: HashSet<u64>,
     pub(crate) locked_faces: HashSet<[u32; 3]>,
     pub(crate) counts: FlipCounts,
+    /// The flat patches of the surface, and the mesh faces each ended up covered by.
+    pub(crate) patches: Vec<Patch>,
+    pub(crate) patch_faces: Vec<Vec<[u32; 3]>>,
+    /// Current depth of neighbouring-edge relief; zero right after a point is added, so flips
+    /// do not undo what the point changed.
+    pub(crate) relief_depth: u32,
+    /// How many points have been added inside the solid.
+    pub(crate) steiner_points: usize,
 }
 
 /// A face removal found to be illegal, with the edges of the shared face that block it.
@@ -93,6 +104,7 @@ impl Flipper {
         core: Core,
         locked_edges: HashSet<u64>,
         locked_faces: HashSet<[u32; 3]>,
+        patches: Vec<Patch>,
     ) -> Self {
         let mut vertex_tet = vec![0; core.points.len()];
         for (slot, tet) in core.tets.iter().enumerate() {
@@ -111,6 +123,10 @@ impl Flipper {
             locked_edges,
             locked_faces,
             counts: FlipCounts::default(),
+            patch_faces: vec![Vec::new(); patches.len()],
+            patches,
+            relief_depth: RELIEF_DEPTH,
+            steiner_points: 0,
         }
     }
 
@@ -158,7 +174,11 @@ impl Flipper {
 
     /// The vertices of the ring around edge `(p, q)` and the tetrahedra between them, with
     /// `(p, q, w[i], w[i + 1])` an even permutation of tetrahedron `i`'s vertices, so each is
-    /// positive when real. `None` when the edge is absent or the ring exceeds [`MAX_RING`].
+    /// positive when real. `None` when the edge is absent.
+    pub(crate) fn ring_public(&mut self, p: u32, q: u32) -> Option<(Vec<u32>, Vec<u32>)> {
+        self.ring(p, q)
+    }
+
     fn ring(&mut self, p: u32, q: u32) -> Option<(Vec<u32>, Vec<u32>)> {
         let start = self.find_edge(p, q)?;
         let mut ring = Vec::new();
@@ -168,9 +188,6 @@ impl Flipper {
             let (x, y) = frame(&self.core.tets[t as usize], p, q);
             ring.push(x);
             tets.push(t);
-            if ring.len() > MAX_RING {
-                return None;
-            }
             let tet = self.core.tets[t as usize];
             let opposite = tet.iter().position(|&v| v == x)?;
             t = self.core.neighbors[t as usize][opposite];
@@ -255,7 +272,7 @@ impl Flipper {
         q: u32,
         target: Target,
     ) -> Result<bool, TetraError> {
-        self.remove_edge_within(p, q, target, RELIEF_DEPTH)
+        self.remove_edge_within(p, q, target, self.relief_depth)
     }
 
     /// One edge removal attempt, then, for up to `depth` levels, attempts on the edges from the
@@ -277,6 +294,9 @@ impl Flipper {
         let Some((ring, _)) = self.ring(p, q) else {
             return Ok(false);
         };
+        if ring.len() > MAX_RING {
+            return Ok(false);
+        }
         let mut relief: Vec<(u32, u32)> = Vec::with_capacity(3 * ring.len());
         for (i, &w) in ring.iter().enumerate() {
             if w == GHOST {
@@ -308,6 +328,9 @@ impl Flipper {
             return Ok(false);
         };
         let n = ring.len();
+        if n > MAX_RING {
+            return Ok(false);
+        }
         let ghost = ring.iter().position(|&v| v == GHOST);
         if let Some(position) = ghost {
             // Rotate the ring so the point at infinity is last.
@@ -402,7 +425,7 @@ impl Flipper {
         if total >= NO_TRIANGULATION {
             return None;
         }
-        if matches!(target, Target::Face(_)) && total > 0 {
+        if matches!(target, Target::Face(_) | Target::Patch(_)) && total > 0 {
             return None;
         }
         let mut tets = Vec::with_capacity(2 * (m - 1) + 2);
@@ -440,7 +463,74 @@ impl Flipper {
                 }
             }
             Target::Face(face) => i32::from(self.crosses_face(x, y, face)),
+            Target::Patch(id) => i32::from(self.crosses_patch(x, y, id as usize)),
         }
+    }
+
+    /// Whether mesh edge `(x, y)` pierces patch `id`: its ends strictly on opposite sides of the
+    /// plane and the piercing point within a triangle of the patch, boundary included (a point
+    /// on an internal edge of the input triangulation is still inside the flat region).
+    pub(crate) fn crosses_patch(&self, x: u32, y: u32, id: usize) -> bool {
+        let point = |v: u32| &self.core.points[v as usize];
+        let patch = &self.patches[id];
+        let [a, b, c] = patch.triangles[0].map(point);
+        let (sx, sy) = (orient(a, b, c, point(x)), orient(a, b, c, point(y)));
+        if !((sx > 0.0 && sy < 0.0) || (sx < 0.0 && sy > 0.0)) {
+            return false;
+        }
+        let Some(index) = &patch.index else {
+            return self.pierces_triangle(x, y, patch.triangles[0]);
+        };
+        let (px, py) = (
+            project(point(x), index.axes()),
+            project(point(y), index.axes()),
+        );
+        let low = [px[0].min(py[0]), px[1].min(py[1])];
+        let high = [px[0].max(py[0]), px[1].max(py[1])];
+        index
+            .candidates(low, high)
+            .into_iter()
+            .any(|t| self.pierces_triangle(x, y, patch.triangles[t as usize]))
+    }
+
+    /// Whether line `(x, y)` meets the closed triangle: the three edge sides do not disagree.
+    fn pierces_triangle(&self, x: u32, y: u32, triangle: [u32; 3]) -> bool {
+        let point = |v: u32| &self.core.points[v as usize];
+        let [a, b, c] = triangle.map(point);
+        let sides = [
+            orient(point(x), point(y), a, b),
+            orient(point(x), point(y), b, c),
+            orient(point(x), point(y), c, a),
+        ];
+        sides.iter().all(|&s| s >= 0.0) || sides.iter().all(|&s| s <= 0.0)
+    }
+
+    /// Adds `point` as a new vertex by replacing the tetrahedra `cavity`, which must be
+    /// star-shaped around it by exact test, with one tetrahedron per boundary face.
+    pub(crate) fn add_steiner(
+        &mut self,
+        cavity: &[u32],
+        point: [f64; 3],
+    ) -> Result<(), TetraError> {
+        // The vertex count stays well under `u32::MAX`, as the input is capped far below it.
+        let index = self.core.points.len() as u32;
+        self.core.points.push(point);
+        self.vertex_tet.push(0);
+        let mut new = Vec::new();
+        for &t in cavity {
+            let tet = self.core.tets[t as usize];
+            for (i, positions) in FACE.iter().enumerate() {
+                let n = self.core.neighbors[t as usize][i];
+                if cavity.contains(&n) {
+                    continue;
+                }
+                let face = positions.map(|position| tet[position]);
+                new.push([face[0], face[1], face[2], index]);
+            }
+        }
+        self.apply(cavity, &new)?;
+        self.steiner_points += 1;
+        Ok(())
     }
 
     /// Whether segment `(x, y)` passes through the interior of the triangle, by exact tests: its

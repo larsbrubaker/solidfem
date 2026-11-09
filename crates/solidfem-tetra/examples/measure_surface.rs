@@ -115,7 +115,17 @@ fn measure(name: &str, surface: Surface) {
     let triangles = surface.triangles.len();
     let start = Instant::now();
     let mut mesher = SurfaceMesher::new(surface.points, surface.triangles).expect("valid surface");
-    let status = mesher.step(usize::MAX, &mut || false);
+    // Slice one unit at a time so the longest single unit is the longest a host would wait.
+    let mut longest_unit = 0.0_f64;
+    let status = loop {
+        let unit = Instant::now();
+        let result = mesher.step(1, &mut || false);
+        longest_unit = longest_unit.max(unit.elapsed().as_secs_f64());
+        match result {
+            Ok(StepStatus::Running) => {}
+            other => break other,
+        }
+    };
     let seconds = start.elapsed().as_secs_f64();
     let report = mesher.report();
     let tets = mesher.result().map(|solid| solid.tets.len()).unwrap_or(0);
@@ -125,9 +135,10 @@ fn measure(name: &str, surface: Surface) {
         Err(error) => format!("refused: {error}"),
     };
     println!(
-        "{name}: triangles={triangles} time {seconds:.3}s tets={tets} edges {}/{} present, faces \
+        "{name}: triangles={triangles} time {seconds:.3}s longest unit {longest_unit:.4}s \
+         tets={tets} edges {}/{} present, faces \
          {}/{} present; flips 2-3={} 3-2={} 4-4={} larger={} steiner={} failed edges={} faces={} \
-         => {outcome}",
+         changed triangles={} patches={} => {outcome}",
         report.edges_present_after_delaunay,
         report.edges_total,
         report.faces_present_after_delaunay,
@@ -139,6 +150,8 @@ fn measure(name: &str, surface: Surface) {
         report.steiner_points,
         report.edges_failed,
         report.faces_failed,
+        report.surface_triangles_changed,
+        report.flat_patches,
     );
 }
 

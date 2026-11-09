@@ -8,10 +8,11 @@
 //! add single points to a finished triangulation with [`Triangulator::insert_point`].
 //!
 //! [`SurfaceMesher`] takes a closed surface and builds a tetrahedralization of the solid it
-//! bounds, holding every surface triangle exactly: the Delaunay tetrahedralization of the
-//! surface's vertices, then surface edges and faces recovered by flips (`flips.rs`, `recover.rs`)
-//! and every exterior tetrahedron removed by a flood fill. Refinement builds on this crate and is
-//! not part of it.
+//! bounds, its boundary the same surface: the Delaunay tetrahedralization of the surface's
+//! vertices, then the surface's real edges and flat regions recovered by flips (`flips.rs`,
+//! `recover.rs`) and a point inside the solid where no flip can finish (`steiner.rs`), and every
+//! exterior tetrahedron removed by a flood fill. Triangles inside a flat region may change;
+//! nothing about the surface's shape does. Refinement builds on this crate and is not part of it.
 //!
 //! The rules that span its files:
 //! - **Exact decisions.** Every geometric decision is an exact predicate (`predicates.rs`), so a
@@ -26,8 +27,9 @@
 //!   a decision about the caller's surface, so a repeated point is
 //!   [`TetraError::DuplicatePoint`] rather than a silent merge.
 //!
-//! Layout: `surface.rs` is the surface-recovery interface and classifies the solid, `recover.rs`
-//! orders the recovery of each constraint, `flips.rs` holds the flips, `triangulator.rs` the
+//! Layout: `surface.rs` is the surface-recovery interface and classifies the solid, `patches.rs`
+//! finds the flat regions, `recover.rs` orders the recovery of each constraint, `flips.rs` holds
+//! the flips, `steiner.rs` adds points inside the solid, `triangulator.rs` the
 //! point-set interface and input checks, `order.rs` the insertion order, `core.rs` the tetrahedra,
 //! walk and cavity, `predicates.rs` the exact tests and the tie rule, `error.rs` the failures.
 
@@ -35,8 +37,10 @@ mod core;
 mod error;
 mod flips;
 mod order;
+mod patches;
 mod predicates;
 mod recover;
+mod steiner;
 mod surface;
 mod triangulator;
 
