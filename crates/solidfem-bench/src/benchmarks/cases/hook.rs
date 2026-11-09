@@ -75,15 +75,20 @@ pub fn winkler_inner_stress(force: f64, ri: f64, ro: f64, width: f64) -> f64 {
     force / area + moment * (neutral - ri) / (area * e * ri)
 }
 
-/// **Limit.** The inner-fibre stress at the throat, averaged over a 1.5 mm window, within 6% of
-/// Winkler-Bach at the finest mesh, and tip deflection moved by at most 1% in the last
-/// refinement. The formula assumes plane sections, a constant section, no radial stress, an axis
-/// of constant curvature. This hook has `R/h = 1.5`, strongly curved, where Winkler-Bach reads
-/// within about 2 to 4% of an elasticity solution for a rectangle; the throat is one quarter of a
-/// circle from the load patch (47 mm of arc, 2.4 section depths), and the shank union is on the
-/// other side of the ring, which is a real departure from a uniform arc, allowed 1%. The stress
-/// is a nodal average in a window over which the moment and curvature change by under 0.5%.
-/// 6% is 4% for the formula, 1% for the load and shank departures, 1% for discretization.
+/// **Limit.** The inner-fibre stress at the throat, averaged over a 1.5 mm window, within 2.4% of
+/// Winkler-Bach at the finest mesh, and tip deflection moved by at most 1% in the last refinement.
+/// The formula assumes plane sections, a constant section, no radial stress, an axis of constant
+/// curvature, and this hook has `R / h = 1.5`, strongly curved, but the elasticity closed form for
+/// pure bending of a curved bar gives `7.755 M / h^2` at the inner fibre of `r_o / r_i = 2`,
+/// against Winkler-Bach's `7.725 M / h^2`: a 0.4% difference at this very shape, not the larger
+/// figure usually quoted for curved beams in general. The throat also carries the direct stress
+/// `F / A` (5 of 62.9 MPa), taken at its Winkler value; the bending elasticity comparison does not
+/// cover that small share, which sits inside the next 1%. The throat is one quarter of a circle
+/// from the load patch (47 mm of arc, 2.4 section depths), and the shank union is on the other
+/// side of the ring, a real departure from a uniform arc, allowed 1%. The stress is a nodal
+/// average in a window over which the moment and curvature change by under 0.5%; with
+/// discretization that is 1%. 2.4% is 0.4% for the formula, 1% for the load and shank departures,
+/// 1% for discretization. The finest mesh measures +2.1% against this reference.
 fn judge(rows: &[DensityResult]) -> Verdict {
     verdict_of((|| {
         let last = rows.last().ok_or("no rows")?;
@@ -91,7 +96,7 @@ fn judge(rows: &[DensityResult]) -> Verdict {
         check_error(
             last.value("inner_sigma"),
             reference,
-            0.06,
+            0.024,
             "inner fibre stress at the throat",
         )?;
         stable(rows, "tip_uy", 0.01, "tip deflection")

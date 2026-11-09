@@ -117,8 +117,13 @@ const LE1_TARGET: f64 = 92.7;
 /// **Limit, LE1.** `sigma_y` at D, within 3% of the second-hand 92.7 MPa at the finest mesh and
 /// the last refinement moving it by at most 3%. The 3% is: 1% for a target read second hand from
 /// open documentation of a paywalled publication, with no printed tolerance seen; 0.5% for a 3D
-/// model of the plane-stress statement (the thickness is 0.05 of the radius of curvature at D);
-/// 1.5% for discretization at a nodal average on the quadratic mesh.
+/// model of the plane-stress statement; 1.5% for discretization at a nodal average on the
+/// quadratic mesh. The 3D allowance: the radius of curvature of the inner ellipse at D is
+/// `b^2 / a = 1000^2 / 2000 = 500`, so the thickness is `t / rho = 100 / 500 = 0.2` of it. The
+/// quantity is the through-thickness mean, for which the leading departure from plane stress cancels
+/// and the next is of order `nu (t / rho)^2 / 12` = 0.1%; 0.5% stands as five times that order of
+/// magnitude, an estimate rather than a published value. The limit is unchanged, and the measured
+/// +0.95% passes it.
 fn le1_judge(rows: &[DensityResult]) -> Verdict {
     verdict_of((|| {
         let last = rows.last().ok_or("no rows")?;

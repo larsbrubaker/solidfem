@@ -20,7 +20,7 @@ use solidfem::meshing::quadratic_from_solid;
 use solidfem::tetra::{RefineOptions, Refiner, SizeFn, StepStatus, SurfaceMesher};
 
 use super::cases::{Case, Density};
-use super::verdict::{LoadBalance, Verdict, LOAD_BALANCE_LIMIT};
+use super::verdict::{within_limit, LoadBalance, Verdict, LOAD_BALANCE_LIMIT};
 use crate::gate_diagnostics::multigrid_options;
 
 /// A closed triangle surface: vertices and outward-wound triangles.
@@ -86,6 +86,8 @@ enum DensityOutcome {
     Solved(Box<DensityResult>),
     /// A stage refused the part, with the reason.
     Refused(String),
+    /// This workspace's surface recovery could not recover a surface it had accepted.
+    MesherRefused(String),
     /// The solve hit the cap.
     Capped {
         iterations: u64,
@@ -147,6 +149,16 @@ pub fn read_surface(path: &str) -> Result<Surface, String> {
     Ok((points, triangles))
 }
 
+/// The failure reason when this workspace's surface recovery cannot recover a surface the mesher
+/// accepted: names the density and says the refusal is the mesher's, because such a failure shows
+/// nothing wrong with the surface itself.
+pub fn mesher_refused(density: &str, reason: &str) -> String {
+    format!(
+        "{density}: mesher refused: this workspace's surface recovery could not recover the \
+         surface, with no surface defect shown ({reason})"
+    )
+}
+
 /// Runs a case at every density from `surface_of`, coarse to fine, with each solve capped at
 /// `cap_seconds`, and judges the result. A stage refusing any density fails the case with that
 /// stage's reason; a capped solve makes it not assessed.
@@ -177,6 +189,12 @@ pub fn run_case(
                     verdict: Verdict::Fail(format!("{} refused: {reason}", density.label)),
                 };
             }
+            DensityOutcome::MesherRefused(reason) => {
+                return CaseResult {
+                    rows,
+                    verdict: Verdict::Fail(mesher_refused(&density.label, &reason)),
+                };
+            }
             DensityOutcome::Capped {
                 iterations,
                 residual,
@@ -194,7 +212,7 @@ pub fn run_case(
     }
     let imbalanced = rows
         .iter()
-        .find(|row| row.balance.error.is_nan() || row.balance.error > LOAD_BALANCE_LIMIT);
+        .find(|row| !within_limit(row.balance.error, LOAD_BALANCE_LIMIT));
     let verdict = match imbalanced {
         Some(row) => Verdict::Fail(format!(
             "{}: the reactions do not balance the applied load: error {:.3e} of {} gross, over the limit {LOAD_BALANCE_LIMIT:e}",
@@ -218,14 +236,12 @@ fn solve_density(
     };
     match mesher.step(usize::MAX, &mut || false) {
         Ok(StepStatus::Done) => {}
-        Ok(other) => {
-            return DensityOutcome::Refused(format!("surface recovery stopped: {other:?}"))
-        }
-        Err(error) => return DensityOutcome::Refused(format!("surface recovery: {error}")),
+        Ok(other) => return DensityOutcome::MesherRefused(format!("stopped: {other:?}")),
+        Err(error) => return DensityOutcome::MesherRefused(error.to_string()),
     }
     let solid = match mesher.result() {
         Ok(solid) => solid,
-        Err(error) => return DensityOutcome::Refused(format!("surface recovery: {error}")),
+        Err(error) => return DensityOutcome::MesherRefused(error.to_string()),
     };
     let sizing = density.size;
     let size_function: SizeFn = Box::new(move |p| sizing.at(p));

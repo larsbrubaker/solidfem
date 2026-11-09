@@ -1,4 +1,7 @@
-//! Part 4: an L-bracket with a sharp re-entrant corner, and with a fillet.
+//! Part 4: an L-bracket with a sharp re-entrant corner, and with a fillet. Neither shape has an
+//! accuracy reference: what these cases test is mesh stability of the tip deflection, that the
+//! sharp corner's peak is reported as a singularity, and that the fillet's peak converges. The
+//! verdict says so on its row, never a bare PASS.
 
 use super::*;
 
@@ -20,10 +23,16 @@ fn bracket_apply(mesh: &QuadraticTetMesh) -> Result<Supports, String> {
     })
 }
 
-/// A rough frame estimate of the tip deflection, shown beside the measurement and never judged:
-/// two straight beams on centre lines through a rigid joint,
-/// `F L^3 / (3 E I) + F L^2 H / (E I) + F H / (E A)`, L = H = 95. A real corner is more flexible
-/// than a rigid joint, so a few percent above this is expected.
+/// A rough frame estimate of the tip deflection, shown beside the measurement and never judged,
+/// because it is not an accuracy reference: two centre-line beams, each carried at full beam
+/// flexibility all the way to where the centre lines meet, `F L^3 / (3 E I) + F L^2 H / (E I) +
+/// F H / (E A)`, L = H = 95, giving 1.3728 mm. A solid corner is stiffer than beams running
+/// through it, so a true deflection is expected below this. The stiff side is a rigid 10 x 10
+/// corner square with both legs bending only outside it, 1.266 mm by hand: `F 90^3 / (3 E I)` for
+/// the horizontal leg plus the corner's rotation `F 95 * 90 / (E I)` times the 95 mm arm. The
+/// measured tips, 2.1% and 5.7% below 1.3728, lie between the two, the fillet being the stiffer.
+/// So this is the soft side of a hand estimate and nothing more; the deflection is not checked
+/// against it, and there is no closed form to check it against.
 fn frame_estimate() -> f64 {
     let inertia = L_THICK * L_DEPTH * L_DEPTH * L_DEPTH / 12.0;
     let area = L_THICK * L_DEPTH;
@@ -55,27 +64,36 @@ fn bracket_measure(
 /// costs strain energy only like `h^(2 lambda)` with `lambda` = 0.5445, so the last refinement must
 /// move it by at most 1%. The corner's peak stress has no value to compare with anything: the
 /// right outcome is that it keeps growing and is reported as a detected singularity, a number the
-/// reader must not use. Failing to detect it, here, is a failure of this benchmark.
+/// reader must not use. Failing to detect it, here, is a failure of this benchmark. A pass claims
+/// mesh stability and the detection, and no accuracy against any reference.
 fn l_sharp_judge(rows: &[DensityResult]) -> Verdict {
-    verdict_of((|| {
+    let outcome = (|| -> Result<f64, String> {
         stable(rows, "tip", 0.01, "tip deflection")?;
         let peaks = series(rows, "peak");
         match classify_peak(&sizes(rows), &peaks, 0.03) {
-            Some(PeakBehaviour::Singular { .. }) => Ok(()),
+            Some(PeakBehaviour::Singular { exponent }) => Ok(exponent),
             other => Err(format!(
                 "the sharp corner's peak did not grow like a singularity: {other:?}, series {peaks:?}"
             )),
         }
-    })())
+    })();
+    match outcome {
+        Ok(exponent) => Verdict::PassLimited(format!(
+            "tip deflection mesh-stable, no accuracy reference; corner peak: singularity detected, \
+             growing as h^-{exponent:.2}, not a usable stress"
+        )),
+        Err(reason) => Verdict::Fail(reason),
+    }
 }
 
 /// **Limit, fillet.** Tip deflection moved by at most 1% in the last refinement, as for the sharp
 /// corner. The fillet's peak is a real number and must be converged, not singular: the last
 /// refinement moves it by at most 3%. With error shrinking about as `h^2` and a refinement ratio
-/// near 1.6, a 3% last change means the coarser mesh is still 5% off and the finest about 2%, the
-/// usual engineering target for a fillet peak; there is no closed-form value to hold it to here.
+/// near 1.6, a 3% last change means the coarser mesh is still 5% off and the finest about 2%. That
+/// reading is from the mesh sequence alone: there is no closed-form value and no measured
+/// reference to hold the fillet to, so a pass claims mesh stability and not accuracy.
 fn l_fillet_judge(rows: &[DensityResult]) -> Verdict {
-    verdict_of((|| {
+    let outcome = (|| -> Result<(), String> {
         stable(rows, "tip", 0.01, "tip deflection")?;
         let peaks = series(rows, "peak");
         match classify_peak(&sizes(rows), &peaks, 0.03) {
@@ -84,7 +102,11 @@ fn l_fillet_judge(rows: &[DensityResult]) -> Verdict {
                 "the fillet's peak did not converge: {other:?}, series {peaks:?}"
             )),
         }
-    })())
+    })();
+    match outcome {
+        Ok(()) => Verdict::PassLimited("mesh-stable, no accuracy reference".to_string()),
+        Err(reason) => Verdict::Fail(reason),
+    }
 }
 
 pub(super) fn cases() -> Vec<Case> {

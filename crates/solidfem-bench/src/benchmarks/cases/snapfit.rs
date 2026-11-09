@@ -1,9 +1,12 @@
-//! Part 7: a uniform snap-fit cantilever under an enforced tip deflection, judged by the
-//! permissible-strain method for the peak strain at the root.
+//! Part 7: a uniform snap-fit cantilever under an enforced tip deflection, judged on a nominal
+//! bending strain only: the surface strain sampled 3 to 5 mm from the root and scaled back to the
+//! root through the linear strain of a tip-loaded beam. The peak strain at the root is not
+//! measured (the root line is the clamp corner) and no allowable strain is ever checked, so a pass
+//! says nothing about whether the part survives its snap.
 //!
-//! The strip is 20 long, 5 wide, 2 thick, ABS-like (E = 2000 MPa, nu = 0.35). The method's strain
-//! at the root of a uniform rectangular cantilever is `1.5 * delta * T / L^2`. That is small
-//! deflection beam theory. Two cases: `delta = 1 mm` (`delta / L = 0.05`, root rotation about
+//! The strip is 20 long, 5 wide, 2 thick, ABS-like (E = 2000 MPa, nu = 0.35). Euler-Bernoulli beam
+//! theory gives the nominal bending strain at the root of a uniform rectangular cantilever as
+//! `1.5 * delta * T / L^2`. That is small deflection beam theory. Two cases: `delta = 1 mm` (`delta / L = 0.05`, root rotation about
 //! 0.075 radians, within small-rotation linear statics, geometric effects of order `theta^2`,
 //! well under 1%), which is judged; and `delta = 5 mm` (`delta / L = 0.25`), where a solver of
 //! linear statics is outside its validity and the verdict must say so instead of giving a number.
@@ -43,9 +46,9 @@ fn apply(mesh: &QuadraticTetMesh) -> Result<Supports, String> {
 }
 
 fn measure(mesh: &QuadraticTetMesh, solution: &Solution) -> Result<Vec<(String, f64)>, String> {
-    // The bending strain along the surface at a section a small distance from the root is
-    // measured, then referred back to the root through the linear strain of a tip-loaded beam: the
-    // root line itself is the clamp corner, whose nodal value is not a usable strain.
+    // A nominal bending strain: the surface strain 3 to 5 mm from the root, referred back to the
+    // root through the linear strain of a tip-loaded beam. The root line itself is the clamp
+    // corner, whose nodal value is not a usable strain, so no peak strain at the root is read.
     let targets = nodes_where(mesh, |p| {
         p[0] >= 0.15 * L
             && p[0] <= 0.25 * L
@@ -63,22 +66,29 @@ fn measure(mesh: &QuadraticTetMesh, solution: &Solution) -> Result<Vec<(String, 
         root += strain[0].abs() / (1.0 - x / L);
         count += 1;
     }
-    Ok(vec![("root_strain".to_string(), root / count as f64)])
+    Ok(vec![(
+        "nominal_bending_strain".to_string(),
+        root / count as f64,
+    )])
 }
 
-/// The permissible-strain formula for a uniform rectangular cantilever.
-fn root_strain_formula(delta: f64) -> f64 {
+/// The nominal bending strain at the root of a uniform rectangular cantilever.
+fn nominal_bending_strain(delta: f64) -> f64 {
     1.5 * delta * T / (L * L)
 }
 
-/// **Limit.** The surface bending strain referred to the root within 4% of `1.5 delta T / L^2` at
-/// the finest mesh, and it moved by at most 3% by the last refinement. The formula is Euler-Bernoulli
-/// bending of a slender beam: at L/T = 10 the shear deflection is about 0.8% of the bending
-/// deflection (so 0.8% less strain than the formula for the same enforced deflection), and the
-/// clamped root adds an elastic flexibility of order a percent or two. 4% is that, 1%
-/// for the extrapolation from a band away from the root to the root, and 2% for discretization.
+/// **Limit.** The nominal bending strain within 4% of `1.5 delta T / L^2` at the finest mesh, and
+/// it moved by at most 3% by the last refinement. The formula is Euler-Bernoulli bending of a
+/// slender beam: at L/T = 10 the shear deflection is about 0.8% of the bending deflection (so
+/// 0.8% less strain than the formula for the same enforced deflection), and the clamped root adds
+/// an elastic flexibility of order a percent or two. 4% is that, 1% for the extrapolation from a
+/// band away from the root to the root, and 2% for discretization.
+///
+/// **What this does not explain.** The measured strain sits +0.80% above the formula, while both
+/// effects named above act to reduce it: this derivation predicts a negative error. The 4% limit
+/// holds, but the sign is unexplained here; passing the limit does not account for it.
 fn judge(rows: &[DensityResult]) -> Verdict {
-    verdict_of((|| {
+    let outcome = (|| -> Result<(), String> {
         if DELTA / L > VALIDITY_RATIO {
             return Err(format!(
                 "linear statics is outside its validity at delta / L = {}",
@@ -87,13 +97,26 @@ fn judge(rows: &[DensityResult]) -> Verdict {
         }
         let last = rows.last().ok_or("no rows")?;
         check_error(
-            last.value("root_strain"),
-            root_strain_formula(DELTA),
+            last.value("nominal_bending_strain"),
+            nominal_bending_strain(DELTA),
             0.04,
-            "root strain",
+            "nominal bending strain",
         )?;
-        stable(rows, "root_strain", 0.03, "root strain")
-    })())
+        stable(
+            rows,
+            "nominal_bending_strain",
+            0.03,
+            "nominal bending strain",
+        )
+    })();
+    match outcome {
+        Ok(()) => Verdict::PassLimited(
+            "nominal bending strain sampled 3 to 5 mm from the root; neither the root's peak \
+             strain nor any allowable strain was checked"
+                .to_string(),
+        ),
+        Err(reason) => Verdict::Fail(reason),
+    }
 }
 
 fn outside_validity(_: &[DensityResult]) -> Verdict {
@@ -109,7 +132,7 @@ pub(super) fn cases() -> Vec<Case> {
     vec![
         Case {
             id: "snapfit",
-            title: "Part 7: snap-fit strip 20 x 5 x 2, enforced tip deflection 1 mm",
+            title: "Part 7: snap-fit strip 20 x 5 x 2, enforced tip deflection 1 mm, nominal bending strain",
             material: material(),
             densities: vec![
                 density("h=1.0", "snap_h1.0", Sizing::Uniform(1.0), 1.0),

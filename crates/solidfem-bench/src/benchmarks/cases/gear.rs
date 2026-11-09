@@ -69,7 +69,7 @@ fn measure(mesh: &QuadraticTetMesh, solution: &Solution) -> Result<Vec<(String, 
     for (node, p) in mesh.nodes().iter().enumerate() {
         let r = radius(*p);
         if p[0] < 0.0 && (RR - 0.5..=RR + 3.0 * RF).contains(&r) {
-            peak = peak.max(solution.nodal_von_mises[node]);
+            peak = worst_of(peak, solution.nodal_von_mises[node]);
         }
     }
     if peak == f64::MIN {

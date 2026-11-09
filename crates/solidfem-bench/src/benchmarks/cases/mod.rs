@@ -16,7 +16,9 @@ use solidfem::elastic::{
 use solidfem::mesh::{BoundaryFace, QuadraticTetMesh};
 
 use super::pipeline::{face_area, face_normal, DensityResult, Supports};
-use super::verdict::{classify_peak, last_change, within, PeakBehaviour, Verdict};
+use super::verdict::{
+    classify_peak, last_change, within, within_limit, worst_of, PeakBehaviour, Verdict,
+};
 
 /// Young's modulus for every case, MPa; lengths are mm and forces N.
 const E: f64 = 200_000.0;
@@ -110,7 +112,7 @@ fn density(label: &str, file: &str, size: Sizing, series_size: f64) -> Density {
 /// `value` against `reference`, a named failure when off by more than the `limit` fraction.
 pub fn check_error(value: f64, reference: f64, limit: f64, what: &str) -> Result<f64, String> {
     let error = (value - reference).abs() / reference.abs();
-    if error > limit {
+    if !within_limit(error, limit) {
         return Err(format!(
             "{what}: measured {value:.6e}, reference {reference:.6e}, error {:.3}% over the {:.3}% limit",
             100.0 * error,
@@ -130,8 +132,13 @@ fn sizes(rows: &[DensityResult]) -> Vec<f64> {
 
 fn stable(rows: &[DensityResult], name: &str, limit: f64, what: &str) -> Result<(), String> {
     let values = series(rows, name);
+    if values.iter().any(|value| !value.is_finite()) {
+        return Err(format!(
+            "{what}: a value in the series is not finite: {values:?}"
+        ));
+    }
     let change = last_change(&values).ok_or_else(|| format!("{what}: no last change"))?;
-    if change > limit {
+    if !within_limit(change, limit) {
         return Err(format!(
             "{what}: the last refinement moved it by {:.3}%, over the {:.3}% allowed; series {values:?}",
             100.0 * change,
@@ -195,7 +202,7 @@ fn plane_nodes(mesh: &QuadraticTetMesh, coordinate: usize, value: f64) -> Vec<u3
 /// cannot quietly apply a different load.
 fn check_area(area: f64, expected: f64, what: &str) -> Result<(), String> {
     // The selected faces are flat and exactly the region, so the only departure is rounding.
-    if (area - expected).abs() > 1e-6 * expected {
+    if !within_limit((area - expected).abs(), 1e-6 * expected) {
         return Err(format!("{what}: selected area {area}, expected {expected}"));
     }
     Ok(())
@@ -215,7 +222,7 @@ fn peak_in_box(
             && position[1] >= low[1]
             && position[1] <= high[1]
         {
-            peak = peak.max(solution.nodal_von_mises[node]);
+            peak = worst_of(peak, solution.nodal_von_mises[node]);
         }
     }
     if peak == f64::MIN {

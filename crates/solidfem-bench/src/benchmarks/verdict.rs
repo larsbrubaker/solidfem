@@ -1,7 +1,12 @@
 //! The judgments of the real-part benchmark runner, free of any meshing or solving so they can be
-//! tested alone: the four verdicts a part may get, the mesh-convergence and stress-singularity
-//! reading of a series of results at finer and finer meshes, and the load-balance check that every
-//! case must pass. the case files in `cases/` apply them to what `pipeline.rs` measured.
+//! tested alone: the verdicts a part may get, the mesh-convergence and stress-singularity reading
+//! of a series of results at finer and finer meshes, the limit check every number goes through,
+//! and the load-balance check that every case must pass. The case files in `cases/` apply them to
+//! what `pipeline.rs` measured.
+//!
+//! **Non-finite values never pass.** Every limit goes through [`within_limit`] and every running
+//! worst value through [`worst_of`], so a `NaN` or infinite measurement fails a case instead of
+//! slipping through a comparison that is false for `NaN`, or being dropped by `f64::max`.
 //!
 //! **Convergence versus singularity.** A peak stress over refinement is read through the growth
 //! exponent `s` in `peak ~ h^-s`, measured between consecutive densities as
@@ -23,11 +28,14 @@ pub const SINGULAR_EXPONENT: f64 = 0.2;
 /// The fraction of the previous step's exponent the last must reach to count as not decaying.
 pub const SINGULAR_PERSISTENCE: f64 = 0.6;
 
-/// A part's result, one of exactly these.
+/// A part's result: PASS, FAIL, NOT ASSESSED or OUT OF SCOPE.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
     /// Everything measured is within its stated limits.
     Pass,
+    /// Every stated limit was met, but those limits test only what the text says; shown as
+    /// `PASS (text)`, never as a bare PASS.
+    PassLimited(String),
     /// A limit was broken, or a stage refused the part, with the named reason.
     Fail(String),
     /// A solve hit its time cap, so no error can be quoted.
@@ -40,6 +48,7 @@ impl fmt::Display for Verdict {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Verdict::Pass => f.write_str("PASS"),
+            Verdict::PassLimited(limits) => write!(f, "PASS ({limits})"),
             Verdict::Fail(why) => write!(f, "FAIL: {why}"),
             Verdict::NotAssessed(why) => write!(f, "NOT ASSESSED: {why}"),
             Verdict::OutOfScope(why) => write!(f, "OUT OF SCOPE: {why}"),
@@ -59,13 +68,17 @@ pub enum PeakBehaviour {
 }
 
 /// The growth exponents of `peaks` over the mesh sizes `sizes`, one per consecutive pair, or `None`
-/// when a size or peak is not positive, the sizes are not strictly decreasing, or the lengths do
-/// not match.
+/// when a size or peak is not positive and finite, the sizes are not strictly decreasing, or the
+/// lengths do not match.
 pub fn growth_exponents(sizes: &[f64], peaks: &[f64]) -> Option<Vec<f64>> {
     if sizes.len() != peaks.len() || sizes.len() < 2 {
         return None;
     }
-    if sizes.iter().chain(peaks).any(|v| v.is_nan() || *v <= 0.0) {
+    if sizes
+        .iter()
+        .chain(peaks)
+        .any(|v| !v.is_finite() || *v <= 0.0)
+    {
         return None;
     }
     sizes
@@ -145,14 +158,33 @@ impl LoadBalance {
     }
 }
 
-/// The largest allowed `|applied + reaction| / gross`. The solve stops at a relative residual of
-/// 1e-9, each support reaction is an integral of the recovered stresses against the same 4-point
-/// rule the assembly used (exact on straight-edged 10-node elements) so the imbalance is the solve
-/// residual over the free values, at most about `sqrt(n)` of it against the gross load for `n`
-/// values, far below this 1e-6 for any model solved here.
+/// The largest allowed `|applied + reaction| / gross`. Each support reaction is an integral of the
+/// recovered stresses against the same 4-point rule the assembly used (exact on straight-edged
+/// 10-node elements), so the imbalance is the solve residual summed over the free values, at most
+/// about `sqrt(n)` of the attained relative residual against the gross load for `n` values. The
+/// solver stops at a relative residual of 1e-9 or, when that is below what `f64` can resolve for
+/// the product `A x`, at the rounding floor of that product (`solidfem-solve`'s `pcg.rs`); a
+/// slender strip stops by that path at 2.6e-7 to 4.1e-7, not at 1e-9. So 1e-6 is a limit checked
+/// against the attained residual on every row, not a consequence of the 1e-9 tolerance.
 pub const LOAD_BALANCE_LIMIT: f64 = 1e-6;
 
 /// A plain interval check with a one-sided error reported: `value` must lie in `[low, high]`.
 pub fn within(value: f64, low: f64, high: f64) -> bool {
     value >= low && value <= high
+}
+
+/// True when `value` is finite and at most `limit`: every error and last-change limit goes through
+/// this, so a `NaN` or infinite value fails it where a bare `>` would let it pass.
+pub fn within_limit(value: f64, limit: f64) -> bool {
+    value.is_finite() && value <= limit
+}
+
+/// The larger of two values, `NaN` when either is: a running worst or peak must not lose a `NaN`
+/// the way `f64::max` does.
+pub fn worst_of(a: f64, b: f64) -> f64 {
+    if a.is_nan() || b.is_nan() {
+        f64::NAN
+    } else {
+        a.max(b)
+    }
 }

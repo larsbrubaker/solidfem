@@ -53,28 +53,41 @@ fn strip_nu0_judge(rows: &[DensityResult]) -> Verdict {
     })())
 }
 
-/// **Limit, nu = 0.3.** For a strip of width b = 10 t the anticlastic curvature is partly
-/// restrained and the root clamp restrains the transverse strain, so the true stiffness lies
-/// between the narrow beam (no restraint, `E I`) and the plate strip restrained everywhere
-/// (`E I / (1 - nu^2)`): the bending part of the deflection is in
-/// `[(1 - nu^2) d_b, d_b]`, with the Timoshenko shear term added to each bound. This is a
-/// bracket from the two limiting beam theories, not a single closed form, so the only claim the
-/// reference makes is that interval. The measurement is allowed 1% of `d_b` outside each bound
-/// for discretization, as the nu = 0 case is, and the last refinement moving it by at most 1%.
+/// The fraction by which the clamp stiffens the strip relative to the narrow beam, for an
+/// effective fully restrained length `length`. Derived on [`strip_nu03_judge`].
+fn clamp_stiffening(nu: f64, length: f64) -> f64 {
+    3.0 * nu * nu * length / STRIP_L
+}
+
+/// **Limit, nu = 0.3.** In linear statics the width-over-thickness ratio has no effect on a free
+/// strip: the anticlastic curvature is free to form, so away from the clamp the section bends with
+/// the narrow-beam stiffness `E I`, whatever `b / t` is. The clamp alone restrains the transverse
+/// strain. Over a length `l` near the root the section is stiffened from `E I` by up to
+/// `1 / (1 - nu^2)`, removing a fraction `nu^2` of the curvature there; with moment `F L` and arm
+/// `L` that takes `nu^2 (F L / E I) l L` off the tip, a fraction `3 nu^2 l / L` of the bending
+/// deflection. The restraint decays away from the clamp like a self-equilibrated end disturbance
+/// of a strip with free edges, whose decay length is about a quarter of the width `b`; a full
+/// restraint is at most about half the width long, so the effective `l` lies between `b / 4` and
+/// `b / 2`, a clamp reduction of 0.68% to 1.35% of the bending term here, about 1%. That is an
+/// estimate of a local effect, not a closed form. The tip deflection is compared with the narrow
+/// beam `d = d_b + d_s` (Timoshenko shear added): it must lie below `d` by the clamp reduction,
+/// give or take 1% of `d_b` for discretization as in the nu = 0 case, so the band is
+/// `[d - 2.35% d_b, d + 0.32% d_b]`, the narrow beam itself just inside the upper limit, with the
+/// last refinement moving it by at most 1%.
 fn strip_nu03_judge(rows: &[DensityResult]) -> Verdict {
     verdict_of((|| {
         let last = rows.last().ok_or("no rows")?;
         let nu = 0.3;
         let (bending, shear) = strip_reference(nu);
-        let tol = 0.01 * bending;
+        let narrow = bending + shear;
         let (low, high) = (
-            (1.0 - nu * nu) * bending + shear - tol,
-            bending + shear + tol,
+            narrow - (clamp_stiffening(nu, 0.5 * STRIP_W) + 0.01) * bending,
+            narrow - (clamp_stiffening(nu, 0.25 * STRIP_W) - 0.01) * bending,
         );
         let tip = last.value("tip");
         if !within(tip, low, high) {
             return Err(format!(
-                "tip deflection {tip:.6e} outside the bracket [{low:.6e}, {high:.6e}]"
+                "tip deflection {tip:.6e} outside the clamp-restrained narrow-beam band [{low:.6e}, {high:.6e}]"
             ));
         }
         stable(rows, "tip", 0.01, "tip deflection")

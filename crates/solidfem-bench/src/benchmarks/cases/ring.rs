@@ -154,8 +154,14 @@ fn ring_measure(
         let s = point.stress;
         let radial = nx * nx * s[0] + ny * ny * s[1] + 2.0 * nx * ny * s[3];
         let hoop = ny * ny * s[0] + nx * nx * s[1] - 2.0 * nx * ny * s[3];
-        hoop_error = hoop_error.max((hoop - (coefficient_a + coefficient_b / r2)).abs());
-        radial_error = radial_error.max((radial - (coefficient_a - coefficient_b / r2)).abs());
+        hoop_error = worst_of(
+            hoop_error,
+            (hoop - (coefficient_a + coefficient_b / r2)).abs(),
+        );
+        radial_error = worst_of(
+            radial_error,
+            (radial - (coefficient_a - coefficient_b / r2)).abs(),
+        );
         points += 1;
     }
     if points == 0 {
@@ -199,13 +205,13 @@ fn ring_judge(rows: &[DensityResult]) -> Verdict {
         )?;
         stable(rows, "bore_ur", 0.01, "bore radial displacement")?;
         let (hoop, radial) = (last.value("hoop_err"), last.value("radial_err"));
-        if hoop > 0.03 {
+        if !within_limit(hoop, 0.03) {
             return Err(format!(
                 "worst hoop stress error {:.3}% of the peak hoop, over 3%",
                 100.0 * hoop
             ));
         }
-        if radial > 0.03 {
+        if !within_limit(radial, 0.03) {
             return Err(format!(
                 "worst radial stress error {:.3}% of the pressure, over 3%",
                 100.0 * radial
