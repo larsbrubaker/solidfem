@@ -300,6 +300,20 @@ pub fn select(names: &[String]) -> Result<Vec<SurfacePart>, SurfaceError> {
     Ok(parts)
 }
 
+/// The remesh options every remesh in this crate uses: the remesher's defaults for a CAD part
+/// with the caller's size, deviation bound and cancel token. The benchmark surfaces and the
+/// corpus (`corpus::remesh_trial`) both take theirs from here, so the corpus measures the remesh
+/// the benchmarks run.
+pub fn analysis_options<'a>(
+    size_at: &'a dyn Fn([f64; 3]) -> f64,
+    deviation: f64,
+    cancel: &'a CancelToken,
+) -> AnalysisRemeshOptions<'a> {
+    let mut options = AnalysisRemeshOptions::new(size_at, deviation);
+    options.cancel = Some(cancel);
+    options
+}
+
 /// Remeshes `mesh`, which `part` built, at one of its densities.
 pub fn remesh_density(
     mesh: &Mesh,
@@ -309,8 +323,7 @@ pub fn remesh_density(
 ) -> Result<AnalysisRemesh, SurfaceError> {
     let size = density.size;
     let size_at = move |p: [f64; 3]| size.at(p);
-    let mut options = AnalysisRemeshOptions::new(&size_at, part.deviation);
-    options.cancel = Some(cancel);
+    let options = analysis_options(&size_at, part.deviation, cancel);
     remesh_for_analysis(mesh, &options).map_err(|reason| SurfaceError::Refused {
         stem: density.stem.clone(),
         reason,

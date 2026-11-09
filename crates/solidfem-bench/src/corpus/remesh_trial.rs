@@ -1,14 +1,27 @@
 //! One remesh of a measured part and what it did: whether the surface stayed closed and manifold,
-//! how far it moved, whether sharp edges survived, and the triangle quality afterwards. The
-//! target edge length is tied to the part's thinnest wall, clamped so a tiny wall on a big part
-//! cannot ask for more triangles than the corpus can afford.
+//! how far it moved, whether sharp edges survived, whether it crosses or folds onto itself, and the triangle
+//! quality afterwards. The remesh is solidmesh's `remesh_for_analysis`, with the options the
+//! benchmark surfaces use (`surfaces::analysis_options`), so the corpus measures the remesh a
+//! user's part goes through. Every reading of the result here is the corpus's own, made on the
+//! returned coordinates, independent of the check the remesher runs on itself.
+//!
+//! The target edge length is tied to the part's thinnest wall, clamped so a tiny wall on a big
+//! part cannot ask for more triangles than the corpus can afford; the deviation bound follows
+//! the target ([`deviation_bound`]). The remesh is cancelled after [`REMESH_TIME_CAP_SECONDS`],
+//! which the record names `remesh:Cancelled`: nothing else cancels it. A refusal is named by its
+//! variant ([`refusal_name`]), so a corpus counts refusals by kind.
 
-use std::time::Instant;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use solidmesh_mesh::{remesh_for_analysis, AnalysisRemesh, AnalysisRemeshError, CancelToken};
 
 use super::bvh::Bvh;
-use super::g3_mount::remesh::{remesh, RemeshRefusal};
 use super::measure::{quality, topology, InputMetrics, Quality};
+use super::self_intersect::{count_folds, count_penetrating_pairs, PairCount};
 use super::soup::{dot, length, sub, TriSoup, P3};
+use crate::surfaces::analysis_options;
 
 /// The most triangles a target edge length is allowed to ask for: past this the remesher's run
 /// time, not the part, decides what the corpus can measure.
@@ -17,6 +30,21 @@ const TRIANGLE_BUDGET: f64 = 300_000.0;
 /// The largest cell the target may be relative to the part, so a part with no readable wall still
 /// gets a usable density.
 const COARSEST_FRACTION_OF_DIAGONAL: f64 = 1.0 / 40.0;
+
+/// The deviation bound as a share of the target edge length. The benchmark surfaces' bounds,
+/// chosen part by part (`surfaces::all_parts`), run from about a 250th to a 20th of the edge
+/// length each asks for near its feature; a 40th sits inside that range.
+const DEVIATION_PER_TARGET: f64 = 1.0 / 40.0;
+
+/// The deviation bound as a share of the part's 5th-percentile wall. Two walls closer than twice
+/// the bound may be pulled together until they cross, so the bound stays well under half the
+/// thin walls.
+const DEVIATION_PER_WALL: f64 = 0.25;
+
+/// The remesh is cancelled after this long, so one part costs its own row, not the batch's whole
+/// timeout. The slowest benchmark surface takes about 22 seconds; this leaves room for real
+/// parts several times slower before calling them out.
+pub const REMESH_TIME_CAP_SECONDS: f64 = 120.0;
 
 /// Output-sharp-edge segments compared against each input sharp edge are capped here; past that
 /// the search would dominate the run and the cap is reported in the record.
@@ -46,8 +74,10 @@ pub enum TargetSource {
 pub struct RemeshTrial {
     pub target_edge_length: f64,
     pub target_source: TargetSource,
+    /// The `max_deviation` the remesh was given.
+    pub deviation_bound: f64,
     pub seconds: f64,
-    pub outcome: Result<RemeshedPart, RemeshRefusal>,
+    pub outcome: Result<RemeshedPart, AnalysisRemeshError>,
 }
 
 /// A remesh that produced a surface, measured against its input.
@@ -62,11 +92,16 @@ pub struct RemeshedPart {
     /// Largest distance from a sampled input vertex to the output surface, over the diagonal.
     pub deviation_input_to_output: f64,
     pub sharp_edges_in: usize,
+    /// The input creases the remesher reports it kept on a chain of output edges.
     pub sharp_edges_held: usize,
     pub sharp_edges_after: usize,
     /// Of the sampled input sharp edges, the percentage still lying along an output sharp edge.
     pub sharp_survival_percent: f64,
     pub quality: Quality,
+    /// Triangle pairs of the output that cross each other, counted by the corpus's own test.
+    pub self_intersection: PairCount,
+    /// Edge-sharing triangle pairs of the output folded flat onto each other.
+    pub folds: u64,
     /// The remeshed surface itself, which the volume stage (`volume_trial.rs`) meshes next.
     pub surface: TriSoup,
 }
@@ -88,43 +123,110 @@ pub fn choose_target(metrics: &InputMetrics) -> (f64, TargetSource) {
     }
 }
 
+/// The deviation bound for a remesh at `target` of the part `metrics` describes.
+pub fn deviation_bound(target: f64, metrics: &InputMetrics) -> f64 {
+    let from_target = target * DEVIATION_PER_TARGET;
+    if metrics.wall.p5.is_finite() && metrics.wall.p5 > 0.0 {
+        from_target.min(metrics.wall.p5 * DEVIATION_PER_WALL)
+    } else {
+        from_target
+    }
+}
+
+/// `soup` remeshed at a uniform `target` edge length with the deviation bound that goes with it,
+/// cancelled after `cap`.
+pub fn remesh_capped(
+    soup: &TriSoup,
+    metrics: &InputMetrics,
+    target: f64,
+    cap: Duration,
+) -> Result<AnalysisRemesh, AnalysisRemeshError> {
+    let mesh = soup.to_mesh();
+    let cancel = CancelToken::new();
+    let (finished, wait) = mpsc::channel::<()>();
+    let watchdog = {
+        let cancel = cancel.clone();
+        // Woken early when `finished` is dropped; only a full wait cancels.
+        thread::spawn(move || {
+            if let Err(mpsc::RecvTimeoutError::Timeout) = wait.recv_timeout(cap) {
+                cancel.cancel();
+            }
+        })
+    };
+    let size_at = move |_: [f64; 3]| target;
+    let options = analysis_options(&size_at, deviation_bound(target, metrics), &cancel);
+    let result = remesh_for_analysis(&mesh, &options);
+    drop(finished);
+    if let Err(panic) = watchdog.join() {
+        std::panic::resume_unwind(panic);
+    }
+    result
+}
+
+/// The stable name of a refusal: its variant, which the record writes as `remesh:<name>`.
+pub fn refusal_name(error: &AnalysisRemeshError) -> &'static str {
+    match error {
+        AnalysisRemeshError::EmptyInput => "EmptyInput",
+        AnalysisRemeshError::OpenInput { .. } => "OpenInput",
+        AnalysisRemeshError::NonManifoldInput { .. } => "NonManifoldInput",
+        AnalysisRemeshError::InconsistentWinding { .. } => "InconsistentWinding",
+        AnalysisRemeshError::InvalidOptions(_) => "InvalidOptions",
+        AnalysisRemeshError::InvalidTargetSize { .. } => "InvalidTargetSize",
+        AnalysisRemeshError::TriangleBudgetExceeded { .. } => "TriangleBudgetExceeded",
+        AnalysisRemeshError::Cancelled => "Cancelled",
+        AnalysisRemeshError::BrokenTopology(_) => "BrokenTopology",
+        AnalysisRemeshError::NonFiniteVertex { .. } => "NonFiniteVertex",
+        AnalysisRemeshError::SelfIntersecting { .. } => "SelfIntersecting",
+        AnalysisRemeshError::DeviationNotMet { .. } => "DeviationNotMet",
+        AnalysisRemeshError::AngleFloorNotMet { .. } => "AngleFloorNotMet",
+        AnalysisRemeshError::FoldedSurface { .. } => "FoldedSurface",
+        AnalysisRemeshError::CreaseLost { .. } => "CreaseLost",
+    }
+}
+
 /// Runs the remesher on `soup` and measures the result against it.
 pub fn remesh_and_measure(soup: &TriSoup, metrics: &InputMetrics) -> RemeshTrial {
     let (target, source) = choose_target(metrics);
     let start = Instant::now();
-    let result = remesh(soup, &metrics.topology.sharp_edges, target);
+    let result = remesh_capped(
+        soup,
+        metrics,
+        target,
+        Duration::from_secs_f64(REMESH_TIME_CAP_SECONDS),
+    );
     let seconds = start.elapsed().as_secs_f64();
-    let outcome = result.map(|output| {
-        let after = topology(&output.soup);
+    let outcome = result.map(|remeshed| {
+        let output = TriSoup::from_analysis_surface(&remeshed.surface);
+        let after = topology(&output);
         let input_bvh = Bvh::new(soup);
-        let output_bvh = Bvh::new(&output.soup);
-        let volume_after = output.soup.signed_volume();
+        let output_bvh = Bvh::new(&output);
+        let volume_after = output.signed_volume();
         RemeshedPart {
-            triangles: output.soup.triangles.len(),
+            triangles: output.triangles.len(),
             closed: after.is_closed(),
             manifold_and_oriented: after.is_manifold_and_oriented(),
             volume_change_percent: (volume_after - metrics.volume) / metrics.volume * 100.0,
-            deviation_output_to_input: farthest(
-                &surface_points(&output.soup),
-                &input_bvh,
-                usize::MAX,
-            ) / metrics.diagonal,
+            deviation_output_to_input: farthest(&surface_points(&output), &input_bvh, usize::MAX)
+                / metrics.diagonal,
             deviation_input_to_output: farthest(
                 &surface_points(soup),
                 &output_bvh,
                 DEVIATION_SAMPLE_LIMIT,
             ) / metrics.diagonal,
             sharp_edges_in: metrics.topology.sharp_edges.len(),
-            sharp_edges_held: output.constrained_sharp_edges,
+            sharp_edges_held: remeshed.report.sharp_edges_kept,
             sharp_edges_after: after.sharp_edges.len(),
-            sharp_survival_percent: sharp_survival(soup, metrics, &output.soup, &after, target),
-            quality: quality(&output.soup),
-            surface: output.soup,
+            sharp_survival_percent: sharp_survival(soup, metrics, &output, &after, target),
+            quality: quality(&output),
+            self_intersection: count_penetrating_pairs(&output, &output_bvh),
+            folds: count_folds(&output),
+            surface: output,
         }
     });
     RemeshTrial {
         target_edge_length: target,
         target_source: source,
+        deviation_bound: deviation_bound(target, metrics),
         seconds,
         outcome,
     }

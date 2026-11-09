@@ -3,5 +3,8 @@
 #[path = "corpus/metrics.rs"]
 mod metrics;
 
+#[path = "corpus/remesh.rs"]
+mod remesh;
+
 #[path = "corpus/volume.rs"]
 mod volume;

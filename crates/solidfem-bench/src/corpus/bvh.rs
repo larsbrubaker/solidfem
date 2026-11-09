@@ -3,8 +3,7 @@
 //! which refuses non-manifold triangles, so a tree over that would quietly lose the very faces
 //! being measured; this one keeps every triangle.
 
-use super::g3_mount::tri_distance::tri_distance_sqr;
-use super::soup::{cross, dot, sub, TriSoup, P3};
+use super::soup::{cross, dot, point_triangle_distance_squared, sub, TriSoup, P3};
 
 /// The triangles a leaf holds: small enough that leaf tests stay cheap.
 const LEAF_SIZE: usize = 4;
@@ -93,7 +92,7 @@ impl<'a> Bvh<'a> {
             if node.count > 0 {
                 for i in node.first..node.first + node.count {
                     let tri = self.order[i as usize] as usize;
-                    best = best.min(tri_distance_sqr(&self.soup.corners(tri), p));
+                    best = best.min(point_triangle_distance_squared(p, &self.soup.corners(tri)));
                 }
             } else {
                 stack.push(node.left);

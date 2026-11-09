@@ -2,6 +2,15 @@
 //! unusable as a tetrahedral mesher's boundary. A pair counts only when it overlaps by more than
 //! a small tolerance on every separating axis, so triangles that merely touch along a shared edge
 //! or at a T-junction do not. Pairs sharing a vertex are skipped, so the count is a lower bound.
+//!
+//! That skip makes the pair count blind to a fold: two triangles sharing an edge and lying back
+//! on each other, exactly coplanar with their opposite corners on the same side of the edge. A
+//! tetrahedral mesher cannot separate inside from outside there, so [`count_folds`] counts them
+//! apart, with exact orientation predicates: a fold is a fact about the coordinates, never a
+//! tolerance. The predicates are exact while their products stay out of the subnormal range,
+//! which holds for coordinates read from `f32` and for a remesh of them.
+
+use robust::{orient2d, orient3d, Coord, Coord3D};
 
 use super::bvh::Bvh;
 use super::soup::{cross, dot, length, scale, sub, TriSoup, P3};
@@ -115,4 +124,70 @@ fn span(axis: P3, tri: &[P3; 3]) -> (f64, f64) {
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), value| {
             (lo.min(value), hi.max(value))
         })
+}
+
+/// Counts the folds of `soup`: pairs of triangles on one edge whose opposite corners are exactly
+/// coplanar with the edge and on the same side of it.
+pub fn count_folds(soup: &TriSoup) -> u64 {
+    let mut edges: Vec<(u32, u32, usize)> = Vec::with_capacity(soup.triangles.len() * 3);
+    for (face, t) in soup.triangles.iter().enumerate() {
+        for k in 0..3 {
+            let (a, b) = (t[k], t[(k + 1) % 3]);
+            edges.push((a.min(b), a.max(b), face));
+        }
+    }
+    edges.sort_unstable();
+    let mut folds = 0;
+    for run in edges.chunk_by(|x, y| (x.0, x.1) == (y.0, y.1)) {
+        let (a, b) = (run[0].0, run[0].1);
+        for (i, first) in run.iter().enumerate() {
+            for second in &run[i + 1..] {
+                let (Some(c), Some(d)) = (
+                    opposite(soup, first.2, a, b),
+                    opposite(soup, second.2, a, b),
+                ) else {
+                    continue;
+                };
+                let corners = [a, b, c, d].map(|v| soup.vertices[v as usize]);
+                if folded(corners) {
+                    folds += 1;
+                }
+            }
+        }
+    }
+    folds
+}
+
+/// The corner of triangle `face` that is neither `a` nor `b`, if it has exactly one.
+fn opposite(soup: &TriSoup, face: usize, a: u32, b: u32) -> Option<u32> {
+    let mut rest = soup.triangles[face]
+        .iter()
+        .copied()
+        .filter(|&v| v != a && v != b);
+    let corner = rest.next()?;
+    rest.next().is_none().then_some(corner)
+}
+
+/// Whether `c` and `d` lie exactly in one plane with the edge `a..b` and on the same side of it.
+fn folded([a, b, c, d]: [P3; 4]) -> bool {
+    let p3 = |p: P3| Coord3D {
+        x: p[0],
+        y: p[1],
+        z: p[2],
+    };
+    if orient3d(p3(a), p3(b), p3(c), p3(d)) != 0.0 {
+        return false;
+    }
+    // Coplanar, so the two triangles' normals are parallel and every axis projection orders the
+    // corners alike up to one sign per projection; the first projection where `c` is off the
+    // edge's line decides. A `c` on the line in every projection is a triangle with no side.
+    for (i, j) in [(0, 1), (1, 2), (2, 0)] {
+        let p2 = |p: P3| Coord { x: p[i], y: p[j] };
+        let side_c = orient2d(p2(a), p2(b), p2(c));
+        if side_c != 0.0 {
+            let side_d = orient2d(p2(a), p2(b), p2(d));
+            return side_c.signum() * side_d.signum() > 0.0 && side_d != 0.0;
+        }
+    }
+    false
 }

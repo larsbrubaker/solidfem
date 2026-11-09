@@ -4,9 +4,11 @@
 //! output too. A wall is measured by casting a ray inward from each face centroid to the first
 //! surface that faces back along the ray; a reading at a concave corner or along a slope is
 //! filtered out by that facing test, so what is left is a material thickness.
+//! [`sample_exclusion`] decides from these readings alone whether a part is a solid the remesher
+//! should be asked to prepare at all.
 
 use super::bvh::Bvh;
-use super::self_intersect::{count_penetrating_pairs, PairCount};
+use super::self_intersect::{count_folds, count_penetrating_pairs, PairCount};
 use super::soup::{cross, dot, face_normal, length, scale, sub, TriSoup, P3};
 
 /// The bend between face normals beyond which an edge is a sharp feature.
@@ -265,6 +267,8 @@ pub struct InputMetrics {
     pub triangles: usize,
     pub topology: Topology,
     pub self_intersection: PairCount,
+    /// Edge-sharing triangle pairs folded flat onto each other (`self_intersect::count_folds`).
+    pub folds: u64,
     pub quality: Quality,
     pub edge_min: f64,
     pub edge_median: f64,
@@ -273,6 +277,26 @@ pub struct InputMetrics {
     pub diagonal: f64,
     pub area: f64,
     pub volume: f64,
+}
+
+/// Why a part is left out of the remesh sample, or `None` when it is in: only a closed,
+/// manifold, consistently wound surface enclosing positive volume is a solid to mesh. The reasons
+/// are checked in this order and the first that applies is named (`open`, `non-manifold`,
+/// `misoriented`, `non-positive-volume`), so each part has one.
+pub fn sample_exclusion(metrics: &InputMetrics) -> Option<&'static str> {
+    let t = &metrics.topology;
+    if t.boundary_edges > 0 {
+        Some("open")
+    } else if t.nonmanifold_edges > 0 {
+        Some("non-manifold")
+    } else if t.misoriented_edges > 0 {
+        Some("misoriented")
+    } else if metrics.volume > 0.0 {
+        None
+    } else {
+        // Zero, negative, or not a number at all.
+        Some("non-positive-volume")
+    }
 }
 
 /// Reads every metric of one input surface.
@@ -284,6 +308,7 @@ pub fn measure_input(soup: &TriSoup) -> InputMetrics {
     InputMetrics {
         triangles: soup.triangles.len(),
         self_intersection: count_penetrating_pairs(soup, &bvh),
+        folds: count_folds(soup),
         quality: quality(soup),
         edge_min: lengths.first().copied().unwrap_or(f64::NAN),
         edge_median: percentile(&lengths, 0.5),

@@ -3,10 +3,12 @@
 //! Thingi10K's `.stl.zip` files with the system `unzip`; `solidfem-corpus batch <jobs>
 //! <timeout-seconds> <path>...` measures every `.stl` under the given files and directories, each
 //! in its own child process (`solidfem-corpus stl <file>`), so a crash or a runaway remesh on one
-//! untrusted file costs only that file's row. Each input gets a record for the mesh and one for
-//! the remesh and, when the remesh produced a surface, one for the volume mesh of that surface
-//! (`corpus/volume_trial.rs`); `batch` prints them as tables and summaries, the volume outcomes
-//! counted by failure class. A child writes and flushes its earlier records before starting the
+//! untrusted file costs only that file's row. Each input gets a record for the mesh; a part whose
+//! own reading says it is a closed, consistently wound solid (`corpus::measure::sample_exclusion`)
+//! also gets one for the remesh and, when the remesh produced a surface, one for the volume mesh
+//! of that surface (`corpus/volume_trial.rs`). A part left out is counted as `input:<reason>`,
+//! never as a remesher or mesher failure. `batch` prints the records as tables and summaries, the
+//! remesh and volume outcomes counted by name. A child writes and flushes its earlier records before starting the
 //! volume stage, so a child that times out or crashes there still has them, and its volume record
 //! is written by the parent as `child:timeout` or `child:crashed`. `solidfem-corpus diagnose
 //! <file-or-synthetic-name> <scale,...> <cap-seconds>` remeshes one part at each multiple of its
@@ -23,7 +25,7 @@ mod native {
     use std::time::{Duration, Instant};
 
     use solidfem_bench::corpus::diagnose::diagnose;
-    use solidfem_bench::corpus::measure::measure_input;
+    use solidfem_bench::corpus::measure::{measure_input, sample_exclusion};
     use solidfem_bench::corpus::parts::all_parts;
     use solidfem_bench::corpus::record::{
         counts_by, distribution, field, input_fields, parse_line, remesh_fields, share_nonzero,
@@ -45,6 +47,7 @@ mod native {
         ("nmedges", "nonman"),
         ("misedges", "flip"),
         ("xpairs", "x-pairs"),
+        ("folds", "folds"),
         ("degen", "degen"),
         ("armed", "AR med"),
         ("ar95", "AR p95"),
@@ -78,6 +81,8 @@ mod native {
         ("ar_worst_after", "AR max"),
         ("min_ang_after", "min deg"),
         ("degen_after", "degen"),
+        ("xpairs_after", "x-pairs"),
+        ("folds_after", "folds"),
         ("sec", "sec"),
     ];
 
@@ -152,6 +157,9 @@ mod native {
         let soup = TriSoup::from_mesh(mesh);
         let metrics = measure_input(&soup);
         emit(to_line(&input_fields(name, &metrics)))?;
+        if sample_exclusion(&metrics).is_some() {
+            return Ok(());
+        }
         let trial = remesh_and_measure(&soup, &metrics);
         emit(to_line(&remesh_fields(name, &trial)))?;
         if let Ok(part) = &trial.outcome {
@@ -401,8 +409,16 @@ mod native {
             .collect();
         println!("== INPUT ({} parts)", inputs.len());
         print!("{}", table(&inputs, INPUT_COLUMNS));
+        println!("\n== SAMPLE");
+        for (sample, count) in counts_by(&inputs, "sample") {
+            println!("  {count:>5}  {sample}");
+        }
         println!("\n== REMESH ({} attempted)", remeshes.len());
         print!("{}", table(&remeshes, REMESH_COLUMNS));
+        println!("remesh outcomes, most frequent first:");
+        for (status, count) in counts_by(&remeshes, "status") {
+            println!("  {count:>5}  {status}");
+        }
         println!("\n== SUMMARY");
         println!(
             "closed (every edge exactly two faces): {}",
@@ -429,6 +445,10 @@ mod native {
             share_nonzero(&inputs, "xpairs")
         );
         println!(
+            "has folded triangle pairs: {}",
+            share_nonzero(&inputs, "folds")
+        );
+        println!(
             "has degenerate triangles: {}",
             share_nonzero(&inputs, "degen")
         );
@@ -449,6 +469,14 @@ mod native {
             .cloned()
             .collect();
         println!("remesh produced a surface: {}/{}", ok.len(), remeshes.len());
+        println!(
+            "remesh output crosses itself (corpus's own count): {}",
+            share_nonzero(&ok, "xpairs_after")
+        );
+        println!(
+            "remesh output folds onto itself (corpus's own count): {}",
+            share_nonzero(&ok, "folds_after")
+        );
         println!("remesh stayed closed: {}", share_true(&ok, "closed_after"));
         println!(
             "remesh stayed oriented: {}",
@@ -468,7 +496,7 @@ mod native {
             "remesh min angle after (deg): {}",
             spread(&ok, "min_ang_after")
         );
-        println!("remesh seconds: {}", spread(&remeshes, "sec"));
+        println!("remesh seconds: {}", distribution(&remeshes, "sec"));
         print_volume(records);
     }
 

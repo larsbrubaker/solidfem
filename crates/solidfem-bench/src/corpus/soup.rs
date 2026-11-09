@@ -1,9 +1,11 @@
 //! The triangle soup every corpus reading works on: `f64` positions and indexed triangles, built
 //! from a solidmesh `Mesh` or from the remesher's output, with the small vector helpers the
-//! readings share. A soup keeps every input triangle, including the non-manifold and degenerate
-//! ones the remesher's own mesh refuses, because those are exactly what is being measured.
+//! readings share, the point-to-triangle distance among them. A soup keeps every input triangle,
+//! including the non-manifold and degenerate ones the remesher's own mesh refuses, because those
+//! are exactly what is being measured.
 
-use solidmesh_mesh::Mesh;
+use solidmesh_math::Vector3Float;
+use solidmesh_mesh::{AnalysisSurface, Mesh};
 
 /// A point or vector.
 pub type P3 = [f64; 3];
@@ -70,6 +72,37 @@ impl TriSoup {
         }
     }
 
+    /// The surface `remesh_for_analysis` returned, in its exact `f64` coordinates.
+    pub fn from_analysis_surface(surface: &AnalysisSurface) -> Self {
+        let triangles = surface
+            .faces
+            .iter()
+            // The remesher's indices point into its own vertex list, so none is negative.
+            .map(|f| [f[0] as u32, f[1] as u32, f[2] as u32])
+            .collect();
+        Self {
+            vertices: surface.vertices.clone(),
+            triangles,
+        }
+    }
+
+    /// This soup as a solidmesh `Mesh`, every triangle kept in order, for the remesher. A soup
+    /// read from a `Mesh` goes back to the same coordinates.
+    pub fn to_mesh(&self) -> Mesh {
+        let mut mesh = Mesh::new();
+        mesh.vertices = self
+            .vertices
+            .iter()
+            .map(|v| Vector3Float::new(v[0], v[1], v[2]))
+            .collect();
+        for t in &self.triangles {
+            // A corpus soup holds far fewer than `i32::MAX` vertices.
+            mesh.faces
+                .add(t[0] as i32, t[1] as i32, t[2] as i32, &mesh.vertices);
+        }
+        mesh
+    }
+
     /// The three corner positions of triangle `t`.
     pub fn corners(&self, t: usize) -> [P3; 3] {
         let [a, b, c] = self.triangles[t];
@@ -114,5 +147,37 @@ impl TriSoup {
                 length(cross(sub(b, a), sub(c, a))) * 0.5
             })
             .sum()
+    }
+}
+
+/// The squared distance from `p` to the segment `a..b`.
+pub fn point_segment_distance_squared(p: P3, a: P3, b: P3) -> f64 {
+    let ab = sub(b, a);
+    let span = dot(ab, ab);
+    let t = if span > 0.0 {
+        (dot(sub(p, a), ab) / span).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let off = sub(p, [0, 1, 2].map(|k| a[k] + ab[k] * t));
+    dot(off, off)
+}
+
+/// The squared distance from `p` to the triangle `c`: to its plane where `p` projects inside it,
+/// otherwise to the nearest of its edges. A triangle with no area is its edges.
+pub fn point_triangle_distance_squared(p: P3, c: &[P3; 3]) -> f64 {
+    let along_edges = (0..3)
+        .map(|i| point_segment_distance_squared(p, c[i], c[(i + 1) % 3]))
+        .fold(f64::INFINITY, f64::min);
+    let Some(n) = face_normal(c) else {
+        return along_edges;
+    };
+    let height = dot(sub(p, c[0]), n);
+    let q = [0, 1, 2].map(|k| p[k] - n[k] * height);
+    let inside = (0..3).all(|i| dot(cross(sub(c[(i + 1) % 3], c[i]), sub(q, c[i])), n) >= 0.0);
+    if inside {
+        height * height
+    } else {
+        along_edges
     }
 }

@@ -118,10 +118,9 @@ fn the_remesher_keeps_a_plate_closed_on_its_surface_with_edges_held() {
         part.triangles > soup.triangles.len(),
         "refined toward the target"
     );
-    // The faces are flat and the sharp edges held, so the volume is preserved to rounding. The
-    // surface deviation is bounded by the remesher's projection tolerance: it leaves a vertex
-    // unmoved when the projection is within 1e-6 per axis (`ZERO_TOLERANCEF`), so a point off
-    // the surface by up to sqrt(3) * 1e-6 survives, over the diagonal.
+    // The faces are flat and the sharp edges held, so the volume is preserved to rounding and
+    // every output point lies on an input face up to the rounding of its projection there: far
+    // inside a millionth per axis, sqrt(3) * 1e-6, over the diagonal.
     assert!(
         part.volume_change_percent.abs() < 1e-9,
         "{}",

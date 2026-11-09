@@ -1,24 +1,29 @@
 //! Why surface recovery fails on a part, measured: the part remeshed at a multiple of the corpus's
-//! own target edge length (`remesh_trial.rs` chooses it), then only the recovery stage of the
-//! tetrahedral mesher run on it under a time cap, and the outcome read in detail. For a refusal
+//! own target edge length (`remesh_trial.rs` chooses it and runs the same `remesh_for_analysis`
+//! the corpus does, its deviation bound scaled with the length), then only the recovery stage of
+//! the tetrahedral mesher run on it under a time cap, and the outcome read in detail. For a refusal
 //! that leaves constraints missing it reads the mesher's list of what is missing and why each was
 //! given up, and measures each leftover where it sits on the surface: the bend across a missing
 //! edge, the smallest angle of the triangles beside it, and the gap to the nearest surface
 //! triangle not touching it, relative to its own length. The same readings over a fixed stride of
 //! all surface edges give the baseline a leftover is compared with. For a part the mesher refuses
-//! as wound wrong or as not separating, the signed volumes and the shells say what the surface is.
+//! as wound wrong or as not separating, the signed volumes, the shells and the crossing and folded
+//! triangle pairs say what the surface is.
 //! `src/bin/corpus.rs diagnose` prints one key=value line per multiple.
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use solidfem::tetra::{StepStatus, SurfaceMesher, TetraError};
 
 use super::bvh::Bvh;
-use super::g3_mount::remesh::remesh;
 use super::measure::{measure_input, percentile, topology};
-use super::remesh_trial::choose_target;
-use super::self_intersect::count_penetrating_pairs;
-use super::soup::{cross, dot, face_normal, length, sub, TriSoup, P3};
+use super::remesh_trial::{
+    choose_target, deviation_bound, refusal_name, remesh_capped, REMESH_TIME_CAP_SECONDS,
+};
+use super::self_intersect::{count_folds, count_penetrating_pairs};
+use super::soup::{
+    cross, dot, face_normal, length, point_triangle_distance_squared, sub, TriSoup, P3,
+};
 
 /// Leftovers measured one by one at most; a part missing more is sampled at a fixed stride.
 const LEFTOVER_SAMPLE: usize = 200;
@@ -58,9 +63,21 @@ pub fn diagnose(
             ];
             let h = target * scale;
             fields.push(("h".to_string(), h.to_string()));
-            match remesh(soup, &metrics.topology.sharp_edges, h) {
-                Ok(output) => diagnose_surface(&output.soup, h, cap_seconds, &mut fields),
-                Err(refusal) => fields.push(("status".to_string(), format!("remesh:{refusal:?}"))),
+            fields.push(("dev".to_string(), deviation_bound(h, &metrics).to_string()));
+            let cap = Duration::from_secs_f64(REMESH_TIME_CAP_SECONDS);
+            match remesh_capped(soup, &metrics, h, cap) {
+                Ok(output) => {
+                    let surface = TriSoup::from_analysis_surface(&output.surface);
+                    diagnose_surface(&surface, h, cap_seconds, &mut fields);
+                }
+                Err(refusal) => {
+                    push(
+                        &mut fields,
+                        "status",
+                        format!("remesh:{}", refusal_name(&refusal)),
+                    );
+                    push(&mut fields, "detail", format!("{refusal:?}"));
+                }
             }
             fields
         })
@@ -93,6 +110,7 @@ fn diagnose_surface(
     let bvh = Bvh::new(surface);
     let crossings = count_penetrating_pairs(surface, &bvh);
     push(fields, "out_xpairs", crossings.pairs);
+    push(fields, "out_folds", count_folds(surface));
     shells(surface, fields);
     let start = Instant::now();
     let mut mesher = match SurfaceMesher::new(surface.vertices.clone(), surface.triangles.clone()) {
@@ -256,8 +274,9 @@ fn read_edge(surface: &TriSoup, a: u32, b: u32) -> Option<EdgeReading> {
 fn nearest_away(surface: &TriSoup, p: P3, touching: &[u32]) -> f64 {
     (0..surface.triangles.len())
         .filter(|&t| !surface.triangles[t].iter().any(|v| touching.contains(v)))
-        .map(|t| point_triangle_distance(p, &surface.corners(t)))
+        .map(|t| point_triangle_distance_squared(p, &surface.corners(t)))
         .fold(f64::INFINITY, f64::min)
+        .sqrt()
 }
 
 fn smallest_angle(c: &[P3; 3]) -> f64 {
@@ -270,34 +289,6 @@ fn smallest_angle(c: &[P3; 3]) -> f64 {
                 .to_degrees()
         })
         .fold(f64::INFINITY, f64::min)
-}
-
-fn point_triangle_distance(p: P3, c: &[P3; 3]) -> f64 {
-    let along_edges = (0..3)
-        .map(|i| point_segment_distance(p, c[i], c[(i + 1) % 3]))
-        .fold(f64::INFINITY, f64::min);
-    let Some(n) = face_normal(c) else {
-        return along_edges;
-    };
-    let height = dot(sub(p, c[0]), n);
-    let q = [0, 1, 2].map(|k| p[k] - n[k] * height);
-    let inside = (0..3).all(|i| dot(cross(sub(c[(i + 1) % 3], c[i]), sub(q, c[i])), n) >= 0.0);
-    if inside {
-        height.abs()
-    } else {
-        along_edges
-    }
-}
-
-fn point_segment_distance(p: P3, a: P3, b: P3) -> f64 {
-    let ab = sub(b, a);
-    let span = dot(ab, ab);
-    let t = if span > 0.0 {
-        (dot(sub(p, a), ab) / span).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    length(sub(p, [0, 1, 2].map(|k| a[k] + ab[k] * t)))
 }
 
 /// Readings over a stride of `edges`, summarised as medians and extremes under `prefix`.

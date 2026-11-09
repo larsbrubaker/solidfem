@@ -1,12 +1,14 @@
 //! The one-line records of a measured part (its input, its remesh and its volume mesh), and the
-//! tables and summaries the binary prints from them. A record is a `key=value` list on one line, so a child process can hand it to the parent
-//! that runs the corpus and a crashed child costs only its own row.
+//! tables and summaries the binary prints from them. A record is a `key=value` list on one line,
+//! so a child process can hand it to the parent that runs the corpus and a crashed child costs
+//! only its own row. The input record's `sample` says whether the part was remeshed (`in`) or
+//! left out of the sample and why (`input:<reason>`, `measure::sample_exclusion`); the remesh
+//! record's `status` is `ok` or the remesher's refusal as `remesh:<variant>`.
 
 use std::collections::BTreeMap;
 
-use super::g3_mount::remesh::RemeshRefusal;
-use super::measure::InputMetrics;
-use super::remesh_trial::{RemeshTrial, RemeshedPart, TargetSource};
+use super::measure::{sample_exclusion, InputMetrics};
+use super::remesh_trial::{refusal_name, RemeshTrial, RemeshedPart, TargetSource};
 use super::volume_trial::{outcome_name, VolumeEdgeSource, VolumeTrial};
 
 /// A parsed record: field name to text.
@@ -35,6 +37,7 @@ pub fn input_fields(name: &str, m: &InputMetrics) -> Vec<(String, String)> {
         ("misedges", t.misoriented_edges.to_string()),
         ("xpairs", m.self_intersection.pairs.to_string()),
         ("xcapped", m.self_intersection.capped.to_string()),
+        ("folds", m.folds.to_string()),
         ("degen", m.quality.degenerate.to_string()),
         ("armed", num(m.quality.aspect.median)),
         ("ar95", num(m.quality.aspect.p95)),
@@ -54,6 +57,11 @@ pub fn input_fields(name: &str, m: &InputMetrics) -> Vec<(String, String)> {
     .map(|(k, v)| (k.to_string(), v))
     .collect::<Vec<_>>();
     fields.push(("kind".to_string(), "input".to_string()));
+    let sample = match sample_exclusion(m) {
+        Some(reason) => format!("input:{reason}"),
+        None => "in".to_string(),
+    };
+    fields.push(("sample".to_string(), sample));
     fields
 }
 
@@ -70,20 +78,19 @@ pub fn remesh_fields(name: &str, trial: &RemeshTrial) -> Vec<(String, String)> {
         ("kind".to_string(), "remesh".to_string()),
         ("h".to_string(), num(trial.target_edge_length)),
         ("hsrc".to_string(), source.to_string()),
+        ("dev".to_string(), num(trial.deviation_bound)),
         ("sec".to_string(), num(trial.seconds)),
     ];
     match &trial.outcome {
         Ok(part) => append_remeshed(&mut fields, part),
         Err(refusal) => {
-            let status = match refusal {
-                RemeshRefusal::NonManifoldInput { refused_faces } => {
-                    format!("refused-non-manifold:{refused_faces}")
-                }
-                RemeshRefusal::BrokenTopology(what) => {
-                    format!("broken-topology:{}", what.replace(' ', "_"))
-                }
-            };
-            fields.push(("status".to_string(), status));
+            fields.push((
+                "status".to_string(),
+                format!("remesh:{}", refusal_name(refusal)),
+            ));
+            // The refusal's measured values, one token so the line still splits on spaces.
+            let detail = format!("{refusal:?}").replace(char::is_whitespace, "");
+            fields.push(("detail".to_string(), detail));
         }
     }
     fields
@@ -107,6 +114,9 @@ fn append_remeshed(fields: &mut Vec<(String, String)>, part: &RemeshedPart) {
             ("ar_worst_after", num(part.quality.aspect.worst)),
             ("min_ang_after", num(part.quality.min_angle_degrees)),
             ("degen_after", part.quality.degenerate.to_string()),
+            ("xpairs_after", part.self_intersection.pairs.to_string()),
+            ("xcapped_after", part.self_intersection.capped.to_string()),
+            ("folds_after", part.folds.to_string()),
         ]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v)),
