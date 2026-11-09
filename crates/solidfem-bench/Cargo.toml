@@ -40,9 +40,9 @@ solidfem-mesh = { path = "../solidfem-mesh", version = "0.1.0" }
 # benchmark and the wasm build never see it. Path dependencies with version floors, like the mesher.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libm = "0.2.16"
-solidmesh = { path = "../../../solidmesh/crates/geometry-processing", version = "0.1.0" }
-solidmesh-math = { path = "../../../solidmesh/crates/vector-math", version = "0.1.0" }
-solidmesh-mesh = { path = "../../../solidmesh/crates/polygon-mesh", version = "0.1.0" }
+solidmesh = { path = "../../../solidmesh/crates/geometry-processing", version = "0.2.1" }
+solidmesh-math = { path = "../../../solidmesh/crates/vector-math", version = "0.2.1" }
+solidmesh-mesh = { path = "../../../solidmesh/crates/polygon-mesh", version = "0.2.1" }
 
 [lints]
 workspace = true
