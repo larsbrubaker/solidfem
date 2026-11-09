@@ -54,9 +54,13 @@ pub enum TetraError {
         constraints_without_room: usize,
         steiner_points: usize,
     },
-    /// The winding does not leave the solid on the inner side of this triangle.
+    /// The winding does not leave the solid on the inner side of this input triangle (an index
+    /// into the triangles given to the mesher): the surface is inside out, or folds back onto
+    /// itself.
     SurfaceWindingWrong { triangle: usize },
-    /// This triangle does not separate solid from empty, so the shells are not consistent.
+    /// This input triangle (an index into the triangles given to the mesher) does not separate
+    /// solid from empty: the shells cross, or the surface folds back onto itself so that two
+    /// coplanar triangles cover the same area wound opposite ways.
     SurfaceDoesNotSeparate { triangle: usize },
     /// The result was requested before the surface was recovered and classified.
     SurfaceNotFinished,
@@ -165,7 +169,7 @@ impl fmt::Display for TetraError {
             Self::SurfaceDoesNotSeparate { triangle } => write!(
                 f,
                 "surface triangle {triangle} does not separate solid from empty space; check \
-                 the shells are closed and do not cross"
+                 the shells are closed, do not cross and do not fold back onto themselves"
             ),
             Self::SurfaceNotFinished => {
                 write!(

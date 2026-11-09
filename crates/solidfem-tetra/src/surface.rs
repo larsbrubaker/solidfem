@@ -20,7 +20,9 @@
 //! **Which tetrahedra are solid.** Layers are counted from outside through the surface faces
 //! (`recover.rs`): an odd layer is solid, whether a body, a void or a body in a void. The
 //! triangles' winding only confirms this answer; it never decides it. Each is checked exactly
-//! against the solid tetrahedron across it.
+//! against the solid tetrahedron across it. A surface that folds back onto itself (two coplanar
+//! triangles across an edge covering the same area, wound opposite ways) has a face with the same
+//! layer on both sides, so it is refused, naming an input triangle where it fails.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
@@ -54,6 +56,17 @@ pub struct SolidMesh {
     pub tets: Vec<[u32; 4]>,
     /// The tetrahedron across the face opposite each vertex, or [`HULL`] across the surface.
     pub neighbors: Vec<[u32; 4]>,
+}
+
+/// The input triangle a classification error names for mesh `face`, which covers part of flat
+/// patch `patch`: the input triangle with exactly `face`'s corners when there is one (a fin's own
+/// triangle, say), otherwise the patch's reference triangle, which lies in the same plane region.
+fn input_triangle_at(triangles: &[[u32; 3]], patch: &Patch, face: [u32; 3]) -> usize {
+    let same = triangles
+        .iter()
+        .position(|t| face_key(t[0], t[1], t[2]) == face);
+    // A patch holds at least one triangle, and its indices fit `usize` as the input's did.
+    same.unwrap_or_else(|| patch.indices.first().map_or(0, |&i| i as usize))
 }
 
 /// One constraint phase: a work list retried in rounds.
@@ -418,7 +431,13 @@ impl SurfaceMesher {
                         let points = &recovery.flipper.core.points;
                         let [a, b, c] = plane.map(|v| &points[v as usize]);
                         if *apex == GHOST || orient(a, b, c, &points[*apex as usize]) <= 0.0 {
-                            return Err(TetraError::SurfaceWindingWrong { triangle: id });
+                            return Err(TetraError::SurfaceWindingWrong {
+                                triangle: input_triangle_at(
+                                    &self.triangles,
+                                    &recovery.flipper.patches[id],
+                                    face,
+                                ),
+                            });
                         }
                     }
                 }
@@ -427,7 +446,13 @@ impl SurfaceMesher {
                     || (layers[0] - layers[1]).abs() != 1
                     || layers.iter().any(|&l| l < 0)
                 {
-                    return Err(TetraError::SurfaceDoesNotSeparate { triangle: id });
+                    return Err(TetraError::SurfaceDoesNotSeparate {
+                        triangle: input_triangle_at(
+                            &self.triangles,
+                            &recovery.flipper.patches[id],
+                            face,
+                        ),
+                    });
                 }
             }
         }

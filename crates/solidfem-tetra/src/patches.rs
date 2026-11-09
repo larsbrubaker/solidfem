@@ -15,6 +15,9 @@ use crate::predicates::orient;
 pub(crate) struct Patch {
     /// The input triangles, wound outward. The first is the plane's reference triangle.
     pub(crate) triangles: Vec<[u32; 3]>,
+    /// Each of `triangles`' index in the input surface, in the same order, so an error can name
+    /// the triangle a caller gave.
+    pub(crate) indices: Vec<u32>,
     /// Every surface vertex in the patch, sorted.
     pub(crate) vertices: Vec<u32>,
     /// Edges on the patch's boundary loops, as `(low, high)` sorted pairs.
@@ -251,6 +254,7 @@ pub(crate) fn build_patches(points: &[[f64; 3]], triangles: &[[u32; 3]]) -> Patc
             .then(|| PatchIndex::build(points, &list, working_axes(points, list[0])));
         built.push(Patch {
             triangles: list,
+            indices: members,
             vertices,
             boundary,
             index,
