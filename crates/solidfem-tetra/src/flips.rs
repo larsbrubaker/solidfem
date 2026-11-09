@@ -201,7 +201,7 @@ impl Flipper {
         }
     }
 
-    fn apply(&mut self, old: &[u32], new: &[[u32; 4]]) -> Result<(), TetraError> {
+    pub(crate) fn apply(&mut self, old: &[u32], new: &[[u32; 4]]) -> Result<(), TetraError> {
         let slots = self.core.replace(old, new)?;
         for (slot, tet) in slots.iter().zip(new) {
             for &vertex in tet {
@@ -255,7 +255,7 @@ impl Flipper {
     }
 
     /// Strictly positive by exact test; a tetrahedron containing the point at infinity is not.
-    fn tet_positive(&self, tet: &[u32; 4]) -> bool {
+    pub(crate) fn tet_positive(&self, tet: &[u32; 4]) -> bool {
         if tet.contains(&GHOST) {
             return false;
         }

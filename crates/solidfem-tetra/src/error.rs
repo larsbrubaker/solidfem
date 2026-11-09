@@ -60,6 +60,13 @@ pub enum TetraError {
     SurfaceDoesNotSeparate { triangle: usize },
     /// The result was requested before the surface was recovered and classified.
     SurfaceNotFinished,
+    /// Refinement stopped because it had added the budgeted number of points and still had work
+    /// to do. A larger budget, or coarser requested sizes, lets it finish.
+    RefinementBudgetExhausted { added: usize, limit: usize },
+    /// The size function returned something that is not a positive finite length.
+    InvalidSizeFunction { position: [f64; 3], value: f64 },
+    /// The refined mesh was requested before refinement finished.
+    RefinementNotFinished,
     /// Point location did not reach a tetrahedron: a broken invariant, not a property of the
     /// input.
     LocationFailed { point: u32 },
@@ -160,6 +167,22 @@ impl fmt::Display for TetraError {
                 write!(
                     f,
                     "the surface is not finished; run step until it reports Done"
+                )
+            }
+            Self::RefinementBudgetExhausted { added, limit } => write!(
+                f,
+                "refinement added {added} points, its budget of {limit}, with work remaining; \
+                 raise the budget or request coarser sizes"
+            ),
+            Self::InvalidSizeFunction { position, value } => write!(
+                f,
+                "the size function returned {value} at {position:?}; it must be a positive \
+                 finite length everywhere"
+            ),
+            Self::RefinementNotFinished => {
+                write!(
+                    f,
+                    "refinement is not finished; run step until it reports Done"
                 )
             }
             Self::LocationFailed { point } => {

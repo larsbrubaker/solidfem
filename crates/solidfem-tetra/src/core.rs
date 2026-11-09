@@ -139,6 +139,53 @@ impl Core {
         Ok(core)
     }
 
+    /// Rebuilds a triangulation from a finished solid's right-handed tetrahedra (`tets`,
+    /// `neighbors`, the public output order), closing each boundary face with a ghost so a
+    /// refinement stage can edit the mesh through the ordinary operations. Every boundary
+    /// face has a ghost and two ghosts meet across each boundary edge, which is exactly what a
+    /// closed manifold surface gives.
+    pub(crate) fn from_solid(
+        points: Vec<[f64; 3]>,
+        tets: &[[u32; 4]],
+        neighbors: &[[u32; 4]],
+    ) -> Result<Self, TetraError> {
+        let internal: Vec<[u32; 4]> = tets.iter().map(|t| [t[1], t[0], t[2], t[3]]).collect();
+        let adjacency: Vec<[u32; 4]> = neighbors.iter().map(|n| [n[1], n[0], n[2], n[3]]).collect();
+        let count = internal.len();
+        let mut core = Self {
+            points,
+            tets: internal,
+            neighbors: adjacency,
+            stamps: vec![0; count],
+            free: Vec::new(),
+            generation: 0,
+            hint: 0,
+            walk_state: 1,
+            stack: Vec::new(),
+            cavity: Vec::new(),
+            horizon: Vec::new(),
+            created: Vec::new(),
+            edges: Vec::new(),
+        };
+        for slot in 0..count {
+            for (i, face) in FACE.iter().enumerate() {
+                if core.neighbors[slot][i] != GHOST {
+                    continue;
+                }
+                let real = core.tets[slot];
+                let base = [real[face[1]], real[face[0]], real[face[2]]];
+                let ghost = core.place([base[0], base[1], base[2], GHOST], [0; 4]);
+                core.neighbors[slot][i] = ghost;
+                // `slot` fits u32: the solid's tetrahedra are indexed by u32 already.
+                core.neighbors[ghost as usize][3] = slot as u32;
+                core.created.push(ghost);
+            }
+        }
+        core.link_created(GHOST)?;
+        core.created.clear();
+        Ok(core)
+    }
+
     /// A slot for a new tetrahedron, reusing a freed one first.
     fn place(&mut self, tet: [u32; 4], neighbors: [u32; 4]) -> u32 {
         if let Some(slot) = self.free.pop() {
