@@ -336,12 +336,12 @@ fn solve_density(
     }))
 }
 
-enum SolveEnd {
+pub(crate) enum SolveEnd {
     Refused(String),
     Capped(Report),
 }
 
-fn solve(
+pub(crate) fn solve(
     mesh: QuadraticTetMesh,
     material: Material,
     supports: &Supports,

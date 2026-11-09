@@ -191,7 +191,7 @@ pub fn all_parts() -> Vec<SurfacePart> {
             "hollow",
             0.05,
             shapes::hollow_box,
-            [("h4.0", 4.0), ("h3.0", 3.0), ("h2.0", 2.0)],
+            [("h2.0", 2.0), ("h1.5", 1.5), ("h1.0", 1.0)],
             uniform,
         ),
         part(

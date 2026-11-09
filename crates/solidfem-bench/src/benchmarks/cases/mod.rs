@@ -349,6 +349,7 @@ mod bracket;
 mod column;
 mod gear;
 mod hollow_box;
+mod hollow_box_reference;
 mod hook;
 mod nafems;
 mod plate;
@@ -357,6 +358,8 @@ mod snapfit;
 mod strip;
 
 pub use gear::{fillet_concentration, lewis_stress};
+pub use hollow_box::{disk_triangle_overlap, PATCH_W_REFERENCE};
+pub use hollow_box_reference::{structured_reference, ReferenceRow};
 pub use hook::winkler_inner_stress;
 pub use plate::ktn_finite_width;
 
