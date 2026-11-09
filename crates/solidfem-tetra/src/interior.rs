@@ -1,6 +1,7 @@
 //! Adding a point strictly inside a finished solid, the one way refinement creates vertices:
 //! find the tetrahedra the point is in, remove those it conflicts with, and star the hole to it.
-//! `refine.rs` and `layers.rs` choose where points go; this file says whether one can go there.
+//! `refine.rs`, `layers.rs` and `quality_points.rs` choose where points go; this file says whether
+//! one can go there.
 //!
 //! **Why a point in a tetrahedron is inside the solid.** The mesh is the solid, so location is
 //! exact containment: a walk across real faces only, ending at a tetrahedron with no negative
@@ -190,7 +191,7 @@ impl Flipper {
     /// part of the cavity. The star of the result is exact because every outer face is seen
     /// strictly, and the point is inside it because a closed surface seen from one side all around
     /// has the viewer inside.
-    fn visible_cavity(&self, seeds: &[u32], point: &[f64; 3]) -> Option<Vec<u32>> {
+    pub(crate) fn visible_cavity(&self, seeds: &[u32], point: &[f64; 3]) -> Option<Vec<u32>> {
         let mut cavity = seeds.to_vec();
         loop {
             let unseen = cavity.iter().copied().find_map(|t| {

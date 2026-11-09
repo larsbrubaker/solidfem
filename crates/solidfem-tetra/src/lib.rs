@@ -17,7 +17,7 @@
 //! [`Refiner`] takes that finished solid and adds points strictly inside it: layers through thin
 //! walls, points driven by a caller's size function, and a pass that improves the worst
 //! tetrahedra, leaving the surface exactly as it was (`refine.rs`, `layers.rs`, `skins.rs`,
-//! `interior.rs`, `quality.rs`). Requesting layers also removes every interior edge the rule in
+//! `interior.rs`, `quality.rs`, `quality_points.rs`). Requesting layers also removes every interior edge the rule in
 //! `skins.rs` calls through a thin wall, or ends the run in [`TetraError::ThroughEdgeNotSplit`].
 //! That rule leans towards "through": opposed surface facings at the two ends, and across them no
 //! more than the thin-wall ratio of local surface edge length. It promises nothing at a rim, where
@@ -43,7 +43,7 @@
 //! the refined one out, `layers.rs` the through-wall points from
 //! surface vertices, `wall_fill.rs` those from the middle of large wall faces, `skins.rs`
 //! the opposite skins of a wall and the splitting of the edges joining them, `interior.rs` the
-//! insertion, `quality.rs` the improvement, `surface.rs` is the surface-recovery interface and
+//! insertion, `quality.rs` the improvement, `quality_points.rs` the points for slivers no flip can remove, `surface.rs` is the surface-recovery interface and
 //! classifies the solid, `patches.rs`
 //! finds the flat regions, `recover.rs` orders the recovery of each constraint, `plane_delaunay.rs`
 //! chooses each flat region's triangulation, `flips.rs` holds the flips, `steiner.rs` adds points inside the solid, `triangulator.rs` the
@@ -60,6 +60,7 @@ mod patches;
 mod plane_delaunay;
 mod predicates;
 mod quality;
+mod quality_points;
 mod recover;
 mod refine;
 mod refine_mesh;

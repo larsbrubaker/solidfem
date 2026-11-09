@@ -1,6 +1,7 @@
 //! The quality measures and the moves that improve the worst tetrahedra, worst first: edge removal
 //! choosing the best triangulation of the ring, face removal, and guarded smoothing of vertices
-//! not on the surface. `refine.rs` drives these a tetrahedron at a time.
+//! not on the surface. `refine.rs` drives these a tetrahedron at a time, and falls back on a new
+//! interior point (`quality_points.rs`) for a sliver none of these can improve.
 //!
 //! **The measure.** Minimum dihedral angle in degrees: a sliver has angles near zero and near 180
 //! degrees and no good 10-node element has either. The scaled Jacobian (the volume over the three
@@ -179,7 +180,7 @@ pub(crate) fn histogram<'a>(
 
 impl Flipper {
     /// The worst minimum dihedral of the tetrahedra in `slots`.
-    fn worst_of(&self, slots: &[u32]) -> f64 {
+    pub(crate) fn worst_of(&self, slots: &[u32]) -> f64 {
         slots
             .iter()
             .map(|&t| min_dihedral_degrees(&self.core.points, &self.core.tets[t as usize]))

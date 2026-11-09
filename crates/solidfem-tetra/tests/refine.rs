@@ -16,6 +16,8 @@ mod resumable;
 mod shapes;
 #[path = "refine/sizing.rs"]
 mod sizing;
+#[path = "refine/slivers.rs"]
+mod slivers;
 #[path = "refine/support.rs"]
 mod support;
 #[path = "refine/sweep.rs"]

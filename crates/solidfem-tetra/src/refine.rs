@@ -2,8 +2,10 @@
 //! steps puts points inside it, by through-thickness layers across thin walls (`layers.rs`, and
 //! `wall_fill.rs` for walls whose faces have no vertices inside them) and the removal of every
 //! edge still joining the walls' opposite skins (`skins.rs`), by a caller's
-//! size function, then improves the worst tetrahedra (`quality.rs`). Points go in through
-//! `interior.rs`, the only way a vertex is created, and only strictly inside the solid.
+//! size function, then improves the worst tetrahedra (`quality.rs`, and a point for a sliver no
+//! flip can remove, in `quality_points.rs`). `refine.rs`, `layers.rs` and `quality_points.rs` choose
+//! where points go; the cavities of `interior.rs` are the only way a vertex is created, and only
+//! strictly inside the solid.
 //!
 //! **What is fixed.** Every boundary face of the input stays a boundary face with the same bits
 //! and vertices: surface triangles are never split and surface vertices never move. Boundary
@@ -26,7 +28,8 @@
 //! one inside the solid, else its centroid. A point within half the local size of a cavity vertex
 //! is refused, so the points stay separated and the number added is finite; [`RefineOptions::
 //! max_added_points`] bounds it regardless and ends in
-//! [`TetraError::RefinementBudgetExhausted`]. An edge on the surface cannot be split in this
+//! [`TetraError::RefinementBudgetExhausted`] (a point the quality pass would have added is an
+//! optional improvement, so at the limit the pass stops adding points and still returns `Ok`). An edge on the surface cannot be split in this
 //! stage, so it is not counted as too long.
 //!
 //! **Order and determinism.** Work runs in slot and index order, every choice is made by the exact
@@ -60,6 +63,11 @@ const MAX_SIZE_ROUNDS: usize = 256;
 /// The worst tetrahedra below this minimum dihedral angle are worked on by the quality pass.
 const QUALITY_TARGET_DEGREES: f64 = 30.0;
 
+/// Below this minimum dihedral angle, a tetrahedron that flips and smoothing cannot improve gets a
+/// new point (`quality_points.rs`). Points cost elements, so this is the band where a 10-node
+/// element loses most of its accuracy, well below the quality target.
+const QUALITY_POINT_TARGET_DEGREES: f64 = 5.0;
+
 /// A caller's size function: the wanted edge length at a position.
 pub type SizeFn = Box<dyn Fn([f64; 3]) -> f64>;
 
@@ -72,7 +80,9 @@ pub struct RefineOptions {
     pub thin_wall_ratio: f64,
     /// Full passes of the quality improvement.
     pub quality_passes: usize,
-    /// The most points refinement may add; reaching it with work left is a named error.
+    /// The most points refinement may add. Reaching it with layer or size work left is a named
+    /// error; a quality point is an optional improvement, so the quality pass just stops adding
+    /// them at the limit and still finishes.
     pub max_added_points: usize,
 }
 
@@ -137,6 +147,8 @@ pub struct RefineReport {
     pub flips_larger_ring: usize,
     /// Tetrahedra the quality pass improved.
     pub quality_improvements: usize,
+    /// Points the quality pass added for slivers no flip or smoothing could remove.
+    pub quality_points: usize,
     /// Minimum dihedral angles before the quality pass.
     pub before: DihedralHistogram,
     /// Minimum dihedral angles after the quality pass.
@@ -194,6 +206,9 @@ pub struct Refiner {
     quality: Option<QualityRun>,
     report: RefineReport,
     added: usize,
+    /// Tetrahedra, by sorted vertices, that no quality point could improve since the last one went
+    /// in. Only read for membership, so its order cannot reach the output.
+    refused_points: HashSet<[u32; 4]>,
     result: Option<SolidMesh>,
 }
 
@@ -253,6 +268,7 @@ impl Refiner {
             quality: None,
             report: RefineReport::default(),
             added: 0,
+            refused_points: HashSet::new(),
             result: None,
         })
     }
@@ -261,7 +277,8 @@ impl Refiner {
     /// worked on), checking `cancel` before each.
     ///
     /// # Errors
-    /// [`TetraError::RefinementBudgetExhausted`] when the point budget runs out with work left,
+    /// [`TetraError::RefinementBudgetExhausted`] when the point budget runs out with layer or size
+    /// work left (the quality pass stops adding points at the limit instead),
     /// [`TetraError::InvalidSizeFunction`] for a bad size value, and the invariant errors.
     pub fn step(
         &mut self,
@@ -615,19 +632,49 @@ impl Refiner {
         }
         let slot = run.list[run.cursor];
         run.cursor += 1;
-        let changed = self.flipper.improve_tet(
+        let mut changed = self.flipper.improve_tet(
             slot,
             &self.fixed,
             &self.skins,
             &self.axes,
             QUALITY_TARGET_DEGREES,
         )?;
+        if !changed && self.added < self.options.max_added_points && self.needs_point(slot) {
+            changed = self.try_quality_point(slot)?;
+        }
         if changed {
             run.improved = true;
             self.report.quality_improvements += 1;
         }
         self.quality = Some(run);
         Ok(())
+    }
+
+    /// Tries a point for tetrahedron `slot`, unless the same tetrahedron was already refused one:
+    /// a sliver with no point to offer is looked at again on every pass, and a layered wall has
+    /// thousands of them, so a refusal is remembered until a quality point goes in.
+    fn try_quality_point(&mut self, slot: u32) -> Result<bool, TetraError> {
+        let mut key = self.flipper.core.tets[slot as usize];
+        key.sort_unstable();
+        if self.refused_points.contains(&key) {
+            return Ok(false);
+        }
+        if self.flipper.add_quality_point(slot)? {
+            self.added += 1;
+            self.report.quality_points += 1;
+            // The tetrahedra around the new point changed, so a refusal may no longer hold.
+            self.refused_points.clear();
+            return Ok(true);
+        }
+        self.refused_points.insert(key);
+        Ok(false)
+    }
+
+    /// Whether tetrahedron `slot` is still below the angle a new point is worth spending on.
+    fn needs_point(&self, slot: u32) -> bool {
+        let tet = self.flipper.core.tets[slot as usize];
+        tet.iter().all(|&v| v < DEAD)
+            && min_dihedral_degrees(&self.flipper.core.points, &tet) < QUALITY_POINT_TARGET_DEGREES
     }
 
     /// Slots of the tetrahedra below the quality target, worst first, ties by slot.
