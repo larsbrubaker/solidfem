@@ -544,6 +544,7 @@ impl Refiner {
             three_two,
             four_four,
             larger,
+            ..
         } = self.flipper.counts;
         self.report.flips_two_to_three = two_three;
         self.report.flips_three_to_two = three_two;

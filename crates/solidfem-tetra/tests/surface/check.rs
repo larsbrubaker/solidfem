@@ -6,11 +6,13 @@
 // is added on the surface, every non-flat surface edge is present, and each flat patch (a region
 // of input triangles exactly coplanar across their shared edges) keeps its boundary loops, its
 // plane and its area. The triangulation inside a patch is the mesher's choice: an internal
-// edge of a flat region is not part of the surface's shape.
+// edge of a flat region is not part of the surface's shape. That choice is measured by
+// `non_delaunay_edges`: an inner edge of a flat patch is locally Delaunay in the patch's plane,
+// except the edges the recovery report counts as refused (`tests/surface/flat_patches.rs`).
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
-use robust::{orient2d, orient3d, Coord, Coord3D};
+use robust::{insphere, orient2d, orient3d, Coord, Coord3D};
 use solidfem_tetra::{SolidMesh, StepStatus, SurfaceMesher};
 
 fn coord(p: [f64; 3]) -> Coord3D<f64> {
@@ -70,12 +72,12 @@ fn flat_across(points: &[[f64; 3]], t: [u32; 3], s: [u32; 3], a: u32, b: u32) ->
 }
 
 /// One flat region: its sorted boundary edges and its triangles.
-type Patch = (Vec<(u32, u32)>, Vec<[u32; 3]>);
+pub type Patch = (Vec<(u32, u32)>, Vec<[u32; 3]>);
 
 /// The patches of a triangle soup: connected sets of triangles flat across their shared edges,
 /// each with its sorted boundary edges (used by one triangle of the patch, or shared but not
 /// flat) and its triangles.
-fn patches_of(points: &[[f64; 3]], triangles: &[[u32; 3]]) -> Vec<Patch> {
+pub fn patches_of(points: &[[f64; 3]], triangles: &[[u32; 3]]) -> Vec<Patch> {
     let mut by_edge: HashMap<(u32, u32), Vec<usize>> = HashMap::new();
     for (index, t) in triangles.iter().enumerate() {
         for k in 0..3 {
@@ -256,6 +258,67 @@ pub fn assert_solid(result: &SolidMesh, points: &[[f64; 3]], triangles: &[[u32; 
         (summed - surface_volume).abs() <= tolerance,
         "tetrahedra sum to {summed}, the surface encloses {surface_volume}, tolerance {tolerance}"
     );
+}
+
+/// The inner edges of `result`'s flat patches that are not locally Delaunay in the patch's plane,
+/// from the public result alone.
+pub fn non_delaunay_edges(result: &SolidMesh) -> Vec<(u32, u32)> {
+    let mut boundary = BTreeSet::new();
+    for (t, tet) in result.tets.iter().enumerate() {
+        for i in 0..4 {
+            if result.neighbors[t][i] == solidfem_tetra::HULL {
+                let mut face: Vec<u32> = (0..4).filter(|&j| j != i).map(|j| tet[j]).collect();
+                face.sort_unstable();
+                boundary.insert([face[0], face[1], face[2]]);
+            }
+        }
+    }
+    let boundary: Vec<[u32; 3]> = boundary.into_iter().collect();
+    patches_of(&result.points, &boundary)
+        .iter()
+        .flat_map(|(bounds, tris)| patch_non_delaunay_edges(&result.points, bounds, tris))
+        .collect()
+}
+
+/// The edges inside this flat patch that are not locally Delaunay: the far corner across the
+/// edge is strictly inside the circumcircle of the triangle on this side, tested exactly. A point
+/// off the plane turns the in-circle question into the exact in-sphere one with no projection, so
+/// every plane tilt is treated alike and exactly cocircular corners count as Delaunay.
+fn patch_non_delaunay_edges(
+    points: &[[f64; 3]],
+    bounds: &[(u32, u32)],
+    tris: &[[u32; 3]],
+) -> Vec<(u32, u32)> {
+    let mut corners: BTreeMap<(u32, u32), Vec<u32>> = BTreeMap::new();
+    for t in tris {
+        for k in 0..3 {
+            let (a, b, third) = (t[k], t[(k + 1) % 3], t[(k + 2) % 3]);
+            corners.entry((a.min(b), a.max(b))).or_default().push(third);
+        }
+    }
+    let [a0, b0, c0] = tris[0].map(|v| coord(points[v as usize]));
+    let Some(off) = points
+        .iter()
+        .find(|&&p| orient3d(a0, b0, c0, coord(p)) != 0.0)
+    else {
+        panic!("the solid has no point off this patch's plane");
+    };
+    let off = coord(*off);
+    let mut found = Vec::new();
+    for (&(a, c), around) in &corners {
+        if bounds.binary_search(&(a, c)).is_ok() {
+            continue;
+        }
+        let [b, d] = around.as_slice() else {
+            panic!("inner patch edge ({a}, {c}) has {} triangles", around.len());
+        };
+        let [pa, pc, pb, pd] = [a, c, *b, *d].map(|v| coord(points[v as usize]));
+        let sphere = insphere(pa, pc, pb, off, pd);
+        if sphere != 0.0 && (sphere > 0.0) == (orient3d(pa, pc, pb, off) > 0.0) {
+            found.push((a, c));
+        }
+    }
+    found
 }
 
 fn on_triangle_exact(points: &[[f64; 3]], t: [u32; 3], point: [f64; 3]) -> bool {

@@ -7,7 +7,9 @@
 //! **What the surface pins down.** Triangles exactly coplanar across an edge form a flat patch
 //! (`patches.rs`): its internal triangulation does not change the surface, so only the patch's
 //! boundary loops are constraints. Every vertex stays where it is and no point is added on the
-//! surface, but the triangles inside a flat patch may differ from the input's.
+//! surface, but the triangles inside a flat patch may differ from the input's: they are the
+//! patch's constrained Delaunay triangulation in its own plane (`plane_delaunay.rs`), except at
+//! the inner edges [`RecoveryReport::in_plane_flips_refused`] counts, where no legal flip exists.
 //!
 //! **When flips run out.** Flips alone cannot recover every surface: a stuck edge or patch gets a
 //! point added strictly inside the solid (`steiner.rs`), a bounded number per constraint and in
@@ -90,6 +92,11 @@ pub struct RecoveryReport {
     pub flat_patches: usize,
     /// Edges and patches stuck for lack of any legal place for a point inside the solid.
     pub constraints_without_room: usize,
+    /// Edges inside flat patches flipped to make each patch Delaunay in its own plane.
+    pub in_plane_flips: usize,
+    /// Edges inside a flat patch that fail the in-circle test but could not be flipped: the
+    /// patch keeps a valid triangulation that is not fully Delaunay at this many edges.
+    pub in_plane_flips_refused: usize,
 }
 
 /// One constraint phase: a work list retried in rounds.
@@ -357,6 +364,8 @@ impl SurfaceMesher {
         self.report.flips_three_to_two = counts.three_two;
         self.report.flips_four_to_four = counts.four_four;
         self.report.flips_larger_ring = counts.larger;
+        self.report.in_plane_flips = counts.in_plane_flips;
+        self.report.in_plane_flips_refused = counts.in_plane_flips_refused;
         let recovery = self
             .recovery
             .as_mut()

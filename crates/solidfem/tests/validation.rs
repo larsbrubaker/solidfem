@@ -14,6 +14,10 @@ mod multigrid;
 mod pipeline;
 #[path = "validation/refusals.rs"]
 mod refusals;
+// The mesher's own test shapes, so a test here meshes the same input bit for bit.
+#[allow(dead_code)]
+#[path = "../../solidfem-tetra/tests/surface/shapes.rs"]
+mod shapes;
 #[path = "validation/shell_core.rs"]
 mod shell_core;
 #[path = "validation/tension.rs"]

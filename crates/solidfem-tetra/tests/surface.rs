@@ -7,6 +7,8 @@ mod cases;
 mod check;
 #[path = "surface/errors.rs"]
 mod errors;
+#[path = "surface/flat_patches.rs"]
+mod flat_patches;
 #[path = "surface/instances.rs"]
 mod instances;
 #[path = "surface/resumable.rs"]

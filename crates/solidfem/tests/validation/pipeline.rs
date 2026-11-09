@@ -1,7 +1,8 @@
 // A block meshed by this crate's own mesher and solved: the whole pipeline from a surface to a
-// Timoshenko deflection, and the named refusal when a solid cannot become 10-node elements.
+// Timoshenko deflection, and the named refusals when a solid cannot become 10-node elements.
 
 use solidfem::elastic::{Material, Model, Quadrature};
+use solidfem::mesh::MeshError;
 use solidfem::meshing::{quadratic_from_solid, MeshingError};
 use solidfem::tetra::{RefineOptions, Refiner, SolidMesh, StepStatus, SurfaceMesher, HULL};
 
@@ -123,6 +124,46 @@ fn a_cantilever_meshed_by_the_pipeline_matches_timoshenko() {
         error < 0.015,
         "pipeline tip {tip}, expected {expected}, error {error}"
     );
+}
+
+/// The one surveyed input whose surface keeps a triangle a rounding away from a line (face
+/// `[295, 319, 342]`, pinned in the mesher's own tests). A tetrahedron on that face is exactly
+/// positive to the mesher and flat to the solver's arithmetic, so neither mesh may reach assembly.
+/// The unrefined mesh is refused at its first tetrahedron of no floating-point volume, which is
+/// not the one on the sliver; after refinement the tetrahedron refused is the one on the sliver.
+#[test]
+fn a_surface_sliver_the_mesher_keeps_is_a_named_error_before_the_solver() {
+    let sliver = [295, 319, 342];
+    let on_sliver =
+        |mesh: &SolidMesh, tet: usize| sliver.iter().all(|v| mesh.tets[tet].contains(v));
+    let surface = crate::shapes::hollow_box(30.0, 1.0, 6, 5);
+    let mut mesher = SurfaceMesher::new(surface.points, surface.triangles).expect("valid");
+    assert_eq!(mesher.step(usize::MAX, &mut || false), Ok(StepStatus::Done));
+    let solid = mesher.result().expect("recovered");
+    let unrefined = quadratic_from_solid(&solid, Quadrature::FourPoint);
+    assert!(
+        matches!(
+            unrefined,
+            Err(MeshingError::Mesh(MeshError::DegenerateTet { .. }))
+        ),
+        "expected the named refusal of the recovered mesh, got {unrefined:?}"
+    );
+    let options = RefineOptions {
+        layers_through_walls: 2,
+        ..RefineOptions::default()
+    };
+    let mut refiner = Refiner::new(solid, Box::new(|_| 8.0), options).expect("a valid solid");
+    assert_eq!(
+        refiner.step(usize::MAX, &mut || false),
+        Ok(StepStatus::Done)
+    );
+    let refined = refiner.result().expect("refined");
+    match quadratic_from_solid(&refined, Quadrature::FourPoint) {
+        Err(MeshingError::NonPositiveJacobian { tet, .. }) => {
+            assert!(on_sliver(&refined, tet), "the refused tetrahedron {tet}");
+        }
+        other => panic!("expected the named refusal of the refined mesh, got {other:?}"),
+    }
 }
 
 #[test]

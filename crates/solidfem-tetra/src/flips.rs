@@ -74,6 +74,10 @@ pub(crate) struct FlipCounts {
     pub(crate) three_two: usize,
     pub(crate) four_four: usize,
     pub(crate) larger: usize,
+    /// Edges inside a flat patch flipped towards its Delaunay triangulation (`plane_delaunay.rs`).
+    pub(crate) in_plane_flips: usize,
+    /// Inner patch edges that fail the in-circle test but had no legal flip in the end.
+    pub(crate) in_plane_flips_refused: usize,
 }
 
 /// The key of an undirected edge.
@@ -366,6 +370,110 @@ impl Flipper {
         let Some(new) = self.triangulate_ring(p, q, &ring[..chain], closure, target) else {
             return Ok(false);
         };
+        self.apply(&tets, &new)?;
+        match n {
+            3 => self.counts.three_two += 1,
+            4 => self.counts.four_four += 1,
+            _ => self.counts.larger += 1,
+        }
+        Ok(true)
+    }
+
+    /// Flips inner edge `(p, q)` of a flat patch to the other diagonal `(b, d)` of the quadrilateral
+    /// of its two in-plane faces, keeping every ring vertex. The ring splits at `b` and `d` into
+    /// its two sides, one each side of the plane, and each side is triangulated with `(b, d)` as
+    /// the closing chord; on the hull, where one side is the point at infinity, the ordinary
+    /// hull-facet flip closes along the same chord. Returns whether the edge was flipped; `false`
+    /// leaves the mesh exactly as it was: the edge is locked or a new tetrahedron failed the
+    /// exact test even after the off-plane edges around the ring were flipped to reshape it.
+    pub(crate) fn flip_patch_edge(
+        &mut self,
+        p: u32,
+        q: u32,
+        b: u32,
+        d: u32,
+        target: Target,
+    ) -> Result<bool, TetraError> {
+        if self.flip_patch_edge_once(p, q, b, d, target)? {
+            return Ok(true);
+        }
+        let Some((ring, _)) = self.ring(p, q) else {
+            return Ok(false);
+        };
+        // Every edge here has an end off the plane, so flipping it cannot disturb the patch's
+        // in-plane faces, which are what the caller is keeping track of.
+        let in_plane = [p, q, b, d];
+        let mut relief: Vec<(u32, u32)> = Vec::with_capacity(3 * ring.len());
+        for (i, &w) in ring.iter().enumerate() {
+            let next = ring[(i + 1) % ring.len()];
+            if w != GHOST && next != GHOST && !(in_plane.contains(&w) && in_plane.contains(&next)) {
+                relief.push((w, next));
+            }
+            if w != GHOST && !in_plane.contains(&w) {
+                relief.push((p, w));
+                relief.push((q, w));
+            }
+        }
+        for (x, y) in relief {
+            if self.remove_edge_once(x, y, target)?
+                && self.flip_patch_edge_once(p, q, b, d, target)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn flip_patch_edge_once(
+        &mut self,
+        p: u32,
+        q: u32,
+        b: u32,
+        d: u32,
+        target: Target,
+    ) -> Result<bool, TetraError> {
+        if self.locked_edges.contains(&edge_key(p, q)) {
+            return Ok(false);
+        }
+        let Some((mut ring, mut tets)) = self.ring(p, q) else {
+            return Ok(false);
+        };
+        let n = ring.len();
+        if n > MAX_RING {
+            return Ok(false);
+        }
+        if let Some(position) = ring.iter().position(|&w| w == GHOST) {
+            ring.rotate_left(position + 1);
+            let ends = [ring[0], ring[n - 2]];
+            return if ends == [b, d] || ends == [d, b] {
+                self.remove_edge_once(p, q, target)
+            } else {
+                Ok(false)
+            };
+        }
+        let Some(start) = ring.iter().position(|&w| w == b) else {
+            return Ok(false);
+        };
+        ring.rotate_left(start);
+        tets.rotate_left(start);
+        let Some(split) = ring.iter().position(|&w| w == d) else {
+            return Ok(false);
+        };
+        // Two ring vertices side by side share a tetrahedron with the edge, which cannot be when
+        // all four points lie in one plane; refusing here is only a guard.
+        if split < 2 || n - split < 2 {
+            return Ok(false);
+        }
+        let mut far_side = ring[split..].to_vec();
+        far_side.push(b);
+        let Some(mut new) = self.triangulate_ring(p, q, &ring[..=split], Closure::Ring, target)
+        else {
+            return Ok(false);
+        };
+        let Some(rest) = self.triangulate_ring(p, q, &far_side, Closure::Ring, target) else {
+            return Ok(false);
+        };
+        new.extend_from_slice(&rest);
         self.apply(&tets, &new)?;
         match n {
             3 => self.counts.three_two += 1,

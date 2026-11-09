@@ -37,8 +37,8 @@
 //! the opposite skins of a wall and the splitting of the edges joining them, `interior.rs` the
 //! insertion, `quality.rs` the improvement, `surface.rs` is the surface-recovery interface and
 //! classifies the solid, `patches.rs`
-//! finds the flat regions, `recover.rs` orders the recovery of each constraint, `flips.rs` holds
-//! the flips, `steiner.rs` adds points inside the solid, `triangulator.rs` the
+//! finds the flat regions, `recover.rs` orders the recovery of each constraint, `plane_delaunay.rs`
+//! chooses each flat region's triangulation, `flips.rs` holds the flips, `steiner.rs` adds points inside the solid, `triangulator.rs` the
 //! point-set interface and input checks, `order.rs` the insertion order, `core.rs` the tetrahedra,
 //! walk and cavity, `predicates.rs` the exact tests and the tie rule, `error.rs` the failures.
 
@@ -49,6 +49,7 @@ mod interior;
 mod layers;
 mod order;
 mod patches;
+mod plane_delaunay;
 mod predicates;
 mod quality;
 mod recover;

@@ -28,6 +28,20 @@ pub(crate) fn orient(a: &[f64; 3], b: &[f64; 3], c: &[f64; 3], d: &[f64; 3]) -> 
     orient3d(coord(a), coord(b), coord(c), coord(d))
 }
 
+/// Whether `d`, exactly in the plane of `a b c`, is strictly inside their circumcircle. `off` is
+/// any point off that plane: the sphere through `a b c off` cuts the plane in exactly that circle,
+/// so the exact in-sphere test answers the in-circle question without projecting anything.
+pub(crate) fn strictly_in_circle(
+    a: &[f64; 3],
+    b: &[f64; 3],
+    c: &[f64; 3],
+    off: &[f64; 3],
+    d: &[f64; 3],
+) -> bool {
+    let exact = insphere(coord(a), coord(b), coord(c), coord(off), coord(d));
+    exact != 0.0 && (exact > 0.0) == (orient(a, b, c, off) > 0.0)
+}
+
 /// Whether point `e` is strictly inside the circumsphere of `tet`, whose four vertices must have
 /// positive [`orient`], under the tie rule in this file's header.
 pub(crate) fn in_sphere(points: &[[f64; 3]], tet: [u32; 4], e: u32) -> bool {

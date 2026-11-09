@@ -16,7 +16,8 @@
 //!
 //! **A flat patch.** Exactly coplanar triangles only pin the patch's boundary loops, so nothing
 //! inside is recovered triangle by triangle: every mesh edge piercing the region is removed, and
-//! the in-plane faces the mesh then has inside the boundary become the surface.
+//! the in-plane faces the mesh then has inside the boundary, flipped towards the patch's
+//! constrained Delaunay triangulation by `plane_delaunay.rs`, become the surface.
 //!
 //! **A fold of the hull.** When rounding folds a nearly flat quad outward along the diagonal the
 //! surface does not use, the wanted edge runs just inside a hull edge that no flip can remove: a
@@ -35,6 +36,7 @@ use std::collections::HashSet;
 use crate::core::{FACE, GHOST};
 use crate::error::TetraError;
 use crate::flips::{edge_key, face_key, Flipper, Target};
+use crate::plane_delaunay::make_patch_delaunay;
 use crate::predicates::orient;
 
 /// A flip budget per constraint: every flip is legal, so this only stops an oscillation.
@@ -299,8 +301,9 @@ pub(crate) fn crossing_edges_of_patch(flipper: &mut Flipper, id: usize) -> Vec<(
 }
 
 /// With nothing piercing the region, its covering mesh faces are found by spreading across mesh
-/// edges in the plane from a face just inside a boundary edge, stopping at the boundary. They
-/// are recorded and locked, with their edges, so later flips cannot break the patch.
+/// edges in the plane from a face just inside a boundary edge, stopping at the boundary. They are
+/// flipped towards the patch's Delaunay triangulation, then recorded and locked, with their
+/// edges, so later flips cannot break the patch.
 fn lock_patch(flipper: &mut Flipper, id: usize) -> Result<bool, TetraError> {
     let points_len = flipper.core.points.len();
     let plane = flipper.patches[id].triangles[0];
@@ -379,6 +382,7 @@ fn lock_patch(flipper: &mut Flipper, id: usize) -> Result<bool, TetraError> {
         }
     }
     covering.sort_unstable();
+    let covering = make_patch_delaunay(flipper, id, &boundary, off, &covering)?;
     for face in &covering {
         flipper.locked_faces.insert(*face);
         for (a, b) in [(face[0], face[1]), (face[0], face[2]), (face[1], face[2])] {

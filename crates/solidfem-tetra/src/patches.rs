@@ -2,8 +2,8 @@
 //! plane (and do not fold back on themselves) form a *patch*: a piece of plane whose internal
 //! triangulation is not a real constraint, because any triangulation of the same polygon covers
 //! the same surface. Only the patch's boundary loops are constraints; `recover.rs` recovers
-//! whatever triangulation of the plane the mesh wants inside. `surface.rs` builds these before
-//! recovery; every test here is exact.
+//! whatever triangulation of the plane the mesh has inside and `plane_delaunay.rs` improves it.
+//! `surface.rs` builds these before recovery; every test here is exact.
 
 use std::collections::HashMap;
 
