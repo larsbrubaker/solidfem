@@ -17,8 +17,9 @@
 //! grows like `h^(lambda-1)`: `s` stays near `1 - lambda`, 0.456 for the L. A peak is called
 //! [`PeakBehaviour::Singular`] when it grew at each step, its last exponent is at least
 //! [`SINGULAR_EXPONENT`] and that exponent has not fallen below [`SINGULAR_PERSISTENCE`] of the one
-//! before it. The threshold 0.2 is under half the theoretical exponent, because a nodal-average
-//! recovery under-reads the corner on any given mesh; the persistence ratio sits between 1.0 (the
+//! before it. The threshold 0.2 is under half the theoretical exponent, because the peak is read
+//! from a recovered field and integration points a finite distance from the corner, and those
+//! lag the true growth on any given mesh; the persistence ratio sits between 1.0 (the
 //! singular behaviour) and 0.25 (the smooth one), so a converging series cannot pass it.
 
 use std::fmt;

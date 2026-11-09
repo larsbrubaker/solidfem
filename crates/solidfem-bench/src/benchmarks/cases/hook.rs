@@ -41,7 +41,7 @@ fn measure(mesh: &QuadraticTetMesh, solution: &Solution) -> Result<Vec<(String, 
     if targets.is_empty() {
         return Err("no nodes at the inner fibre of the throat".to_string());
     }
-    let stress = nodal_stress(mesh, solution, steel(0.3), &targets)?;
+    let stress = nodal_stress(solution, &targets);
     let inner = stress.iter().map(|s| s[1]).sum::<f64>() / stress.len() as f64;
     // Tip deflection: the hook tip at 300 degrees, along the load.
     let tip_nodes = nodes_where(mesh, |p| {

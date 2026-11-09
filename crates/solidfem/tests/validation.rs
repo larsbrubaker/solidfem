@@ -10,10 +10,14 @@ mod cantilever;
 mod determinism;
 #[path = "validation/multigrid.rs"]
 mod multigrid;
+#[path = "validation/peak.rs"]
+mod peak;
 #[path = "validation/pipeline.rs"]
 mod pipeline;
 #[path = "validation/prescribed.rs"]
 mod prescribed;
+#[path = "validation/recovery.rs"]
+mod recovery;
 #[path = "validation/refusals.rs"]
 mod refusals;
 // The mesher's own test shapes, so a test here meshes the same input bit for bit.

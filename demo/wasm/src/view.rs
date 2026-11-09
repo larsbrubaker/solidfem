@@ -1,8 +1,9 @@
 //! The render arrays: the surface as triangles and the per-vertex values the page colours and
 //! displaces it with. Each 6-node boundary face becomes four straight triangles over its corners
-//! and edge midpoints (`engine.rs` says why). The peak stress skips nodes near a clamp, because a
-//! clamp's corners are a stress singularity whose nodal value does not converge. Every vertex also
-//! carries its local rotation, the rate the page's arc drawing turns it at (`src/animation.ts`).
+//! and edge midpoints (`engine.rs` says why). The peak stress comes from the engine's call to the
+//! library's peak measure, which holds the integration points as well as the recovered nodes and
+//! skips what is near a clamp, because a clamp's corners are a stress singularity whose value does
+//! not converge. Every vertex also carries its local rotation, the rate the page's arc drawing turns it at (`src/animation.ts`).
 
 use solidfem::mesh::QuadraticTetMesh;
 
@@ -15,6 +16,16 @@ pub struct Surface {
     indices: Vec<u32>,
 }
 
+/// The peaks of a stress recovery, from the library's peak measure, so a reported stress holds the
+/// integration points as well as the recovered nodes.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct StressPeaks {
+    /// The peak outside the clamp zones.
+    pub outside_clamps: f64,
+    /// The peak over the whole body.
+    pub overall: f64,
+}
+
 /// What the page draws for the current estimate, plus the summary numbers.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewData {
@@ -22,7 +33,7 @@ pub struct ViewData {
     pub positions: Vec<f32>,
     /// Three per triangle, indexing the vertices.
     pub indices: Vec<u32>,
-    /// One per vertex: the volume-weighted average von Mises stress in MPa at this estimate.
+    /// One per vertex: the recovered von Mises stress in MPa at this estimate.
     pub von_mises: Vec<f32>,
     /// Three per vertex: displacement at this estimate in mm.
     pub displacement: Vec<f32>,
@@ -33,7 +44,7 @@ pub struct ViewData {
     pub max_displacement: f64,
     /// The largest local rotation over the surface in radians; the page's exaggeration cap.
     pub max_rotation: f64,
-    /// The largest von Mises stress outside the clamp zones.
+    /// The largest von Mises stress outside the clamp zones, from nodes and integration points.
     pub peak_stress_outside_clamps: f64,
     /// Material yield over that peak; `None` before there is any stress.
     pub safety_factor: Option<f64>,
@@ -70,15 +81,13 @@ impl Surface {
     }
 
     /// The arrays at the current estimate.
-    #[allow(clippy::too_many_arguments)]
     pub fn view(
         &self,
         mesh: &QuadraticTetMesh,
         displacements: &[[f64; 3]],
         rotations: &[[f64; 3]],
         nodal_von_mises: &[f64],
-        clamps: &[f64],
-        clamp_zone: f64,
+        peaks: StressPeaks,
         yield_strength: f64,
     ) -> ViewData {
         let count = self.vertex_nodes.len();
@@ -90,7 +99,6 @@ impl Surface {
         let mut max_stress = 0.0f64;
         let mut max_displacement = 0.0f64;
         let mut max_rotation = 0.0f64;
-        let mut peak = 0.0f64;
         for node in &self.vertex_nodes {
             let n = *node as usize;
             let p = mesh.nodes()[n];
@@ -106,10 +114,11 @@ impl Surface {
             max_rotation = max_rotation.max((w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt());
             min_stress = min_stress.min(s);
             max_stress = max_stress.max(s);
-            if clamps.iter().all(|x| (p[0] - x).abs() > clamp_zone) {
-                peak = peak.max(s);
-            }
         }
+        // The overall maximum holds the peak's integration points too, so it can never read below
+        // the peak outside the clamps.
+        max_stress = max_stress.max(peaks.overall);
+        let peak = peaks.outside_clamps;
         let safety_factor = (peak > 0.0).then(|| yield_strength / peak);
         ViewData {
             positions,

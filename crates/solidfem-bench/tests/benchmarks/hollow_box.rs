@@ -151,6 +151,7 @@ fn solution_of(mesh: &QuadraticTetMesh, displacement: [f64; 3]) -> Solution {
     Solution {
         displacements: vec![displacement; mesh.nodes().len()],
         point_stresses: Vec::new(),
+        nodal_stress: Vec::new(),
         nodal_von_mises: Vec::new(),
         report: Report {
             total_dofs: 0,

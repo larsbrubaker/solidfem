@@ -243,6 +243,7 @@ impl<M: MaterialField> StaticStudy<M> {
         Ok(Solution {
             displacements: field.displacements,
             point_stresses: field.point_stresses,
+            nodal_stress: field.nodal_stress,
             nodal_von_mises: field.nodal_von_mises,
             report: self.report,
         })
@@ -254,13 +255,14 @@ impl<M: MaterialField> StaticStudy<M> {
         Recovery::new(
             self.displacements(),
             self.model.mesh.nodes().len(),
+            self.model.mesh.vertex_count(),
             self.model.mesh.tets().len(),
             self.model.quadrature.points().len(),
         )
     }
 
-    /// Recovers up to `max_elements` more elements; `Ok(true)` once all are done. `cancel` is read
-    /// per element.
+    /// Does up to `max_elements` more units of recovery (each element, then each vertex's patch
+    /// fit); `Ok(true)` once all are done. `cancel` is read per unit.
     pub fn continue_recovery(
         &mut self,
         recovery: &mut Recovery,
@@ -277,15 +279,15 @@ impl<M: MaterialField> StaticStudy<M> {
         );
         self.report.recovery_seconds += elapsed(&mut self.clock, start);
         result?;
-        Ok(recovery.elements_done() == self.model.mesh.tets().len())
+        Ok(recovery.is_finished(self.model.mesh.tets().len()))
     }
 
-    /// The field of a finished recovery; refuses one with elements left to do.
+    /// The field of a finished recovery; refuses one with elements or patch fits left to do.
     pub fn finish_recovery(&self, recovery: Recovery) -> Result<RecoveredField, ModelError> {
-        if recovery.elements_done() != self.model.mesh.tets().len() {
+        if !recovery.is_finished(self.model.mesh.tets().len()) {
             return Err(ModelError::NotFinished);
         }
-        Ok(recovery.into_field())
+        Ok(recovery.into_field(&self.model.mesh))
     }
 
     /// The mesh being solved.

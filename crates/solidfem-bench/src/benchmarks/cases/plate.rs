@@ -9,6 +9,17 @@ const PLATE_T: f64 = 2.0;
 const PLATE_D: f64 = 10.0;
 const PLATE_SIGMA: f64 = 100.0;
 
+/// The window the plate's peak is read in, away from the clamp and the loaded end.
+const WINDOW_LOW: [f64; 2] = [120.0, 20.0];
+const WINDOW_HIGH: [f64; 2] = [180.0, 80.0];
+
+fn in_window(p: [f64; 3]) -> bool {
+    p[0] >= WINDOW_LOW[0]
+        && p[0] <= WINDOW_HIGH[0]
+        && p[1] >= WINDOW_LOW[1]
+        && p[1] <= WINDOW_HIGH[1]
+}
+
 fn plate_apply(mesh: &QuadraticTetMesh) -> Result<Supports, String> {
     let (faces, area) = plane_faces(mesh, 0, PLATE_L);
     check_area(area, PLATE_W * PLATE_T, "loaded end")?;
@@ -26,20 +37,29 @@ fn plate_measure(
     mesh: &QuadraticTetMesh,
     solution: &Solution,
 ) -> Result<Vec<(String, f64)>, String> {
-    let peak = peak_in_box(mesh, solution, [120.0, 20.0], [180.0, 80.0])?;
+    let peak = peak_in_box(mesh, solution, WINDOW_LOW, WINDOW_HIGH)?;
     // At the hole edge the only stress is the hoop stress (a free surface, and nu = 0), so von
     // Mises is that stress; sigma_net = F / ((W - d) t) with F = sigma W t.
     let sigma_net = PLATE_SIGMA * PLATE_W / (PLATE_W - PLATE_D);
-    let (band, theta) = hole_band(mesh, solution, peak);
-    let mut values = spike_values(mesh, solution, peak, sigma_net)?;
+    // The diagnostics locate the largest node value, which can sit below a peak set by an
+    // integration point.
+    let nodal_peak = mesh
+        .nodes()
+        .iter()
+        .zip(&solution.nodal_von_mises)
+        .filter(|(p, _)| in_window(**p))
+        .fold(f64::MIN, |peak, (_, value)| worst_of(peak, *value));
+    let (band, theta) = hole_band(mesh, solution, nodal_peak);
+    let mut values = spike_values(mesh, solution, nodal_peak, sigma_net)?;
     values.extend(worst_element(mesh));
     let mut head = vec![
         ("ktn".to_string(), peak / sigma_net),
         // Shown beside the peak, never judged: the mean over the hole-edge nodes within five
         // degrees of the top and bottom of the hole, and where the peak node is. A peak well above
         // that band's mean is a local spike at one node, not the hole's stress state; the band
-        // mean itself reads about 0.3% under the true peak, because the Kirsch hoop stress falls
-        // that far on average over the band.
+        // mean reads about 0.3% under the true peak, because the Kirsch hoop stress falls that far
+        // on average over the band, and a further percent or so under it from the recovery reading
+        // low on a hole edge's interior nodes (`solidfem-elastic`'s recovery header).
         ("ktn_hole_band".to_string(), band / sigma_net),
         ("peak_theta_deg".to_string(), theta),
     ];
@@ -59,7 +79,6 @@ fn spike_values(
     peak: f64,
     sigma_net: f64,
 ) -> Result<Vec<(String, f64)>, String> {
-    let in_window = |p: [f64; 3]| p[0] >= 120.0 && p[0] <= 180.0 && p[1] >= 20.0 && p[1] <= 80.0;
     let mut node = usize::MAX;
     for (index, p) in mesh.nodes().iter().enumerate() {
         if in_window(*p) && solution.nodal_von_mises[index] >= peak {

@@ -7,7 +7,7 @@
 //! nodes, individually prescribed displacement components, nodal forces and face tractions. [`StaticStudy::new`] validates it (refusing a model
 //! that cannot be held or has no effective load, before any solving), eliminates the fixed nodes
 //! and assembles; [`StaticStudy::step`] then runs the solve in bounded slices with a cancel check,
-//! and [`StaticStudy::solution`] recovers displacements and von Mises stress; [`nodal_rotations`]
+//! and [`StaticStudy::solution`] recovers displacements, the nodal stress tensor and von Mises stress; [`nodal_rotations`]
 //! gives the local rotation of any nodal displacement field, for drawing it. A host with no
 //! threads uses the resumable forms: [`StudyBuilder`] assembles in slices and
 //! [`StaticStudy::begin_recovery`] recovers in slices, each giving the bits of the one-call form.
@@ -25,6 +25,7 @@ mod element;
 mod error;
 mod loads;
 mod material;
+mod patch;
 mod quadrature;
 mod results;
 mod rigid_modes;
@@ -39,7 +40,9 @@ pub use element::{
 pub use error::{ElementFault, ModelError};
 pub use material::{Material, MaterialField};
 pub use quadrature::{Quadrature, QuadraturePoint, TRIANGLE_POINTS};
-pub use results::{nodal_rotations, PointStress, RecoveredField, Recovery, Solution};
+pub use results::{
+    nodal_rotations, peak_von_mises, PointStress, RecoveredField, Recovery, Solution,
+};
 pub use rigid_modes::rigid_body_modes;
 pub use shape::{shape_derivatives, shape_values, NODE_COUNT, NODE_NATURAL};
 pub use solidfem_solve::{MultigridOptions, MultigridStats, PcgOptions, Progress, StepOutcome};

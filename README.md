@@ -54,13 +54,12 @@ it stands.
 - Multigrid is optional and off by default. Thin plates still need around a thousand or more
   iterations.
 - **Real-part benchmarks are mixed.** The `solidfem-benchmarks` runner builds each part, meshes it
-  and judges it against a limit set in advance. Passing: a thin strip, a thick ring, NAFEMS LE1, a
-  hook, a nominal snap-fit strain, and a 1 mm hollow box pressed on its top (within 2% on refinement
-  and against an independent structured solve). An L-bracket's deflection is mesh-stable but has no
-  accuracy reference, and its sharp corner is reported as a singularity. Failing: a plate with a
-  hole (peak stress 3.3% high against a 3% limit, from an un-averaged display value), and NAFEMS
-  LE10 and a gear tooth, where the mesher refused a surface at the finer density. Buckling and
-  large deflection are reported as out of scope.
+  and judges it against a limit set in advance. Passing: a thin strip, a plate with a hole, a thick
+  ring, NAFEMS LE1 and LE10, a hook, a nominal snap-fit strain, and a 1 mm hollow box pressed on its
+  top (within 2% on refinement and against an independent structured solve). An L-bracket's
+  deflection is mesh-stable but has no accuracy reference, and its sharp corner is reported as a
+  singularity. Failing: a gear tooth, whose finest mesh holds a tetrahedron flat to rounding that
+  the 10-node upgrade refuses. Buckling and large deflection are reported as out of scope.
 - Only linear statics: no contact, no large deflection, no buckling, no fatigue, no plasticity. A
   stress past the material's yield says the part would yield, not how it would fail.
 

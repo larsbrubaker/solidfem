@@ -96,15 +96,15 @@ fn le1_apply(mesh: &QuadraticTetMesh) -> Result<Supports, String> {
 }
 
 fn le1_measure(mesh: &QuadraticTetMesh, solution: &Solution) -> Result<Vec<(String, f64)>, String> {
-    // The stress at point D (2000, 0) is taken as the volume-weighted nodal average over the line
-    // of nodes through the thickness at that point, the 2D benchmark being uniform in z.
+    // The stress at point D (2000, 0) is taken as the recovered nodal stress averaged over the
+    // line of nodes through the thickness at that point, the 2D benchmark being uniform in z.
     let targets = nodes_where(mesh, |p| {
         (p[0] - INNER[0]).abs() <= 1.0 && p[1].abs() <= PLANE_TOL
     });
     if targets.is_empty() {
         return Err("no nodes on the line through point D".to_string());
     }
-    let stresses = nodal_stress(mesh, solution, le_material(), &targets)?;
+    let stresses = nodal_stress(solution, &targets);
     let mean = stresses.iter().map(|s| s[1]).sum::<f64>() / stresses.len() as f64;
     Ok(vec![
         ("sigma_y_D".to_string(), mean),
@@ -181,7 +181,7 @@ fn le10_measure(
             "no node at point D (2000, 0, 300); nearest is at {p:?}"
         ));
     }
-    let stress = nodal_stress(mesh, solution, le_material(), &[node])?;
+    let stress = nodal_stress(solution, &[node]);
     Ok(vec![("sigma_y_D".to_string(), stress[0][1])])
 }
 

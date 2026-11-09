@@ -133,6 +133,9 @@ pub(super) fn cases() -> Vec<Case> {
                 density("c=1.0", "lsharp_c1.0", sharp_size(1.0), 1.0),
                 density("c=0.5", "lsharp_c0.5", sharp_size(0.5), 0.5),
                 density("c=0.25", "lsharp_c0.25", sharp_size(0.25), 0.25),
+                // A fourth density: the singularity reading compares the last two growth exponents,
+                // and on three the first of them is a coarse mesh's single step.
+                density("c=0.125", "lsharp_c0.125", sharp_size(0.125), 0.125),
             ],
             layers: 2,
             apply: bracket_apply,

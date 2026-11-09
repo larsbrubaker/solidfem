@@ -26,7 +26,7 @@ use solidfem::mesh::QuadraticTetMesh;
 use crate::catalog::StudyRequest;
 use crate::plan::{plan_study, Comparison, PlanError, Probe, Textbook};
 use crate::validity::{assess, Validity};
-use crate::view::{Surface, ViewData};
+use crate::view::{StressPeaks, Surface, ViewData};
 
 /// Elements assembled or recovered per budget unit.
 pub const ELEMENTS_PER_BUDGET_UNIT: usize = 48;
@@ -78,8 +78,10 @@ pub struct DemoStudy {
     displacements: Vec<[f64; 3]>,
     /// The local rotation of the current estimate, once something has asked for it.
     rotations: RefCell<Option<Vec<[f64; 3]>>>,
-    /// The latest finished stress recovery of the estimate, for the colours and the peak.
+    /// The latest finished stress recovery of the estimate, for the colours.
     nodal_von_mises: Vec<f64>,
+    /// The peaks of that recovery, which also hold its integration points.
+    peaks: StressPeaks,
     preview: Option<Recovery>,
     rows: Vec<ComparisonRow>,
     iterations: u64,
@@ -118,6 +120,7 @@ impl DemoStudy {
             displacements: vec![[0.0; 3]; node_count],
             rotations: RefCell::new(Some(rotations)),
             nodal_von_mises: vec![0.0; node_count],
+            peaks: StressPeaks::default(),
             preview: None,
             rows: Vec::new(),
             iterations: 0,
@@ -273,6 +276,7 @@ impl DemoStudy {
         match done {
             Ok(true) => {
                 if let Ok(field) = study.finish_recovery(recovery) {
+                    self.peaks = self.peaks_of(&field);
                     self.nodal_von_mises = field.nodal_von_mises;
                 }
             }
@@ -281,7 +285,23 @@ impl DemoStudy {
         }
     }
 
+    /// The peaks of a finished recovery. The peak outside the clamp zones excludes what lies within
+    /// a clamp's zone by physical position, nodes and integration points alike, because a clamp's
+    /// corners are a singularity whose value does not converge.
+    fn peaks_of(&self, field: &RecoveredField) -> StressPeaks {
+        let (clamps, zone) = (&self.clamps, self.clamp_zone);
+        StressPeaks {
+            outside_clamps: field
+                .peak_von_mises(&self.mesh, |p| {
+                    clamps.iter().all(|x| (p[0] - x).abs() > zone)
+                })
+                .unwrap_or(0.0),
+            overall: field.peak_von_mises(&self.mesh, |_| true).unwrap_or(0.0),
+        }
+    }
+
     fn finish(&mut self, field: RecoveredField) {
+        self.peaks = self.peaks_of(&field);
         self.set_displacements(field.displacements);
         self.nodal_von_mises = field.nodal_von_mises;
         self.preview = None;
@@ -323,8 +343,7 @@ impl DemoStudy {
             &self.displacements,
             &rotations,
             &self.nodal_von_mises,
-            &self.clamps,
-            self.clamp_zone,
+            self.peaks,
             self.yield_strength,
         )
     }

@@ -1,11 +1,53 @@
-//! Recovery after a solve. Integration point values are the raw results; the per-node display
-//! value is a volume-weighted average of von Mises stress evaluated at the node in each incident
-//! element. Averaging the scalar rather than the tensor cannot cancel opposing stresses across
-//! elements, and evaluating at the node rather than copying the nearest integration point does not
-//! understate a peak. [`Recovery`] is the resumable form: a host with no threads runs it in bounded
-//! slices, in element order, so slicing never changes a value. [`nodal_rotations`] gives the local
-//! rotation of a displacement field the same way, for drawing a deformed shape that keeps its
-//! rotations rigid.
+//! Recovery after a solve. Integration point values are the raw results; [`Solution::nodal_stress`]
+//! is the one nodal stress, and everything that reads a stress at a node (`nodal_von_mises`, a
+//! peak, a safety factor) reads this field.
+//!
+//! **How a node gets its stress.** Stress is discontinuous between elements and is most accurate
+//! at the integration points, so a node's value is read from a least-squares patch fit
+//! (`patch.rs`): around each mesh vertex a linear tensor field is fitted to the integration points
+//! of the elements touching it, and the fit is evaluated at the vertex. A midside node takes the
+//! mean of the fits from its edge's two vertices, evaluated at its own position, so corner and
+//! midside values come from one field. Reading a node from each element's own extrapolation and
+//! averaging is unsafe at a midside node: a midside on a free edge can belong to a single
+//! element, so there is nothing to average, and the value is whatever that element's linear field
+//! reads at its edge. The fit is of the tensor, never of von Mises, because von Mises is not
+//! linear: a smoothed scalar is not the stress of any smoothed state.
+//!
+//! **Boundary nodes.** A patch at the surface is one-sided. A linear fit needs no special case
+//! there: any patch holding one non-flat element determines it, and it is exact for a linear
+//! stress field, which is the bending state a surface node usually sees. A quadratic fit, which
+//! would address the curvature a one-sided patch cannot see, was measured and rejected: on the
+//! plate-with-a-hole benchmark it read 18% high at the coarsest mesh and left some patches
+//! undetermined.
+//!
+//! **What the field reads at a peak.** A stress concentration's fall-off is convex, so a linear
+//! fit reads low by the curvature it cannot represent: against Lamé at a ring's bore
+//! (`crates/solidfem/tests/validation/recovery.rs`) the bore's interior nodes read 0.2-1.3% low,
+//! the error shrinking as the mesh refines. At a sharp re-entrant corner the patch wraps round
+//! the corner and one linear tensor is fitted to both legs, so the fit reads far below the stress
+//! the elements there computed: on a refined L angle by up to a third.
+//!
+//! **The peak.** [`peak_von_mises`] is the one peak a caller may report: over a region, the
+//! larger of the recovered node values and the integration point values, each classified by its
+//! own physical position. A reported peak can therefore never read below a stress the solver
+//! computed in that region. The floor is applied to the peak and not to the field: a node floored
+//! at its elements' integration points would invent stress at a bending neutral axis, so the
+//! field and its colours stay on the fit. At a sharp corner the peak is the largest integration
+//! point and keeps growing with refinement, which is the singularity showing; it is not a usable
+//! stress. On the smooth cases measured the peak was above the analytic value on the ring's bore
+//! (+0.9% to +1.1%, from nodes at the bore's edges, where a patch is one-sided in two directions)
+//! and at a Kirsch hole (+0.3% to +0.6%), and within 1.2% either way at a real plate's hole. A
+//! design margin should allow for that discretization error.
+//!
+//! **Mixed material.** Stress jumps across a material interface, so a patch holding more than one
+//! material is not fitted; a node there reports the largest von Mises any of its elements gives at
+//! the node (with its own material, not the far side's), so an interface can only read high. A
+//! patch whose points are all coplanar falls back the same way.
+//!
+//! [`Recovery`] is the resumable form: a host with no threads runs the elements and then the patch
+//! fits in bounded slices, in a fixed order, so slicing never changes a value.
+//! [`nodal_rotations`] gives the local rotation of a displacement field, for drawing a deformed
+//! shape that keeps its rotations rigid.
 
 use solidfem_mesh::QuadraticTetMesh;
 
@@ -13,9 +55,10 @@ use crate::element::{
     checked_material, point_geometry, rotation_at, strain_at, stress_at, von_mises,
 };
 use crate::error::ModelError;
-use crate::material::MaterialField;
-use crate::quadrature::Quadrature;
-use crate::shape::{NODE_COUNT, NODE_NATURAL};
+use crate::material::{Material, MaterialField};
+use crate::patch::PatchFit;
+use crate::quadrature::{Quadrature, QuadraturePoint};
+use crate::shape::{EDGES, NODE_COUNT, NODE_NATURAL};
 use crate::study::Report;
 
 /// Stress at one integration point.
@@ -40,24 +83,35 @@ pub struct Solution {
     pub displacements: Vec<[f64; 3]>,
     /// Stress at every integration point, in (element, point) order.
     pub point_stresses: Vec<PointStress>,
-    /// Volume-weighted average von Mises stress per mesh node, for display.
+    /// The recovered stress tensor at every mesh node, `[xx, yy, zz, xy, yz, zx]`.
+    pub nodal_stress: Vec<[f64; 6]>,
+    /// Von Mises stress of [`Self::nodal_stress`], per mesh node: the display value. A reported
+    /// peak reads [`Self::peak_von_mises`], which also holds the integration points.
     pub nodal_von_mises: Vec<f64>,
     /// Sizes, iteration counts and wall times.
     pub report: Report,
 }
 
-/// A resumable stress recovery over a snapshot of nodal displacements. It runs in element order,
-/// so a recovery resumed in slices gives exactly the bits of one run; [`StaticStudy`] drives it
-/// because it owns the mesh and material it reads.
+/// A resumable stress recovery over a snapshot of nodal displacements: every element in order,
+/// then a patch fit per mesh vertex in order, so a recovery resumed in slices gives exactly the
+/// bits of one run; [`StaticStudy`] drives it because it owns the mesh and material it reads.
 ///
 /// [`StaticStudy`]: crate::study::StaticStudy
 #[derive(Debug, Clone)]
 pub struct Recovery {
     displacements: Vec<[f64; 3]>,
     point_stresses: Vec<PointStress>,
-    weighted: Vec<f64>,
-    weights: Vec<f64>,
+    point_materials: Vec<Material>,
+    points_per_element: usize,
+    /// Per mesh node, the stress of the incident element whose von Mises at the node is largest.
+    worst_at_node: Vec<([f64; 6], f64)>,
     next: usize,
+    /// One entry per mesh vertex: its fit, or `None` where a patch cannot be fitted.
+    fits: Vec<Option<PatchFit>>,
+    next_vertex: usize,
+    /// Vertex patches: `incident[offsets[v]..offsets[v + 1]]` are the elements touching vertex `v`.
+    offsets: Vec<usize>,
+    incident: Vec<u32>,
 }
 
 /// Displacements and the stresses recovered from them: a live estimate while a solve runs, the
@@ -68,8 +122,62 @@ pub struct RecoveredField {
     pub displacements: Vec<[f64; 3]>,
     /// Stress at every integration point, in (element, point) order.
     pub point_stresses: Vec<PointStress>,
-    /// Volume-weighted average von Mises stress per mesh node, for display.
+    /// The recovered stress tensor at every mesh node, `[xx, yy, zz, xy, yz, zx]`.
+    pub nodal_stress: Vec<[f64; 6]>,
+    /// Von Mises stress of [`Self::nodal_stress`], per mesh node.
     pub nodal_von_mises: Vec<f64>,
+}
+
+/// The peak von Mises stress over the points `inside` accepts: the larger of the recovered value
+/// at the mesh nodes and the value at the integration points, each classified by its physical
+/// position. `None` when neither a node nor a point is inside. A non-finite value is kept, never
+/// dropped, so it cannot hide a broken result behind a finite peak. Read from any recovered
+/// field; [`Solution::peak_von_mises`] and [`RecoveredField::peak_von_mises`] call this.
+pub fn peak_von_mises(
+    mesh: &QuadraticTetMesh,
+    nodal_von_mises: &[f64],
+    point_stresses: &[PointStress],
+    inside: impl Fn([f64; 3]) -> bool,
+) -> Option<f64> {
+    let nodes = mesh
+        .nodes()
+        .iter()
+        .zip(nodal_von_mises)
+        .filter(|(position, _)| inside(**position))
+        .map(|(_, value)| *value);
+    let points = point_stresses
+        .iter()
+        .filter(|point| inside(point.position))
+        .map(|point| point.von_mises);
+    nodes.chain(points).reduce(|peak, value| {
+        if peak.is_nan() || value.is_nan() {
+            f64::NAN
+        } else {
+            peak.max(value)
+        }
+    })
+}
+
+impl Solution {
+    /// The peak von Mises stress over the points `inside` accepts; see [`peak_von_mises`].
+    pub fn peak_von_mises(
+        &self,
+        mesh: &QuadraticTetMesh,
+        inside: impl Fn([f64; 3]) -> bool,
+    ) -> Option<f64> {
+        peak_von_mises(mesh, &self.nodal_von_mises, &self.point_stresses, inside)
+    }
+}
+
+impl RecoveredField {
+    /// The peak von Mises stress over the points `inside` accepts; see [`peak_von_mises`].
+    pub fn peak_von_mises(
+        &self,
+        mesh: &QuadraticTetMesh,
+        inside: impl Fn([f64; 3]) -> bool,
+    ) -> Option<f64> {
+        peak_von_mises(mesh, &self.nodal_von_mises, &self.point_stresses, inside)
+    }
 }
 
 /// The local rotation vector (half the curl of the displacement), in radians, at every mesh node
@@ -77,9 +185,9 @@ pub struct RecoveredField {
 ///
 /// Each element contributes the 10-node shape-function gradients evaluated at the node, and a node
 /// shared by several elements takes the average weighted by each element's Jacobian determinant at
-/// that node: on this mesh's straight-edged elements that is six times the element's volume, the
-/// same volume weighting as the nodal von Mises stress. Gradients are discontinuous between
-/// elements, so unlike the displacement itself this is a smoothed value: exact on a rigid
+/// that node: on this mesh's straight-edged elements that is six times the element's volume.
+/// Gradients are discontinuous between elements, so unlike the displacement itself this is a
+/// smoothed value: exact on a rigid
 /// rotation, an average where the rotation varies across the node. `displacements` must hold one
 /// vector per mesh node.
 pub fn nodal_rotations(
@@ -126,15 +234,21 @@ impl Recovery {
     pub(crate) fn new(
         displacements: Vec<[f64; 3]>,
         node_count: usize,
+        vertex_count: usize,
         element_count: usize,
         points_per_element: usize,
     ) -> Self {
         Recovery {
             displacements,
             point_stresses: Vec::with_capacity(element_count * points_per_element),
-            weighted: vec![0.0; node_count],
-            weights: vec![0.0; node_count],
+            point_materials: Vec::with_capacity(element_count * points_per_element),
+            points_per_element,
+            worst_at_node: vec![([0.0; 6], f64::MIN); node_count],
             next: 0,
+            fits: vec![None; vertex_count],
+            next_vertex: 0,
+            offsets: Vec::new(),
+            incident: Vec::new(),
         }
     }
 
@@ -148,29 +262,119 @@ impl Recovery {
         &self.displacements
     }
 
-    /// The finished field. Every mesh node belongs to a tetrahedron (`TetMesh::new`), so once the
-    /// last element is done every weight is positive.
-    pub(crate) fn into_field(self) -> RecoveredField {
-        let nodal_von_mises = self
-            .weighted
-            .iter()
-            .zip(&self.weights)
-            .map(|(s, w)| s / w)
-            .collect();
+    /// Whether every element and every patch fit is done, so the field can be read.
+    pub(crate) fn is_finished(&self, element_count: usize) -> bool {
+        self.next == element_count && self.next_vertex == self.fits.len()
+    }
+
+    /// The finished field. Every mesh node belongs to a tetrahedron (`TetMesh::new`), so every
+    /// node has a fit or a worst incident value.
+    pub(crate) fn into_field(self, mesh: &QuadraticTetMesh) -> RecoveredField {
+        let nodes = mesh.nodes();
+        let vertices = self.fits.len();
+        let mut nodal_stress = vec![[0.0; 6]; nodes.len()];
+        for (vertex, fit) in self.fits.iter().enumerate() {
+            nodal_stress[vertex] = match fit {
+                Some(fit) => fit.at(nodes[vertex]),
+                None => self.worst_at_node[vertex].0,
+            };
+        }
+        // A midside takes the two end patches' mean at its own position; a shared midside is
+        // written once, from the first element that reaches it, which fixes the order.
+        let mut midside_done = vec![false; nodes.len().saturating_sub(vertices)];
+        for tet in mesh.tets() {
+            for (slot, (a, b)) in EDGES.iter().enumerate() {
+                let midside = tet[4 + slot] as usize;
+                if midside_done[midside - vertices] {
+                    continue;
+                }
+                midside_done[midside - vertices] = true;
+                let ends = (&self.fits[tet[*a] as usize], &self.fits[tet[*b] as usize]);
+                nodal_stress[midside] = match ends {
+                    (Some(first), Some(second)) => {
+                        let (p, q) = (first.at(nodes[midside]), second.at(nodes[midside]));
+                        let mut mean = [0.0; 6];
+                        for k in 0..6 {
+                            mean[k] = 0.5 * (p[k] + q[k]);
+                        }
+                        mean
+                    }
+                    _ => self.worst_at_node[midside].0,
+                };
+            }
+        }
+        let nodal_von_mises = nodal_stress.iter().map(von_mises).collect();
         RecoveredField {
             displacements: self.displacements,
             point_stresses: self.point_stresses,
+            nodal_stress,
             nodal_von_mises,
         }
     }
 
-    /// Recovers the next `max_elements` elements, reading the cancel check once per element.
+    /// The elements touching each vertex, in element order, as a compressed list. One pass over
+    /// the tetrahedra's four corners, comparable to a single slice of element recovery.
+    fn build_patches(&mut self, mesh: &QuadraticTetMesh) {
+        let mut counts = vec![0usize; self.fits.len() + 1];
+        for tet in mesh.tets() {
+            for corner in &tet[..4] {
+                counts[*corner as usize + 1] += 1;
+            }
+        }
+        for index in 1..counts.len() {
+            counts[index] += counts[index - 1];
+        }
+        let mut next = counts.clone();
+        let mut incident = vec![0u32; counts[self.fits.len()]];
+        for (tet_index, tet) in mesh.tets().iter().enumerate() {
+            for corner in &tet[..4] {
+                let slot = &mut next[*corner as usize];
+                incident[*slot] = tet_index as u32;
+                *slot += 1;
+            }
+        }
+        self.offsets = counts;
+        self.incident = incident;
+    }
+
+    /// Fits the patch at the next vertex; a patch of more than one material is left unfitted.
+    fn fit_next_vertex(&mut self, mesh: &QuadraticTetMesh) {
+        let vertex = self.next_vertex;
+        let elements = &self.incident[self.offsets[vertex]..self.offsets[vertex + 1]];
+        let mut samples = Vec::with_capacity(elements.len() * self.points_per_element);
+        let mut first_material = None;
+        let mut uniform = true;
+        for element in elements {
+            let start = *element as usize * self.points_per_element;
+            for point in start..start + self.points_per_element {
+                let material = self.point_materials[point];
+                match first_material {
+                    None => first_material = Some(material),
+                    Some(m) if same_bits(m, material) => {}
+                    Some(_) => uniform = false,
+                }
+                samples.push((
+                    self.point_stresses[point].position,
+                    self.point_stresses[point].stress,
+                ));
+            }
+        }
+        self.fits[vertex] = if uniform {
+            PatchFit::fit(mesh.nodes()[vertex], &samples)
+        } else {
+            None
+        };
+        self.next_vertex += 1;
+    }
+
+    /// Does up to `max_work` more units of work (an element, then a patch fit), reading the cancel
+    /// check once per unit.
     pub(crate) fn advance(
         &mut self,
         mesh: &QuadraticTetMesh,
         field: &impl MaterialField,
         rule: Quadrature,
-        max_elements: usize,
+        max_work: usize,
         cancel: &mut dyn FnMut() -> bool,
     ) -> Result<(), ModelError> {
         let element_error = |tet: usize, fault| ModelError::Element {
@@ -178,11 +382,10 @@ impl Recovery {
             fault,
         };
         let points = rule.points();
-        let end = self
-            .next
-            .saturating_add(max_elements)
-            .min(mesh.tets().len());
-        while self.next < end {
+        let nearest_point = NODE_NATURAL.map(|node| nearest_natural_point(points, node));
+        let mut budget = max_work;
+        while self.next < mesh.tets().len() && budget > 0 {
+            budget -= 1;
             let tet_index = self.next;
             if cancel() {
                 return Err(ModelError::Cancelled);
@@ -190,14 +393,13 @@ impl Recovery {
             let tet = &mesh.tets()[tet_index];
             let nodes = tet.map(|n| mesh.nodes()[n as usize]);
             let u = tet.map(|n| self.displacements[n as usize]);
-            let mut volume = 0.0;
             for (index, q) in points.iter().enumerate() {
                 let geometry = point_geometry(&nodes, q.natural, index)
                     .map_err(|f| element_error(tet_index, f))?;
-                volume += q.weight * geometry.det_j / 6.0;
                 let material = checked_material(field, geometry.position, index)
                     .map_err(|f| element_error(tet_index, f))?;
                 let stress = stress_at(&material, &strain_at(&geometry, &u));
+                self.point_materials.push(material);
                 self.point_stresses.push(PointStress {
                     tet: tet_index as u32,
                     point: index as u8,
@@ -206,18 +408,60 @@ impl Recovery {
                     von_mises: von_mises(&stress),
                 });
             }
+            let element_materials =
+                &self.point_materials[self.point_materials.len() - points.len()..];
             for node in 0..NODE_COUNT {
                 let geometry = point_geometry(&nodes, NODE_NATURAL[node], node)
                     .map_err(|f| element_error(tet_index, f))?;
-                let material = checked_material(field, geometry.position, node)
-                    .map_err(|f| element_error(tet_index, f))?;
+                // The element's own material: a node on a material interface would otherwise
+                // read the far side's stiffness against this element's strain.
+                let material = element_materials[nearest_point[node]];
                 let stress = stress_at(&material, &strain_at(&geometry, &u));
-                let global = tet[node] as usize;
-                self.weighted[global] += volume * von_mises(&stress);
-                self.weights[global] += volume;
+                let vm = von_mises(&stress);
+                let worst = &mut self.worst_at_node[tet[node] as usize];
+                if vm > worst.1 {
+                    *worst = (stress, vm);
+                }
             }
             self.next += 1;
         }
+        if self.next == mesh.tets().len() && self.next_vertex < self.fits.len() && budget > 0 {
+            if self.offsets.is_empty() {
+                self.build_patches(mesh);
+            }
+            while self.next_vertex < self.fits.len() && budget > 0 {
+                budget -= 1;
+                if cancel() {
+                    return Err(ModelError::Cancelled);
+                }
+                self.fit_next_vertex(mesh);
+            }
+        }
         Ok(())
     }
+}
+
+/// The integration point of a rule nearest a node in natural coordinates; a tie takes the earlier
+/// point, so the choice is fixed.
+fn nearest_natural_point(points: &[QuadraturePoint], node: [f64; 3]) -> usize {
+    let mut best = (f64::MAX, 0);
+    for (index, point) in points.iter().enumerate() {
+        let distance: f64 = point
+            .natural
+            .iter()
+            .zip(node.iter())
+            .map(|(a, b)| (a - b) * (a - b))
+            .sum();
+        if distance < best.0 {
+            best = (distance, index);
+        }
+    }
+    best.1
+}
+
+/// Whether two materials are the same bits: the patch-uniformity question, so any variation at all
+/// in a graded material counts as a patch to leave unfitted.
+fn same_bits(a: Material, b: Material) -> bool {
+    a.youngs_modulus.to_bits() == b.youngs_modulus.to_bits()
+        && a.poisson_ratio.to_bits() == b.poisson_ratio.to_bits()
 }

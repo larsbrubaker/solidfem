@@ -20,7 +20,7 @@ pub const NODE_NATURAL: [[f64; 3]; NODE_COUNT] = [
 ];
 
 /// Each midpoint node's two corners, in node order.
-const EDGES: [(usize, usize); 6] = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)];
+pub(crate) const EDGES: [(usize, usize); 6] = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)];
 
 fn barycentrics(natural: [f64; 3]) -> [f64; 4] {
     [

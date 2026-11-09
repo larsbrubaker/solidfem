@@ -208,27 +208,19 @@ fn check_area(area: f64, expected: f64, what: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// The largest nodal von Mises stress at nodes within the (x, y) box `low..high`.
+/// The reported peak von Mises stress in the (x, y) box `low..high`: the library's one peak
+/// measure, the larger of the recovered nodes and the integration points in the box.
 fn peak_in_box(
     mesh: &QuadraticTetMesh,
     solution: &Solution,
     low: [f64; 2],
     high: [f64; 2],
 ) -> Result<f64, String> {
-    let mut peak = f64::MIN;
-    for (node, position) in mesh.nodes().iter().enumerate() {
-        if position[0] >= low[0]
-            && position[0] <= high[0]
-            && position[1] >= low[1]
-            && position[1] <= high[1]
-        {
-            peak = worst_of(peak, solution.nodal_von_mises[node]);
-        }
-    }
-    if peak == f64::MIN {
-        return Err(format!("no node in the box {low:?}..{high:?}"));
-    }
-    Ok(peak)
+    solution
+        .peak_von_mises(mesh, |p| {
+            p[0] >= low[0] && p[0] <= high[0] && p[1] >= low[1] && p[1] <= high[1]
+        })
+        .ok_or_else(|| format!("no node or integration point in the box {low:?}..{high:?}"))
 }
 
 fn steel(nu: f64) -> Material {
@@ -239,8 +231,8 @@ fn steel(nu: f64) -> Material {
 }
 
 /// A volume-weighted average over the incident elements of `value`, a tensor evaluated at the
-/// node in each element, for each node in `targets`, in that order. The display von Mises is the
-/// same recovery of a scalar; a benchmark comparing a stress component needs the tensor.
+/// node in each element, for each node in `targets`, in that order. A benchmark comparing a
+/// strain needs this; a stress is read from the solution's nodal stress.
 fn nodal_tensor(
     mesh: &QuadraticTetMesh,
     solution: &Solution,
@@ -284,16 +276,12 @@ fn nodal_tensor(
     Ok(sum)
 }
 
-/// The stress tensor at the nodes `targets`, averaged over their elements by volume.
-fn nodal_stress(
-    mesh: &QuadraticTetMesh,
-    solution: &Solution,
-    material: Material,
-    targets: &[u32],
-) -> Result<Vec<[f64; 6]>, String> {
-    nodal_tensor(mesh, solution, targets, |geometry, u| {
-        stress_at(&material, &strain_at(geometry, u))
-    })
+/// The recovered stress tensor at the nodes `targets`, the solution's one nodal stress.
+fn nodal_stress(solution: &Solution, targets: &[u32]) -> Vec<[f64; 6]> {
+    targets
+        .iter()
+        .map(|n| solution.nodal_stress[*n as usize])
+        .collect()
 }
 
 /// The smallest dihedral angle of the corners of a tetrahedron, in degrees.

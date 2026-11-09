@@ -65,16 +65,11 @@ fn apply(mesh: &QuadraticTetMesh) -> Result<Supports, String> {
 fn measure(mesh: &QuadraticTetMesh, solution: &Solution) -> Result<Vec<(String, f64)>, String> {
     // The tension-side root fillet is on the side opposite the load; +x load, so x < 0, within a
     // window round the fillet radially.
-    let mut peak = f64::MIN;
-    for (node, p) in mesh.nodes().iter().enumerate() {
-        let r = radius(*p);
-        if p[0] < 0.0 && (RR - 0.5..=RR + 3.0 * RF).contains(&r) {
-            peak = worst_of(peak, solution.nodal_von_mises[node]);
-        }
-    }
-    if peak == f64::MIN {
-        return Err("no nodes in the root fillet window".to_string());
-    }
+    let peak = solution
+        .peak_von_mises(mesh, |p| {
+            p[0] < 0.0 && (RR - 0.5..=RR + 3.0 * RF).contains(&radius(p))
+        })
+        .ok_or("no node or integration point in the root fillet window")?;
     Ok(vec![("root_peak".to_string(), peak)])
 }
 

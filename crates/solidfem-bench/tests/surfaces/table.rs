@@ -54,7 +54,9 @@ fn nothing_is_generated_that_no_case_reads() {
 fn every_stem_is_unique_and_starts_with_its_part() {
     let mut stems = Vec::new();
     for part in all_parts() {
-        assert_eq!(part.densities.len(), 3, "{} densities", part.name);
+        // The sharp corner has a fourth: its singularity reading compares growth exponents.
+        let expected = if part.name == "lsharp" { 4 } else { 3 };
+        assert_eq!(part.densities.len(), expected, "{} densities", part.name);
         for density in &part.densities {
             assert!(
                 density.stem.starts_with(&format!("{}_", part.name)),
