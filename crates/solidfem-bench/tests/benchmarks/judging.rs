@@ -131,14 +131,20 @@ fn winkler_bach_gives_the_hand_worked_inner_fibre_stress() {
     assert!((sigma - 62.94).abs() < 0.05, "{sigma}");
 }
 
+/// The Lewis and Dolan-Broghamer figure is printed for information and judged by nothing, so
+/// this only keeps the arithmetic behind that printed number true. Why the figure does not
+/// describe this tooth is in the header of `cases/gear.rs`.
 #[test]
-fn lewis_and_the_fillet_factor_give_their_hand_worked_values() {
+fn the_information_only_lewis_figure_keeps_its_hand_worked_value() {
     let lewis = solidfem_bench::benchmarks::cases::lewis_stress();
     // 1000 / (20 * 4 * 0.322).
     assert!((lewis - 38.82).abs() < 0.01, "{lewis}");
-    // Dolan-Broghamer for this tooth, worked by hand with t = 6.75, r = 1.2, l = 8.0: about 1.39.
+    // Dolan-Broghamer, worked by hand with t = 6.75, r = 1.2, l = 8.0: about 1.39.
     let k = solidfem_bench::benchmarks::cases::fillet_concentration();
     assert!((k - 1.39).abs() < 0.02, "{k}");
+    // Their product, 1.3946 x 38.82, is the number the table shows.
+    let figure = solidfem_bench::benchmarks::cases::lewis_kf_information();
+    assert!((figure - 54.14).abs() < 0.02, "{figure}");
 }
 
 #[test]

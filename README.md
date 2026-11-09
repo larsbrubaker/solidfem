@@ -59,7 +59,8 @@ it stands.
   top (within 2% on refinement and against an independent structured solve). An L-bracket's
   deflection is mesh-stable but has no accuracy reference, and its sharp corner is reported as a
   singularity. Failing: a gear tooth, whose finest mesh holds a tetrahedron flat to rounding that
-  the 10-node upgrade refuses. Buckling and large deflection are reported as out of scope.
+  the 10-node upgrade refuses; its two coarser meshes put the root fillet peak within 1.1% of an
+  independent structured solve. Buckling and large deflection are reported as out of scope.
 - Only linear statics: no contact, no large deflection, no buckling, no fatigue, no plasticity. A
   stress past the material's yield says the part would yield, not how it would fail.
 

@@ -3,6 +3,8 @@
 
 #[path = "benchmarks/claims.rs"]
 mod claims;
+#[path = "benchmarks/gear.rs"]
+mod gear;
 #[path = "benchmarks/hollow_box.rs"]
 mod hollow_box;
 #[path = "benchmarks/judging.rs"]

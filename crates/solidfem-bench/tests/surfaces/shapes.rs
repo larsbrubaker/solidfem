@@ -179,3 +179,14 @@ fn the_ring_has_its_stated_radius_and_height() {
         "axial extent: y {y}, z {z}"
     );
 }
+
+/// No outline point repeats its neighbour: a doubled vertex is a zero-length edge on the contour
+/// a shape hands to the extrude.
+#[test]
+fn the_gear_outline_has_no_repeated_vertex() {
+    let outline = solidfem_bench::surfaces::shapes::gear_tooth_outline();
+    for (index, pair) in outline.windows(2).enumerate() {
+        let gap = (pair[1].x - pair[0].x).hypot(pair[1].y - pair[0].y);
+        assert!(gap > 1e-9, "points {index} and {} coincide", index + 1);
+    }
+}

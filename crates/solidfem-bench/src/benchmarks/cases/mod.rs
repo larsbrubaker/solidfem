@@ -336,6 +336,8 @@ fn faces_where(mesh: &QuadraticTetMesh, keep: impl Fn([f64; 3]) -> bool) -> Vec<
 mod bracket;
 mod column;
 mod gear;
+#[cfg(not(target_arch = "wasm32"))]
+mod gear_reference;
 mod hollow_box;
 mod hollow_box_reference;
 mod hook;
@@ -345,7 +347,12 @@ mod ring;
 mod snapfit;
 mod strip;
 
-pub use gear::{fillet_concentration, lewis_stress};
+pub use gear::{fillet_concentration, lewis_kf_information, lewis_stress, ROOT_PEAK_REFERENCE};
+#[cfg(not(target_arch = "wasm32"))]
+pub use gear_reference::{
+    beam_section_ratios, gear_structured_reference, half_model_supports, solve_structured,
+    structured_tooth, GearReferenceRow, ToothGrid, ROOT_PEAK_REFERENCE_GRIDS,
+};
 pub use hollow_box::{disk_triangle_overlap, PATCH_W_REFERENCE};
 pub use hollow_box_reference::{structured_reference, ReferenceRow};
 pub use hook::winkler_inner_stress;

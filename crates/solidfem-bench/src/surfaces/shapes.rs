@@ -149,6 +149,54 @@ pub fn hollow_box(cancel: &CancelToken) -> Build {
     subtract("hollow", &outer, &void, cancel)
 }
 
+/// The right-hand root fillet of the gear tooth: a circular arc of `radius` about `centre` from
+/// angle `start` at the root circle to angle `end` at the flank, radians, measured as `atan2(y,
+/// x)` about the centre. `gear_tooth_outline` chords it; a reference that resolves the fillet finer
+/// than those chords reads the true arc from here, because a polyline's corners are real stress
+/// raisers at that scale.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct GearFillet {
+    /// The arc's centre, (x, y).
+    pub centre: [f64; 2],
+    /// The arc's radius.
+    pub radius: f64,
+    /// The angle at the root circle.
+    pub start: f64,
+    /// The angle at the flank.
+    pub end: f64,
+}
+
+/// The gear tooth's right-hand root fillet.
+pub fn gear_fillet() -> GearFillet {
+    let (n, m, phi) = (20.0_f64, 4.0_f64, 20.0_f64.to_radians());
+    let rp = 0.5 * n * m;
+    let rr = rp - 1.25 * m;
+    let rf = 0.3 * m;
+    let inv = |a: f64| a.tan() - a;
+    let half_tooth = 0.25 * PI * m / rp;
+    let theta_b = half_tooth + inv(phi);
+    let alpha = (rf / (rr + rf)).asin();
+    let polar = |r: f64, t: f64| [r * t.sin(), r * t.cos()];
+    let root_end = theta_b + alpha;
+    let centre = polar(rr + rf, root_end);
+    let p_root = polar(rr, root_end);
+    let p_line = polar((rr + rf) * alpha.cos(), theta_b);
+    let start = (p_root[1] - centre[1]).atan2(p_root[0] - centre[0]);
+    let mut end = (p_line[1] - centre[1]).atan2(p_line[0] - centre[0]);
+    while end > start + PI {
+        end -= TAU;
+    }
+    while end < start - PI {
+        end += TAU;
+    }
+    GearFillet {
+        centre,
+        radius: rf,
+        start,
+        end,
+    }
+}
+
 /// The outline of one tooth of a 20-tooth, module 4, 20 degree pressure angle involute gear: a
 /// rim sector with the tooth centred on the y axis and a root fillet of radius 0.3 times the
 /// module.
@@ -175,20 +223,13 @@ pub fn gear_tooth_outline() -> Vec<Vector2> {
         right.push(polar(rr, t));
     }
     // Fillet arc about its centre, from the root tangent to the flank tangent.
-    let c = polar(rr + rf, root_end);
-    let p_root = polar(rr, root_end);
-    let p_line = polar((rr + rf) * alpha.cos(), theta_b);
-    let a0 = (p_root[1] - c[1]).atan2(p_root[0] - c[0]);
-    let mut a1 = (p_line[1] - c[1]).atan2(p_line[0] - c[0]);
-    while a1 > a0 + PI {
-        a1 -= TAU;
-    }
-    while a1 < a0 - PI {
-        a1 += TAU;
-    }
+    let fillet = gear_fillet();
     for i in 1..=14 {
-        let a = a0 + (a1 - a0) * i as f64 / 14.0;
-        right.push([c[0] + rf * a.cos(), c[1] + rf * a.sin()]);
+        let a = fillet.start + (fillet.end - fillet.start) * i as f64 / 14.0;
+        right.push([
+            fillet.centre[0] + rf * a.cos(),
+            fillet.centre[1] + rf * a.sin(),
+        ]);
     }
     right.push(polar(rb, theta_b));
     for i in 1..=20 {
@@ -196,9 +237,10 @@ pub fn gear_tooth_outline() -> Vec<Vector2> {
         right.push(polar(r, flank(r)));
     }
     let mut profile: Vec<Vector2> = right.iter().map(|p| v(p[0], p[1])).collect();
-    // Across the tip and down the mirror image, then the rim arc back.
+    // Across the tip and down the mirror image, then the rim arc back. The tip stops one step
+    // short of the left corner, which is the first point of the mirrored side.
     let tip_right = flank(ra);
-    for i in 1..=8 {
+    for i in 1..8 {
         let t = tip_right - 2.0 * tip_right * i as f64 / 8.0;
         profile.push(v(ra * t.sin(), ra * t.cos()));
     }
