@@ -44,7 +44,7 @@
 //! surface vertices, `wall_fill.rs` those from the middle of large wall faces, `skins.rs`
 //! the opposite skins of a wall and the splitting of the edges joining them, `interior.rs` the
 //! insertion, `quality.rs` the improvement, `quality_points.rs` the points for slivers no flip can remove, `surface.rs` is the surface-recovery interface and
-//! classifies the solid, `patches.rs`
+//! classifies the solid, `surface_report.rs` what a recovery run reports, `patches.rs`
 //! finds the flat regions, `recover.rs` orders the recovery of each constraint, `plane_delaunay.rs`
 //! chooses each flat region's triangulation, `flips.rs` holds the flips, `steiner.rs` adds points inside the solid, `triangulator.rs` the
 //! point-set interface and input checks, `order.rs` the insertion order, `core.rs` the tetrahedra,
@@ -68,6 +68,7 @@ mod skins;
 mod steiner;
 mod surface;
 mod surface_check;
+mod surface_report;
 mod triangulator;
 mod wall_fill;
 
@@ -76,5 +77,7 @@ pub use quality::DihedralHistogram;
 pub use refine::{
     RefineOptions, RefinePhase, RefineProgress, RefineReport, Refiner, SizeFn, SIZE_RATIO,
 };
-pub use surface::{RecoveryReport, SolidMesh, SurfaceMesher, SurfacePhase, SurfaceProgress};
+pub use surface::{
+    GaveUpCounts, RecoveryReport, SolidMesh, SurfaceMesher, SurfacePhase, SurfaceProgress,
+};
 pub use triangulator::{StepStatus, Tetrahedralization, Triangulator, HULL};

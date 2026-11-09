@@ -8,7 +8,10 @@
 //! (`corpus/volume_trial.rs`); `batch` prints them as tables and summaries, the volume outcomes
 //! counted by failure class. A child writes and flushes its earlier records before starting the
 //! volume stage, so a child that times out or crashes there still has them, and its volume record
-//! is written by the parent as `child:timeout` or `child:crashed`.
+//! is written by the parent as `child:timeout` or `child:crashed`. `solidfem-corpus diagnose
+//! <file-or-synthetic-name> <scale,...> <cap-seconds>` remeshes one part at each multiple of its
+//! corpus target edge length and prints, a key=value line per multiple, what surface recovery
+//! made of it and where anything it left missing sits (`corpus/diagnose.rs`).
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
@@ -19,6 +22,7 @@ mod native {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
+    use solidfem_bench::corpus::diagnose::diagnose;
     use solidfem_bench::corpus::measure::measure_input;
     use solidfem_bench::corpus::parts::all_parts;
     use solidfem_bench::corpus::record::{
@@ -103,10 +107,40 @@ mod native {
                 &args[3..],
             ),
             Some("stl") if args.len() == 2 => measure_stl(Path::new(&args[1])),
+            Some("diagnose") if args.len() == 4 => {
+                diagnose_part(&args[1], &args[2], args[3].parse()?)
+            }
             _ => {
-                Err("usage: synthetic | sample <root> <out> <count> | batch <jobs> <timeout> <path>... | stl <file>".into())
+                Err("usage: synthetic | sample <root> <out> <count> | batch <jobs> <timeout> <path>... | stl <file> | diagnose <file-or-synthetic-name> <scale,scale,...> <cap-seconds>".into())
             }
         }
+    }
+
+    /// Diagnoses surface recovery on one STL file, or on the synthetic part of that name, at each
+    /// comma-separated multiple of the corpus target edge length, a line per multiple.
+    fn diagnose_part(part: &str, scales: &str, cap_seconds: f64) -> Result<(), Box<dyn Error>> {
+        let scales = scales
+            .split(',')
+            .map(str::parse)
+            .collect::<Result<Vec<f64>, _>>()?;
+        let (name, soup) = match all_parts()?.into_iter().find(|p| p.name == part) {
+            Some(found) => (found.name.to_string(), TriSoup::from_mesh(&found.mesh)),
+            None => {
+                let path = Path::new(part);
+                let bytes = std::fs::read(path)?;
+                let mesh = parse_file_contents(&bytes, &CancelToken::new(), None)?;
+                let name = path
+                    .file_name()
+                    .ok_or("no file name")?
+                    .to_string_lossy()
+                    .replace(' ', "_");
+                (name, TriSoup::from_mesh(&mesh))
+            }
+        };
+        for fields in diagnose(&name, &soup, &scales, cap_seconds) {
+            println!("{}", to_line(&fields));
+        }
+        Ok(())
     }
 
     /// Measures one mesh, handing each record line to `emit` as soon as it is known.

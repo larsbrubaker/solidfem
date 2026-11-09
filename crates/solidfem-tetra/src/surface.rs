@@ -2,7 +2,8 @@
 //! resumable steps produces a [`SolidMesh`] whose boundary is that surface and which holds only
 //! the solid's tetrahedra. It owns the phases: Delaunay of the surface's vertices, recovering
 //! edges, recovering flat patches, then classifying which side of the surface is solid; the
-//! flips and per-constraint recovery are in `flips.rs` and `recover.rs`.
+//! flips and per-constraint recovery are in `flips.rs` and `recover.rs`, and what a run reports
+//! about itself (progress, counts, why a missing constraint was given up) in `surface_report.rs`.
 //!
 //! **What the surface pins down.** Triangles exactly coplanar across an edge form a flat patch
 //! (`patches.rs`): its internal triangulation does not change the surface, so only the patch's
@@ -37,6 +38,8 @@ use crate::steiner::{
     SolidRegion, MAX_STEINER_PER_CONSTRAINT,
 };
 use crate::surface_check::check_surface;
+use crate::surface_report::GaveUp;
+pub use crate::surface_report::{GaveUpCounts, RecoveryReport, SurfacePhase, SurfaceProgress};
 use crate::triangulator::{StepStatus, Triangulator, HULL};
 
 /// The most rounds of retrying constraints a pass makes after earlier recoveries opened up room.
@@ -51,57 +54,6 @@ pub struct SolidMesh {
     pub tets: Vec<[u32; 4]>,
     /// The tetrahedron across the face opposite each vertex, or [`HULL`] across the surface.
     pub neighbors: Vec<[u32; 4]>,
-}
-
-/// Which phase a [`SurfaceMesher`] is in, in the order they run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SurfacePhase {
-    Delaunay,
-    RecoveringEdges,
-    RecoveringFaces,
-    Classifying,
-    Done,
-}
-
-/// Where a run has got to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct SurfaceProgress {
-    pub phase: SurfacePhase,
-    /// Units finished in this phase: points inserted, or surface constraints settled.
-    pub done: usize,
-    /// Units this phase has in total.
-    pub total: usize,
-}
-
-/// How recovery went: counts of what was already present and which flips restored the rest.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct RecoveryReport {
-    pub edges_total: usize,
-    pub edges_present_after_delaunay: usize,
-    pub faces_total: usize,
-    pub faces_present_after_delaunay: usize,
-    /// Tetrahedra-to-tetrahedra flips made, by kind, across both recovery phases.
-    pub flips_two_to_three: usize,
-    pub flips_three_to_two: usize,
-    pub flips_four_to_four: usize,
-    pub flips_larger_ring: usize,
-    /// Points added strictly inside the solid and still in the mesh. A point swallowed by a later
-    /// point's cavity is gone and is not counted.
-    pub steiner_points: usize,
-    pub edges_failed: usize,
-    pub faces_failed: usize,
-    /// Input triangles that are not faces of the result, because a flat patch took a different
-    /// triangulation of the same region.
-    pub surface_triangles_changed: usize,
-    /// Flat regions in the input, including those of a single triangle.
-    pub flat_patches: usize,
-    /// Edges and patches stuck for lack of any legal place for a point inside the solid.
-    pub constraints_without_room: usize,
-    /// Edges inside flat patches flipped to make each patch Delaunay in its own plane.
-    pub in_plane_flips: usize,
-    /// Edges inside a flat patch that fail the in-circle test but could not be flipped: the
-    /// patch keeps a valid triangulation that is not fully Delaunay at this many edges.
-    pub in_plane_flips_refused: usize,
 }
 
 /// One constraint phase: a work list retried in rounds.
@@ -167,6 +119,10 @@ struct Recovery {
     triangles: Vec<[u32; 3]>,
     /// The stuck edge getting points on the last pass, between units of work.
     edge_work: Option<EdgeWork>,
+    /// Why each edge and patch was last given up on a pass that may add points. The pass can
+    /// repeat while it makes progress, so only the last reason of what stays missing is counted.
+    edge_gave_up: HashMap<(u32, u32), GaveUp>,
+    patch_gave_up: HashMap<usize, GaveUp>,
 }
 
 /// A stuck edge part way through getting points. Each stage is one unit, so a host can pause or
@@ -330,6 +286,8 @@ impl SurfaceMesher {
             settled: 0,
             triangles: self.triangles.clone(),
             edge_work: None,
+            edge_gave_up: HashMap::new(),
+            patch_gave_up: HashMap::new(),
         });
         self.phase = SurfacePhase::RecoveringEdges;
         Ok(())
@@ -386,6 +344,9 @@ impl SurfaceMesher {
             recovery.patch_rounds.progressed = true;
             recovery.settled += 1;
         } else {
+            if steiner_pass && !boundary_present {
+                recovery.patch_gave_up.insert(id, GaveUp::BoundaryMissing);
+            }
             recovery.patch_rounds.retry.push(id);
         }
         Ok(())
@@ -414,6 +375,18 @@ impl SurfaceMesher {
             .sum();
         self.report.steiner_points = recovery.flipper.kept_steiner_points();
         self.report.constraints_without_room = recovery.no_room;
+        let mut gave_up = GaveUpCounts::default();
+        for edge in &recovery.missing_edges {
+            if let Some(&reason) = recovery.edge_gave_up.get(edge) {
+                gave_up.add(reason);
+            }
+        }
+        for id in &recovery.missing_patches {
+            if let Some(&reason) = recovery.patch_gave_up.get(id) {
+                gave_up.add(reason);
+            }
+        }
+        self.report.gave_up = gave_up;
         if !recovery.missing_edges.is_empty() || !recovery.missing_patches.is_empty() {
             return Err(TetraError::SurfaceNotRecovered {
                 missing_edges: recovery.missing_edges.len(),
@@ -504,6 +477,25 @@ impl SurfaceMesher {
         self.report
     }
 
+    /// The surface edges and the triangles of the flat patches still missing once recovery has
+    /// ended, for diagnosing a [`TetraError::SurfaceNotRecovered`]; empty before then.
+    pub fn missing_constraints(&self) -> (Vec<[u32; 2]>, Vec<[u32; 3]>) {
+        let Some(recovery) = &self.recovery else {
+            return (Vec::new(), Vec::new());
+        };
+        let edges = recovery
+            .missing_edges
+            .iter()
+            .map(|&(a, b)| [a, b])
+            .collect();
+        let faces = recovery
+            .missing_patches
+            .iter()
+            .flat_map(|&id| recovery.flipper.patches[id].triangles.iter().copied())
+            .collect();
+        (edges, faces)
+    }
+
     /// The finished solid mesh.
     pub fn result(&self) -> Result<SolidMesh, TetraError> {
         self.solid.clone().ok_or(TetraError::SurfaceNotFinished)
@@ -543,7 +535,8 @@ fn advance_edge_work(recovery: &mut Recovery, work: EdgeWork) -> Result<(), Tetr
                 finish_edge(recovery, u, v, true);
                 None
             }
-            PointOutcome::Stopped => {
+            PointOutcome::Stopped(reason) => {
+                recovery.edge_gave_up.insert((u, v), reason);
                 finish_edge(recovery, u, v, false);
                 None
             }
@@ -564,6 +557,7 @@ fn advance_edge_work(recovery: &mut Recovery, work: EdgeWork) -> Result<(), Tetr
             } else if points_left > 1 {
                 next(EdgeStage::PlacePoint, points_left - 1)
             } else {
+                recovery.edge_gave_up.insert((u, v), GaveUp::PointsSpent);
                 finish_edge(recovery, u, v, false);
                 None
             }
@@ -579,8 +573,8 @@ enum PointOutcome {
     Recovered,
     /// A point went in; the walks from each end come next, as units of their own.
     Placed,
-    /// No more points can go in for this edge.
-    Stopped,
+    /// No more points can go in for this edge, and why.
+    Stopped(GaveUp),
 }
 
 /// Places one point inside the solid for stuck edge `(u, v)`. A point placed over a chord's ring
@@ -593,14 +587,14 @@ fn place_point_for_edge(
     v: u32,
 ) -> Result<PointOutcome, TetraError> {
     if recovery.flipper.steiner_points >= recovery.steiner_limit {
-        return Ok(PointOutcome::Stopped);
+        return Ok(PointOutcome::Stopped(GaveUp::PointLimit));
     }
     let entry = match entry_at(&mut recovery.flipper, u, v)? {
         Some(entry) => Some(entry),
         None => entry_at(&mut recovery.flipper, v, u)?,
     };
     let Some(entry) = entry else {
-        return Ok(PointOutcome::Stopped);
+        return Ok(PointOutcome::Stopped(GaveUp::NoEntry));
     };
     let points = &recovery.flipper.core.points;
     let (pu, pv) = (points[u as usize], points[v as usize]);
@@ -628,7 +622,7 @@ fn place_point_for_edge(
         if no_room {
             recovery.no_room += 1;
         }
-        return Ok(PointOutcome::Stopped);
+        return Ok(PointOutcome::Stopped(GaveUp::NoPlace));
     };
     if let Obstruction::RingArc { a, b, .. } = placed {
         let depth = recovery.flipper.relief_depth;
@@ -657,8 +651,10 @@ fn recover_patch_with_points(
     }
     let plane = recovery.flipper.patches[id].triangles[0];
     let single = recovery.flipper.patches[id].triangles.len() == 1;
+    let mut reason = GaveUp::PointsSpent;
     for _ in 0..MAX_STEINER_PER_CONSTRAINT {
         if recovery.flipper.steiner_points >= recovery.steiner_limit {
+            reason = GaveUp::PointLimit;
             break;
         }
         let crossing = if single {
@@ -667,6 +663,7 @@ fn recover_patch_with_points(
             crossing_edges_of_patch(&mut recovery.flipper, id)
         };
         let Some(&(p, q)) = crossing.first() else {
+            reason = GaveUp::NothingCrossing;
             break;
         };
         let points = &recovery.flipper.core.points;
@@ -695,10 +692,12 @@ fn recover_patch_with_points(
                 if no_room {
                     recovery.no_room += 1;
                 }
+                reason = GaveUp::NoPlace;
                 break;
             }
         }
     }
+    recovery.patch_gave_up.insert(id, reason);
     Ok(false)
 }
 

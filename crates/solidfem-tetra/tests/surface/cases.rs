@@ -6,7 +6,7 @@ use crate::shapes::{
     hollow_box, needle_box, plate_with_holes, prism, rotated, schoenhardt, schoenhardt_of_height,
     subdivided_box, Surface,
 };
-use solidfem_tetra::TetraError;
+use solidfem_tetra::{SurfaceMesher, TetraError};
 
 /// The surface is fully recovered and its solid mesh passes every independent check, axis
 /// aligned and rotated.
@@ -116,6 +116,71 @@ fn a_schoenhardt_polyhedron_with_a_central_void_is_refused_with_counts_saying_no
         }
         other => panic!("expected the named refusal, got {other}"),
     }
+}
+
+/// The same refusal, read for diagnosis: the mesher lists exactly the constraints the error
+/// counts, each a real surface edge or triangle, and gives every missing constraint one reason,
+/// at least one of them having had no place for a point.
+#[test]
+fn a_refused_surface_lists_what_is_missing_and_why_each_was_given_up() {
+    let mut surface = schoenhardt();
+    surface.add_reversed(&subdivided_box([-0.2, -0.2, 0.3], [0.2, 0.2, 0.7], 1));
+    let mut mesher = SurfaceMesher::new(surface.points.clone(), surface.triangles.clone())
+        .unwrap_or_else(|error| panic!("the surface is well formed: {error}"));
+    let error = mesher
+        .step(usize::MAX, &mut || false)
+        .expect_err("this surface cannot be finished today");
+    let TetraError::SurfaceNotRecovered {
+        missing_edges,
+        missing_faces,
+        ..
+    } = error
+    else {
+        panic!("expected the named refusal, got {error}");
+    };
+    let (edges, faces) = mesher.missing_constraints();
+    assert_eq!(edges.len(), missing_edges, "every counted edge is listed");
+    assert_eq!(
+        faces.len(),
+        missing_faces,
+        "every counted triangle is listed"
+    );
+    let surface_edges: Vec<[u32; 2]> = surface
+        .triangles
+        .iter()
+        .flat_map(|t| [[t[0], t[1]], [t[1], t[2]], [t[2], t[0]]])
+        .collect();
+    for [a, b] in &edges {
+        assert!(
+            surface_edges.contains(&[*a, *b]) || surface_edges.contains(&[*b, *a]),
+            "missing edge {a}-{b} is a surface edge"
+        );
+    }
+    for face in &faces {
+        assert!(
+            surface.triangles.contains(face),
+            "missing triangle {face:?} is a surface triangle"
+        );
+    }
+    // A flat patch is one constraint however many triangles it has, so the reasons count every
+    // missing edge and between one and all of the missing triangles.
+    let report = mesher.report();
+    let reasons = report.gave_up.total();
+    assert!(
+        reasons >= missing_edges + usize::from(missing_faces > 0),
+        "every missing constraint has a reason: {:?}",
+        report.gave_up
+    );
+    assert!(
+        reasons <= missing_edges + missing_faces,
+        "no constraint has two reasons: {:?}",
+        report.gave_up
+    );
+    assert!(
+        report.gave_up.no_place > 0,
+        "a constraint with no room for a point says so: {:?}",
+        report.gave_up
+    );
 }
 
 /// A much flatter copy still has room inside for its point, so it recovers the same way.
