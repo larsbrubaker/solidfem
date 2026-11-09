@@ -1,13 +1,17 @@
-//! Stress recovery after a solve. Integration point values are the raw results; the per-node
-//! display value is a volume-weighted average of von Mises stress evaluated at the node in each
-//! incident element. Averaging the scalar rather than the tensor cannot cancel opposing stresses
-//! across elements, and evaluating at the node rather than copying the nearest integration point
-//! does not understate a peak. [`Recovery`] is the resumable form: a host with no threads runs it
-//! in bounded slices, in element order, so slicing never changes a value.
+//! Recovery after a solve. Integration point values are the raw results; the per-node display
+//! value is a volume-weighted average of von Mises stress evaluated at the node in each incident
+//! element. Averaging the scalar rather than the tensor cannot cancel opposing stresses across
+//! elements, and evaluating at the node rather than copying the nearest integration point does not
+//! understate a peak. [`Recovery`] is the resumable form: a host with no threads runs it in bounded
+//! slices, in element order, so slicing never changes a value. [`nodal_rotations`] gives the local
+//! rotation of a displacement field the same way, for drawing a deformed shape that keeps its
+//! rotations rigid.
 
 use solidfem_mesh::QuadraticTetMesh;
 
-use crate::element::{checked_material, point_geometry, strain_at, stress_at, von_mises};
+use crate::element::{
+    checked_material, point_geometry, rotation_at, strain_at, stress_at, von_mises,
+};
 use crate::error::ModelError;
 use crate::material::MaterialField;
 use crate::quadrature::Quadrature;
@@ -66,6 +70,55 @@ pub struct RecoveredField {
     pub point_stresses: Vec<PointStress>,
     /// Volume-weighted average von Mises stress per mesh node, for display.
     pub nodal_von_mises: Vec<f64>,
+}
+
+/// The local rotation vector (half the curl of the displacement), in radians, at every mesh node
+/// of `displacements`.
+///
+/// Each element contributes the 10-node shape-function gradients evaluated at the node, and a node
+/// shared by several elements takes the average weighted by each element's Jacobian determinant at
+/// that node: on this mesh's straight-edged elements that is six times the element's volume, the
+/// same volume weighting as the nodal von Mises stress. Gradients are discontinuous between
+/// elements, so unlike the displacement itself this is a smoothed value: exact on a rigid
+/// rotation, an average where the rotation varies across the node. `displacements` must hold one
+/// vector per mesh node.
+pub fn nodal_rotations(
+    mesh: &QuadraticTetMesh,
+    displacements: &[[f64; 3]],
+) -> Result<Vec<[f64; 3]>, ModelError> {
+    let node_count = mesh.nodes().len();
+    if displacements.len() != node_count {
+        return Err(ModelError::DisplacementFieldLength {
+            nodes: node_count,
+            values: displacements.len(),
+        });
+    }
+    let mut weighted = vec![[0.0f64; 3]; node_count];
+    let mut weights = vec![0.0f64; node_count];
+    for (tet_index, tet) in mesh.tets().iter().enumerate() {
+        let nodes = tet.map(|n| mesh.nodes()[n as usize]);
+        let u = tet.map(|n| displacements[n as usize]);
+        for node in 0..NODE_COUNT {
+            let geometry = point_geometry(&nodes, NODE_NATURAL[node], node).map_err(|fault| {
+                ModelError::Element {
+                    tet: tet_index as u32,
+                    fault,
+                }
+            })?;
+            let rotation = rotation_at(&geometry, &u);
+            let global = tet[node] as usize;
+            for axis in 0..3 {
+                weighted[global][axis] += geometry.det_j * rotation[axis];
+            }
+            weights[global] += geometry.det_j;
+        }
+    }
+    // Every mesh node belongs to a tetrahedron (`TetMesh::new`), so every weight is positive.
+    Ok(weighted
+        .iter()
+        .zip(&weights)
+        .map(|(sum, weight)| sum.map(|c| c / weight))
+        .collect())
 }
 
 impl Recovery {

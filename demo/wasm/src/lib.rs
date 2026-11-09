@@ -180,7 +180,8 @@ impl Demo {
     }
 
     /// JSON text of the current estimate's numbers: state, iterations, residual, element and node
-    /// counts, min/max stress, max displacement, peak stress outside the clamps, safety factor
+    /// counts, min/max stress, max displacement, max local rotation in radians (`maxRotation`,
+    /// which caps the page's exaggeration), peak stress outside the clamps, safety factor
     /// (`null` before there is stress), `validity` (whether the result is inside what the linear
     /// model can describe: `withinModel`, `exceedsYield`, `excessiveDeflection`, `excessiveTwist`,
     /// and `deflectionLimit`, `twistRadians`, `twistLimitRadians`, each `null` where it does not
@@ -237,7 +238,8 @@ impl Demo {
         };
         format!(
             "{{\"state\":{},\"iterations\":{},\"residual\":{},\"elements\":{elements},\"nodes\":{nodes},\
-             \"minStress\":{},\"maxStress\":{},\"maxDisplacement\":{},\"peakStressOutsideClamps\":{},\
+             \"minStress\":{},\"maxStress\":{},\"maxDisplacement\":{},\"maxRotation\":{},\
+             \"peakStressOutsideClamps\":{},\
              \"safetyFactor\":{safety},\"validity\":{validity},\"failure\":{},{textbook}}}",
             json_string(state_name(study.state())),
             study.iterations(),
@@ -245,6 +247,7 @@ impl Demo {
             json_number(view.min_stress),
             json_number(view.max_stress),
             json_number(view.max_displacement),
+            json_number(view.max_rotation),
             json_number(view.peak_stress_outside_clamps),
             study.failure().map_or("null".to_string(), json_string),
         )
@@ -271,6 +274,11 @@ impl Demo {
     /// Displacement in mm, three per vertex, at the current estimate.
     pub fn displacements(&self) -> Float32Array {
         self.array(|v| &v.displacement)
+    }
+
+    /// The local rotation vector in radians, three per vertex, at the current estimate.
+    pub fn rotations(&self) -> Float32Array {
+        self.array(|v| &v.rotation)
     }
 
     fn array(&self, pick: impl Fn(&view::ViewData) -> &Vec<f32>) -> Float32Array {

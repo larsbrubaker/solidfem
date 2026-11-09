@@ -28,6 +28,7 @@ fn view_bits(study: &DemoStudy) -> Vec<u32> {
     v.von_mises
         .iter()
         .chain(&v.displacement)
+        .chain(&v.rotation)
         .map(|x| x.to_bits())
         .collect()
 }
@@ -214,6 +215,9 @@ fn render_arrays_have_consistent_lengths_and_finite_values_during_and_after_the_
         let vertices = v.positions.len() / 3;
         assert_eq!(v.positions.len() % 3, 0);
         assert_eq!(v.displacement.len(), vertices * 3);
+        assert_eq!(v.rotation.len(), vertices * 3);
+        assert!(v.rotation.iter().all(|x| x.is_finite()));
+        assert!(v.max_rotation.is_finite());
         assert_eq!(v.von_mises.len(), vertices);
         assert_eq!(v.indices.len() % 3, 0);
         assert!(!v.indices.is_empty());
@@ -241,6 +245,52 @@ fn render_arrays_have_consistent_lengths_and_finite_values_during_and_after_the_
     assert!(safety.is_finite() && safety > 0.0);
     // The peak outside the clamps never exceeds the overall maximum.
     assert!(done.peak_stress_outside_clamps <= done.max_stress + 1e-9);
+}
+
+#[test]
+fn a_twisted_bar_reports_the_rotation_the_page_draws() {
+    let request = request_at(
+        Combination {
+            section: SectionKind::Solid,
+            restraint: Restraint::FixedOneEnd,
+            load: LoadKind::Twist,
+        },
+        0,
+        1,
+    );
+    let mut study = DemoStudy::start(request).expect("offered");
+    run_to_done(&mut study, 1000);
+    let rate = study
+        .rows()
+        .iter()
+        .find(|row| row.quantity == "Twist rate")
+        .expect("a solid twist has a textbook twist rate")
+        .fea;
+    let view = study.view();
+    let tip_twist = rate * request.length;
+    // The twist rate is the mid-span one; the clamp changes the bar's twist within about one
+    // section depth of it, which is under 5 % of this offered bar's length, so 5 % covers the
+    // difference between rate times length and the tip's twist. Above that, a surface point
+    // also carries half the section's shear rotation, (r / 2) * rate at radius r, about
+    // 0.5 * (largest half-diagonal / length) of the twist.
+    let largest_radius = 0.5 * request.width.hypot(request.height);
+    let shear_share = 0.5 * largest_radius / request.length;
+    let bound = 1.0 + shear_share + 0.05;
+    assert!(
+        view.max_rotation >= tip_twist.abs() * (1.0 - 0.05)
+            && view.max_rotation <= tip_twist.abs() * bound,
+        "max rotation {} against a tip twist of {tip_twist}",
+        view.max_rotation
+    );
+    // The rotation about the bar's axis dominates the vertex rotations.
+    let largest_x = view
+        .rotation
+        .as_chunks::<3>()
+        .0
+        .iter()
+        .map(|w| w[0].abs() as f64)
+        .fold(0.0f64, f64::max);
+    assert!(largest_x > 0.9 * view.max_rotation);
 }
 
 #[test]

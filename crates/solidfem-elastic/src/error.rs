@@ -53,6 +53,13 @@ pub enum ModelError {
         /// Fixed flags supplied.
         flags: usize,
     },
+    /// A displacement field was supplied that does not have one vector per mesh node.
+    DisplacementFieldLength {
+        /// Nodes in the mesh.
+        nodes: usize,
+        /// Vectors supplied.
+        values: usize,
+    },
     /// The solver failed; no result is reported.
     Solver(PcgError),
     /// The cancel check stopped assembly or recovery.
@@ -103,6 +110,11 @@ impl fmt::Display for ModelError {
             ModelError::RigidBodyData { nodes, flags } => write!(
                 f,
                 "the rigid-body modes need one fixed flag per node: {flags} flags for {nodes} nodes"
+            ),
+            ModelError::DisplacementFieldLength { nodes, values } => write!(
+                f,
+                "a displacement field needs one vector per node: {values} vectors for {nodes} \
+                 nodes"
             ),
             ModelError::Solver(error) => write!(f, "{error}"),
             ModelError::Cancelled => write!(f, "the study was cancelled"),

@@ -32,6 +32,7 @@ interface DemoInstance {
   indices(): Uint32Array;
   vonMises(): Float32Array;
   displacements(): Float32Array;
+  rotations(): Float32Array;
 }
 
 interface WasmModule {
@@ -228,11 +229,12 @@ async function main() {
     const peak = summary.peakStressOutsideClamps ?? 0;
     const maxStress = summary.maxStress ?? 0;
     const high = peak > low ? peak : Math.max(maxStress, low);
-    const scale = exaggerationScale(summary.maxDisplacement ?? 0, choice.length);
+    const scale = exaggerationScale(summary.maxDisplacement ?? 0, choice.length, summary.maxRotation ?? 0);
     viewer.showPart({
       positions: engine.positions(),
       indices: engine.indices(),
       displacements: engine.displacements(),
+      rotations: engine.rotations(),
       vonMises: colored ? engine.vonMises() : new Float32Array(0),
       rampLow: low,
       rampHigh: high,

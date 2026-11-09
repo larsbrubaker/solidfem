@@ -132,8 +132,8 @@ pub fn element_stiffness(
     Ok(())
 }
 
-/// Strain `[xx, yy, zz, 2xy, 2yz, 2zx]` (engineering shears) from nodal displacements.
-pub fn strain_at(geometry: &PointGeometry, u: &[[f64; 3]; NODE_COUNT]) -> [f64; 6] {
+/// The displacement gradient `h[i][j] = du_i/dx_j` at a point, from nodal displacements.
+fn displacement_gradient(geometry: &PointGeometry, u: &[[f64; 3]; NODE_COUNT]) -> [[f64; 3]; 3] {
     let mut h = [[0.0; 3]; 3];
     for (ua, ga) in u.iter().zip(&geometry.gradients) {
         for (ui, row) in ua.iter().zip(h.iter_mut()) {
@@ -142,6 +142,22 @@ pub fn strain_at(geometry: &PointGeometry, u: &[[f64; 3]; NODE_COUNT]) -> [f64; 
             }
         }
     }
+    h
+}
+
+/// The local rotation vector `½ curl u` at a point, from nodal displacements.
+pub(crate) fn rotation_at(geometry: &PointGeometry, u: &[[f64; 3]; NODE_COUNT]) -> [f64; 3] {
+    let h = displacement_gradient(geometry, u);
+    [
+        0.5 * (h[2][1] - h[1][2]),
+        0.5 * (h[0][2] - h[2][0]),
+        0.5 * (h[1][0] - h[0][1]),
+    ]
+}
+
+/// Strain `[xx, yy, zz, 2xy, 2yz, 2zx]` (engineering shears) from nodal displacements.
+pub fn strain_at(geometry: &PointGeometry, u: &[[f64; 3]; NODE_COUNT]) -> [f64; 6] {
+    let h = displacement_gradient(geometry, u);
     [
         h[0][0],
         h[1][1],

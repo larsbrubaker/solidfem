@@ -35,6 +35,7 @@ export interface Summary {
   minStress?: number | null;
   maxStress?: number | null;
   maxDisplacement?: number | null;
+  maxRotation?: number | null;
   peakStressOutsideClamps?: number | null;
   safetyFactor?: number | null;
   validity?: Validity;

@@ -35,9 +35,11 @@ fn view(peak: f64, max_displacement: f64) -> ViewData {
         indices: Vec::new(),
         von_mises: Vec::new(),
         displacement: Vec::new(),
+        rotation: Vec::new(),
         min_stress: 0.0,
         max_stress: peak,
         max_displacement,
+        max_rotation: 0.0,
         peak_stress_outside_clamps: peak,
         safety_factor: None,
     }

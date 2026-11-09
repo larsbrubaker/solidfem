@@ -11,11 +11,15 @@
 //! quadratic elements' edge midpoints carry real stress and displacement, and showing them keeps
 //! the colour field and the bent shape as detailed as what was solved, at a triangle count the
 //! page handles easily. The von Mises array follows the latest finished recovery of the current
-//! estimate (recoveries are themselves sliced); displacement follows every step.
+//! estimate (recoveries are themselves sliced); displacement follows every step, and the local
+//! rotation is computed from it when the page next asks, once per estimate, because a view is
+//! rebuilt for every array the page reads.
+
+use std::cell::RefCell;
 
 use solidfem::elastic::{
-    strain_at, stress_at, Material, ModelError, PcgOptions, RecoveredField, Recovery, StaticStudy,
-    StepOutcome, StudyBuilder, StudyOptions,
+    nodal_rotations, strain_at, stress_at, Material, ModelError, PcgOptions, RecoveredField,
+    Recovery, StaticStudy, StepOutcome, StudyBuilder, StudyOptions,
 };
 use solidfem::mesh::QuadraticTetMesh;
 
@@ -72,6 +76,8 @@ pub struct DemoStudy {
     phase: Phase,
     cancelled: bool,
     displacements: Vec<[f64; 3]>,
+    /// The local rotation of the current estimate, once something has asked for it.
+    rotations: RefCell<Option<Vec<[f64; 3]>>>,
     /// The latest finished stress recovery of the estimate, for the colours and the peak.
     nodal_von_mises: Vec<f64>,
     preview: Option<Recovery>,
@@ -87,6 +93,9 @@ impl DemoStudy {
         let planned = plan_study(&request)?;
         let surface = Surface::of(&planned.mesh);
         let node_count = planned.mesh.nodes().len();
+        // Refused here, by name, so the rotation of a later estimate has no way left to fail.
+        let rotations = nodal_rotations(&planned.mesh, &vec![[0.0; 3]; node_count])
+            .map_err(PlanError::Model)?;
         let builder = StudyBuilder::new(
             planned.model,
             StudyOptions {
@@ -107,6 +116,7 @@ impl DemoStudy {
             phase: Phase::Assembling(Box::new(builder)),
             cancelled: false,
             displacements: vec![[0.0; 3]; node_count],
+            rotations: RefCell::new(Some(rotations)),
             nodal_von_mises: vec![0.0; node_count],
             preview: None,
             rows: Vec::new(),
@@ -196,7 +206,7 @@ impl DemoStudy {
                 Ok(StepOutcome::Converged(progress)) => {
                     self.iterations = progress.iteration;
                     self.residual = progress.relative_residual;
-                    self.displacements = study.displacements();
+                    self.set_displacements(study.displacements());
                     self.update_rows();
                     let recovery = study.begin_recovery();
                     self.phase = Phase::Recovering(study, Box::new(recovery));
@@ -204,7 +214,7 @@ impl DemoStudy {
                 Ok(StepOutcome::Running(progress)) => {
                     self.iterations = progress.iteration;
                     self.residual = progress.relative_residual;
-                    self.displacements = study.displacements();
+                    self.set_displacements(study.displacements());
                     self.update_rows();
                     // One element per iteration of this slice: the live colours refresh without
                     // the preview ever costing more than the solve it illustrates.
@@ -227,6 +237,25 @@ impl DemoStudy {
             other => self.phase = other,
         }
         self.state()
+    }
+
+    /// Replaces the estimate; its rotation is computed again when the page next asks.
+    fn set_displacements(&mut self, displacements: Vec<[f64; 3]>) {
+        self.displacements = displacements;
+        *self.rotations.get_mut() = None;
+    }
+
+    /// The local rotation at each node of the current estimate. The mesh's element geometry was
+    /// accepted by `nodal_rotations` in `start` and the geometry is all that can fail, so the
+    /// zeros (which would draw the plain straight-line motion) are never reached.
+    fn rotations(&self) -> Vec<[f64; 3]> {
+        self.rotations
+            .borrow_mut()
+            .get_or_insert_with(|| {
+                nodal_rotations(&self.mesh, &self.displacements)
+                    .unwrap_or_else(|_| vec![[0.0; 3]; self.displacements.len()])
+            })
+            .clone()
     }
 
     fn fail(&mut self, error: &ModelError) {
@@ -253,7 +282,7 @@ impl DemoStudy {
     }
 
     fn finish(&mut self, field: RecoveredField) {
-        self.displacements = field.displacements;
+        self.set_displacements(field.displacements);
         self.nodal_von_mises = field.nodal_von_mises;
         self.preview = None;
         self.update_rows();
@@ -288,9 +317,11 @@ impl DemoStudy {
 
     /// The arrays and summary for the current estimate.
     pub fn view(&self) -> ViewData {
+        let rotations = self.rotations();
         self.surface.view(
             &self.mesh,
             &self.displacements,
+            &rotations,
             &self.nodal_von_mises,
             &self.clamps,
             self.clamp_zone,

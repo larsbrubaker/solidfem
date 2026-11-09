@@ -1,7 +1,8 @@
 //! The render arrays: the surface as triangles and the per-vertex values the page colours and
 //! displaces it with. Each 6-node boundary face becomes four straight triangles over its corners
 //! and edge midpoints (`engine.rs` says why). The peak stress skips nodes near a clamp, because a
-//! clamp's corners are a stress singularity whose nodal value does not converge.
+//! clamp's corners are a stress singularity whose nodal value does not converge. Every vertex also
+//! carries its local rotation, the rate the page's arc drawing turns it at (`src/animation.ts`).
 
 use solidfem::mesh::QuadraticTetMesh;
 
@@ -25,9 +26,13 @@ pub struct ViewData {
     pub von_mises: Vec<f32>,
     /// Three per vertex: displacement at this estimate in mm.
     pub displacement: Vec<f32>,
+    /// Three per vertex: the local rotation vector (half the curl of the displacement) in radians.
+    pub rotation: Vec<f32>,
     pub min_stress: f64,
     pub max_stress: f64,
     pub max_displacement: f64,
+    /// The largest local rotation over the surface in radians; the page's exaggeration cap.
+    pub max_rotation: f64,
     /// The largest von Mises stress outside the clamp zones.
     pub peak_stress_outside_clamps: f64,
     /// Material yield over that peak; `None` before there is any stress.
@@ -65,10 +70,12 @@ impl Surface {
     }
 
     /// The arrays at the current estimate.
+    #[allow(clippy::too_many_arguments)]
     pub fn view(
         &self,
         mesh: &QuadraticTetMesh,
         displacements: &[[f64; 3]],
+        rotations: &[[f64; 3]],
         nodal_von_mises: &[f64],
         clamps: &[f64],
         clamp_zone: f64,
@@ -77,21 +84,26 @@ impl Surface {
         let count = self.vertex_nodes.len();
         let mut positions = Vec::with_capacity(count * 3);
         let mut displacement = Vec::with_capacity(count * 3);
+        let mut rotation = Vec::with_capacity(count * 3);
         let mut von_mises = Vec::with_capacity(count);
         let mut min_stress = f64::INFINITY;
         let mut max_stress = 0.0f64;
         let mut max_displacement = 0.0f64;
+        let mut max_rotation = 0.0f64;
         let mut peak = 0.0f64;
         for node in &self.vertex_nodes {
             let n = *node as usize;
             let p = mesh.nodes()[n];
             let u = displacements[n];
+            let w = rotations[n];
             let s = nodal_von_mises[n];
             positions.extend_from_slice(&[p[0] as f32, p[1] as f32, p[2] as f32]);
             displacement.extend_from_slice(&[u[0] as f32, u[1] as f32, u[2] as f32]);
+            rotation.extend_from_slice(&[w[0] as f32, w[1] as f32, w[2] as f32]);
             von_mises.push(s as f32);
             let u_len = (u[0] * u[0] + u[1] * u[1] + u[2] * u[2]).sqrt();
             max_displacement = max_displacement.max(u_len);
+            max_rotation = max_rotation.max((w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt());
             min_stress = min_stress.min(s);
             max_stress = max_stress.max(s);
             if clamps.iter().all(|x| (p[0] - x).abs() > clamp_zone) {
@@ -104,6 +116,7 @@ impl Surface {
             indices: self.indices.clone(),
             von_mises,
             displacement,
+            rotation,
             min_stress: if min_stress.is_finite() {
                 min_stress
             } else {
@@ -111,6 +124,7 @@ impl Surface {
             },
             max_stress,
             max_displacement,
+            max_rotation,
             peak_stress_outside_clamps: peak,
             safety_factor,
         }

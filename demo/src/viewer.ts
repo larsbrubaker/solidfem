@@ -5,9 +5,10 @@
 // the page calls `showPart` when it has something new to draw. Where the camera goes is decided in
 // src/framing.ts, which this file feeds with the container's size and the camera's pose.
 //
-// Vertex positions change every frame, so they are computed on the CPU and normals come from
-// flatShading's screen-space derivatives, with no normal recomputation. The mesh edges share the
-// part's position buffer, so they follow the animation at no cost.
+// Vertex positions change every frame, so they are computed on the CPU (each vertex along its arc,
+// src/animation.ts) and normals come from flatShading's screen-space derivatives, with no normal
+// recomputation. The mesh edges share the part's position buffer, so they follow the animation at
+// no cost, and the push arrow takes its offset from that same buffer.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
@@ -21,6 +22,8 @@ export interface PartView {
   positions: Float32Array;
   indices: Uint32Array;
   displacements: Float32Array;
+  /** The local rotation at each vertex in radians, three per vertex: the rate of each vertex's arc. */
+  rotations: Float32Array;
   /** Empty until the first stress estimate exists; the part is then drawn neutral grey. */
   vonMises: Float32Array;
   rampLow: number;
@@ -182,14 +185,15 @@ export class Viewer {
     const view = this.current;
     if (!view || !this.mesh) return;
     const phase = this.paused ? 1 : animationPhase(performance.now() - this.start);
-    displacePositions(view.positions, view.displacements, view.scale, phase, this.drawn);
+    displacePositions(view.positions, view.displacements, view.scale, phase, this.drawn, view.rotations);
     this.mesh.geometry.getAttribute('position').needsUpdate = true;
     if (this.loadMarker && this.loadVertex >= 0) {
+      // The vertex's drawn offset, so the arrow rides the same arc as the surface it points at.
       const i = this.loadVertex * 3;
       this.loadMarker.position.set(
-        view.displacements[i] * view.scale * phase,
-        view.displacements[i + 1] * view.scale * phase,
-        view.displacements[i + 2] * view.scale * phase,
+        this.drawn[i] - view.positions[i],
+        this.drawn[i + 1] - view.positions[i + 1],
+        this.drawn[i + 2] - view.positions[i + 2],
       );
     }
   }

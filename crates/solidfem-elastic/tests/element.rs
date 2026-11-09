@@ -6,3 +6,5 @@ mod patch;
 mod quadrature;
 #[path = "element/rigid_body.rs"]
 mod rigid_body;
+#[path = "element/rotation.rs"]
+mod rotation;
