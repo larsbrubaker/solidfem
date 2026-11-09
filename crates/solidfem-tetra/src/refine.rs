@@ -1,6 +1,7 @@
 //! The public face of refinement: [`Refiner`] takes a finished [`SolidMesh`] and through resumable
-//! steps puts points inside it, by through-thickness layers across thin walls (`layers.rs`) and
-//! the removal of every edge still joining the walls' opposite skins (`skins.rs`), by a caller's
+//! steps puts points inside it, by through-thickness layers across thin walls (`layers.rs`, and
+//! `wall_fill.rs` for walls whose faces have no vertices inside them) and the removal of every
+//! edge still joining the walls' opposite skins (`skins.rs`), by a caller's
 //! size function, then improves the worst tetrahedra (`quality.rs`). Points go in through
 //! `interior.rs`, the only way a vertex is created, and only strictly inside the solid.
 //!
@@ -11,10 +12,13 @@
 //! **Layers stay layers.** A point dividing a wall is smoothed only across that wall, in the plane
 //! the wall's own normal defines, so a layer stays planar however the plane of the ray leans.
 //!
-//! **No element joins opposite skins.** The layer stage ends by splitting every interior edge
-//! between opposite skins of a thin wall, and from then on no later stage can restore one: size
-//! points add edges only to themselves and a flip refuses such an edge. So every tetrahedron has
-//! no vertex pair on opposite skins, and any column across a wall crosses at least two of them.
+//! **No interior edge joins opposite skins.** The layer stage ends by removing every interior edge
+//! between opposite skins of a thin wall (`skins.rs`, split where a point can be starred, flipped
+//! away where it cannot), and from then on no later stage can restore one: size points add edges
+//! only to themselves and a flip refuses such an edge. So a column across a wall away from its
+//! rims crosses at least two tetrahedra. An edge no split or flip can remove ends the run in
+//! [`TetraError::ThroughEdgeNotSplit`]. The surface is fixed, so a surface edge at a wall's rim
+//! cannot be cut: a tetrahedron bridging the wall has to touch the rim.
 //!
 //! **Size-driven insertion.** A tetrahedron whose longest interior edge exceeds
 //! [`SIZE_RATIO`]` * size(centroid)` gets a point: its circumcentre where a walk from it reaches
@@ -30,16 +34,18 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::core::{Core, DEAD, FACE, GHOST};
+use crate::core::{Core, DEAD, GHOST};
 use crate::error::TetraError;
 use crate::flips::{edge_key, face_key, FlipCounts, Flipper};
 use crate::layers::{min_layer_thickness, Separation, SurfaceRays};
 use crate::quality::{
     cross, histogram, length, min_dihedral_degrees, normalized, subtract, DihedralHistogram,
 };
-use crate::skins::OppositeSkins;
+use crate::refine_mesh::{boundary_faces, centroid_of, checked_size, circumcentre_of, extract};
+use crate::skins::{incident_faces, OppositeSkins};
 use crate::surface::SolidMesh;
-use crate::triangulator::{StepStatus, HULL};
+use crate::triangulator::StepStatus;
+use crate::wall_fill::{wall_seeds, WallColumn};
 
 /// The longest edge a tetrahedron may have, as a multiple of the size function at its centroid.
 /// Bisecting an edge longer than this leaves two pieces of at least `sqrt(2)/2` of the size, so
@@ -102,15 +108,20 @@ pub struct RefineProgress {
 /// What refinement did, with the quality before and after.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RefineReport {
-    /// Points added inside thin walls.
+    /// Points added inside thin walls, from surface vertices and from wall faces too wide for
+    /// their vertices to reach the middle of ([`Self::wall_fill_points`]).
     pub layer_points: usize,
+    /// The layer points that came from the interior of a wall's large faces (`wall_fill.rs`).
+    pub wall_fill_points: usize,
     /// Points a thin wall proposed that the separation rule or exact placement dropped.
     pub layer_points_dropped: usize,
     /// Surface vertices that found a thin wall.
     pub thin_wall_vertices: usize,
     /// Interior edges joining opposite skins of a thin wall that were split.
     pub through_edges_split: usize,
-    /// Such edges the exact tests refused at every offset, each left in place and counted.
+    /// Such edges left when a whole pass could split no more of them. A success always has none,
+    /// because the run then ends in [`TetraError::ThroughEdgeNotSplit`]; read this from the
+    /// report of the failed run.
     pub through_edges_refused: usize,
     /// Surface vertices across a wall too thin to divide above rounding, so no points were added.
     pub walls_too_thin_for_rounding: usize,
@@ -138,12 +149,17 @@ struct LayerRun {
     edge_mean: Vec<f64>,
     vertices: Vec<u32>,
     cursor: usize,
+    /// The surface triangles and the one the wall fill is on, after the vertices are done.
+    boundary: Vec<[u32; 3]>,
+    fill_cursor: usize,
     magnitude: f64,
 }
 
 struct SplitRun {
     edges: Vec<(u32, u32)>,
     cursor: usize,
+    /// Edges actually cut in this pass, so a pass that cuts none knows the rest are stuck.
+    split_this_pass: usize,
 }
 
 struct SizeRun {
@@ -204,6 +220,7 @@ impl Refiner {
             let skins = OppositeSkins::new(
                 run.normals.clone(),
                 run.edge_mean.clone(),
+                incident_faces(&solid.points, &boundary, solid.points.len()),
                 options.thin_wall_ratio,
             );
             (Some(run), skins)
@@ -290,12 +307,7 @@ impl Refiner {
             return Ok(());
         };
         let Some(&vertex) = run.vertices.get(run.cursor) else {
-            self.layers = None;
-            self.splits = Some(SplitRun {
-                edges: self.skins.through_edges(&self.flipper),
-                cursor: 0,
-            });
-            return Ok(());
+            return self.advance_fill();
         };
         run.cursor += 1;
         let normal = run.normals[vertex as usize];
@@ -310,12 +322,42 @@ impl Refiner {
             return Ok(());
         }
         self.report.thin_wall_vertices += 1;
+        let column = WallColumn {
+            origin,
+            direction,
+            distance: hit.distance,
+            far_normal: hit.normal,
+            across: 0.5 * edge,
+        };
+        let placed = self.place_layer_points(vertex, None, column)?;
+        self.report.layer_points += placed;
+        Ok(())
+    }
+
+    /// Places the layer points of one column of a wall, walking from a tetrahedron around
+    /// `vertex`, on `face` when there is one. Returns how many were placed; a wall too thin to
+    /// divide above rounding is counted and adds none.
+    fn place_layer_points(
+        &mut self,
+        vertex: u32,
+        face: Option<[u32; 3]>,
+        column: WallColumn,
+    ) -> Result<usize, TetraError> {
+        let WallColumn {
+            origin,
+            direction,
+            distance,
+            far_normal,
+            across,
+        } = column;
         let count = self.options.layers_through_walls;
-        let layer = hit.distance / f64::from(count);
-        if layer < min_layer_thickness(run.magnitude) {
+        let layer = distance / f64::from(count);
+        let magnitude = self.layers.as_ref().map_or(0.0, |run| run.magnitude);
+        if layer < min_layer_thickness(magnitude) {
             self.report.walls_too_thin_for_rounding += 1;
-            return Ok(());
+            return Ok(0);
         }
+        let mut placed = 0;
         for k in 1..count {
             self.budget_check()?;
             let along = layer * f64::from(k);
@@ -325,36 +367,89 @@ impl Refiner {
                 origin[2] + direction[2] * along,
             ];
             let Some(run) = self.layers.as_mut() else {
-                return Ok(());
+                return Ok(placed);
             };
             if !run
                 .separation
-                .accept(candidate, direction, 0.5 * edge, 0.5 * layer)
+                .accept(candidate, direction, across, 0.5 * layer)
             {
                 self.report.layer_points_dropped += 1;
                 continue;
             }
-            if self.place_from_vertex(vertex, candidate)? {
+            if self.place_from_vertex(vertex, face, candidate)? {
                 // Index fits u32: the count is checked against the point limit on insertion.
                 let index = self.flipper.core.points.len() as u32 - 1;
-                self.axes.insert(index, hit.normal);
-                self.report.layer_points += 1;
+                self.axes.insert(index, far_normal);
+                placed += 1;
                 self.added += 1;
             } else {
                 self.report.layer_points_dropped += 1;
             }
         }
+        Ok(placed)
+    }
+
+    /// Proposes the wall points of the next surface triangle (`wall_fill.rs`), ending the fill and
+    /// starting the through-edge splits when none are left.
+    fn advance_fill(&mut self) -> Result<(), TetraError> {
+        let Some(run) = self.layers.as_mut() else {
+            return Ok(());
+        };
+        let Some(&face) = run.boundary.get(run.fill_cursor) else {
+            self.layers = None;
+            self.begin_split_pass();
+            return Ok(());
+        };
+        run.fill_cursor += 1;
+        let seeds = wall_seeds(
+            &run.rays,
+            &self.flipper.core.points,
+            face,
+            self.options.thin_wall_ratio,
+        );
+        for seed in seeds {
+            let placed = self.place_layer_points(face[0], Some(face), seed)?;
+            self.report.wall_fill_points += placed;
+            self.report.layer_points += placed;
+        }
         Ok(())
     }
 
-    /// Splits the next edge joining opposite skins, ending the layer stage when none are left.
+    fn begin_split_pass(&mut self) {
+        self.splits = Some(SplitRun {
+            edges: self.skins.through_edges(&self.flipper),
+            cursor: 0,
+            split_this_pass: 0,
+        });
+    }
+
+    /// Splits the next edge joining opposite skins. At the end of a pass, the edges still there are
+    /// tried again while any split was made, the mesh around them having changed; an edge that is
+    /// left when a whole pass splits nothing is the named error.
     fn advance_split(&mut self) -> Result<(), TetraError> {
         let Some(run) = self.splits.as_mut() else {
             return Ok(());
         };
         let Some(&edge) = run.edges.get(run.cursor) else {
-            self.splits = None;
-            self.phase = RefinePhase::Sizing;
+            let split_this_pass = run.split_this_pass;
+            let remaining = self.skins.through_edges(&self.flipper);
+            let Some(&first) = remaining.first() else {
+                self.splits = None;
+                self.phase = RefinePhase::Sizing;
+                return Ok(());
+            };
+            if split_this_pass == 0 {
+                self.report.through_edges_refused = remaining.len();
+                return Err(TetraError::ThroughEdgeNotSplit {
+                    edge: [first.0, first.1],
+                    remaining: remaining.len(),
+                });
+            }
+            self.splits = Some(SplitRun {
+                edges: remaining,
+                cursor: 0,
+                split_this_pass: 0,
+            });
             return Ok(());
         };
         run.cursor += 1;
@@ -369,19 +464,34 @@ impl Refiner {
         }
         if outcome.cut {
             self.report.through_edges_split += 1;
-        } else {
-            self.report.through_edges_refused += 1;
+            if let Some(run) = self.splits.as_mut() {
+                run.split_this_pass += 1;
+            }
         }
         Ok(())
     }
 
-    /// Inserts `candidate` starting the walk at a real tetrahedron around `vertex`.
-    fn place_from_vertex(&mut self, vertex: u32, candidate: [f64; 3]) -> Result<bool, TetraError> {
+    /// Inserts `candidate` starting the walk at a real tetrahedron around `vertex`, one holding the
+    /// rest of `face` when one is given, so the walk does not leave a curved wall to get there.
+    fn place_from_vertex(
+        &mut self,
+        vertex: u32,
+        face: Option<[u32; 3]>,
+        candidate: [f64; 3],
+    ) -> Result<bool, TetraError> {
         let around = self.flipper.tets_around(vertex);
+        let real = |t: &u32| !self.flipper.core.tets[*t as usize].contains(&GHOST);
+        let on_face = |t: &u32| {
+            face.is_some_and(|f| {
+                let tet = self.flipper.core.tets[*t as usize];
+                f.iter().all(|v| tet.contains(v))
+            })
+        };
         let Some(start) = around
             .iter()
             .copied()
-            .find(|&t| !self.flipper.core.tets[t as usize].contains(&GHOST))
+            .find(|t| real(t) && on_face(t))
+            .or_else(|| around.iter().copied().find(real))
         else {
             return Ok(false);
         };
@@ -590,68 +700,6 @@ impl Refiner {
     }
 }
 
-fn checked_size(size: &SizeFn, position: [f64; 3]) -> Result<f64, TetraError> {
-    let value = size(position);
-    if value.is_finite() && value > 0.0 {
-        Ok(value)
-    } else {
-        Err(TetraError::InvalidSizeFunction { position, value })
-    }
-}
-
-fn centroid_of(points: &[[f64; 3]], tet: &[u32; 4]) -> [f64; 3] {
-    let mut sum = [0.0; 3];
-    for &v in tet {
-        let p = points[v as usize];
-        for k in 0..3 {
-            sum[k] += p[k];
-        }
-    }
-    [sum[0] / 4.0, sum[1] / 4.0, sum[2] / 4.0]
-}
-
-/// The tetrahedron's circumcentre, or `None` when it is too flat for the formula to be finite.
-fn circumcentre_of(points: &[[f64; 3]], tet: &[u32; 4]) -> Option<[f64; 3]> {
-    let [a, b, c, d] = tet.map(|v| points[v as usize]);
-    let (u, v, w) = (subtract(b, a), subtract(c, a), subtract(d, a));
-    let denominator = 2.0 * crate::quality::dot(u, cross(v, w));
-    if denominator == 0.0 {
-        return None;
-    }
-    let (lu, lv, lw) = (
-        crate::quality::dot(u, u),
-        crate::quality::dot(v, v),
-        crate::quality::dot(w, w),
-    );
-    let (vw, wu, uv) = (cross(v, w), cross(w, u), cross(u, v));
-    Some([
-        a[0] + (lu * vw[0] + lv * wu[0] + lw * uv[0]) / denominator,
-        a[1] + (lu * vw[1] + lv * wu[1] + lw * uv[1]) / denominator,
-        a[2] + (lu * vw[2] + lv * wu[2] + lw * uv[2]) / denominator,
-    ])
-}
-
-/// Each boundary face of the solid, wound counterclockwise from outside.
-fn boundary_faces(solid: &SolidMesh) -> Vec<[u32; 3]> {
-    let mut faces = Vec::new();
-    for (t, tet) in solid.tets.iter().enumerate() {
-        // The output tet is right-handed; the internal tet swaps its first two vertices, so
-        // FACE lists faces with the opposite vertex on their positive (inner) side.
-        let internal = [tet[1], tet[0], tet[2], tet[3]];
-        for (slot, neighbor) in solid.neighbors[t].iter().enumerate() {
-            if *neighbor != HULL {
-                continue;
-            }
-            let i = [1, 0, 2, 3][slot];
-            let [p, q, r] = FACE[i].map(|position| internal[position]);
-            // `orient` is positive when the fourth point is below the plane: the opposite
-            // vertex is on that side, so `p q r` is counterclockwise from outside already.
-            faces.push([p, q, r]);
-        }
-    }
-    faces
-}
-
 /// Prepares the layer stage: the ray tree, the separation grid and each surface vertex's normal
 /// and mean incident edge length.
 fn layer_run(points: &[[f64; 3]], boundary: &[[u32; 3]], fixed: &[bool]) -> LayerRun {
@@ -705,41 +753,8 @@ fn layer_run(points: &[[f64; 3]], boundary: &[[u32; 3]], fixed: &[bool]) -> Laye
         edge_mean,
         vertices,
         cursor: 0,
+        boundary: boundary.to_vec(),
+        fill_cursor: 0,
         magnitude,
-    }
-}
-
-/// The current mesh, real tetrahedra only, in the public orientation and order.
-fn extract(flipper: &Flipper) -> SolidMesh {
-    let core = &flipper.core;
-    let is_real = |slot: usize| core.tets[slot].iter().all(|&v| v != GHOST && v != DEAD);
-    let mut output_index = vec![HULL; core.tets.len()];
-    let mut count = 0u32;
-    for (slot, index) in output_index.iter_mut().enumerate() {
-        if is_real(slot) {
-            *index = count;
-            count += 1;
-        }
-    }
-    let mut tets = Vec::with_capacity(count as usize);
-    let mut neighbors = Vec::with_capacity(count as usize);
-    for slot in 0..core.tets.len() {
-        if !is_real(slot) {
-            continue;
-        }
-        let tet = core.tets[slot];
-        let adjacent = core.neighbors[slot];
-        tets.push([tet[1], tet[0], tet[2], tet[3]]);
-        neighbors.push([
-            output_index[adjacent[1] as usize],
-            output_index[adjacent[0] as usize],
-            output_index[adjacent[2] as usize],
-            output_index[adjacent[3] as usize],
-        ]);
-    }
-    SolidMesh {
-        points: core.points.clone(),
-        tets,
-        neighbors,
     }
 }

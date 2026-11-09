@@ -282,6 +282,15 @@ fn run_gate(
         report.after.mean_degrees,
     );
 
+    // A refused through edge means an element can span the wall where a split was meant to remove
+    // it, which the verdict below cannot see from columns it did not sample.
+    if report.through_edges_refused != 0 {
+        return fail(&format!(
+            "{} through edges were refused; an element may span the wall",
+            report.through_edges_refused
+        ));
+    }
+
     // The mesher's contracts, checked on the arrays alone.
     if let Err(message) = check_contracts(&refined, &surface_points, width) {
         return fail(&format!("mesher contract broken: {message}"));

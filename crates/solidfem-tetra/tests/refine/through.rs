@@ -11,7 +11,7 @@ use crate::support::{
 
 /// The four cell corners moved within their cell so the top and bottom triangulations differ
 /// everywhere but the rim, which must match to close.
-fn unaligned_plate(length: f64, width: f64, thick: f64, cells: usize) -> Surface {
+pub fn unaligned_plate(length: f64, width: f64, thick: f64, cells: usize) -> Surface {
     let mut s = Surface::default();
     let at = |i: usize, j: usize, top: bool| {
         let h = length / cells as f64;

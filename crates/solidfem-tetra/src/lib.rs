@@ -17,8 +17,12 @@
 //! [`Refiner`] takes that finished solid and adds points strictly inside it: layers through thin
 //! walls, points driven by a caller's size function, and a pass that improves the worst
 //! tetrahedra, leaving the surface exactly as it was (`refine.rs`, `layers.rs`, `skins.rs`,
-//! `interior.rs`, `quality.rs`). Requesting layers also guarantees that no tetrahedron joins the
-//! two skins of a thin wall.
+//! `interior.rs`, `quality.rs`). Requesting layers also guarantees that no interior edge joins the
+//! two skins of a thin wall, recognised from the vertex normals or, where the skins are large
+//! faces with vertices only at their rims, from their faces; such an edge that cannot be split or
+//! flipped away ends the run in [`TetraError::ThroughEdgeNotSplit`]. The surface stays fixed, so a
+//! tetrahedron at a wall's rim can still bridge the wall through a surface edge there; a wall face
+//! too wide for vertex rays to reach is also filled with points through its middle (`wall_fill.rs`).
 //!
 //! The rules that span its files:
 //! - **Exact decisions.** Every geometric decision is an exact predicate (`predicates.rs`), so a
@@ -33,7 +37,9 @@
 //!   a decision about the caller's surface, so a repeated point is
 //!   [`TetraError::DuplicatePoint`] rather than a silent merge.
 //!
-//! Layout: `refine.rs` is the refinement interface, `layers.rs` the through-wall points, `skins.rs`
+//! Layout: `refine.rs` is the refinement interface, `refine_mesh.rs` reads a solid in and writes
+//! the refined one out, `layers.rs` the through-wall points from
+//! surface vertices, `wall_fill.rs` those from the middle of large wall faces, `skins.rs`
 //! the opposite skins of a wall and the splitting of the edges joining them, `interior.rs` the
 //! insertion, `quality.rs` the improvement, `surface.rs` is the surface-recovery interface and
 //! classifies the solid, `patches.rs`
@@ -54,10 +60,12 @@ mod predicates;
 mod quality;
 mod recover;
 mod refine;
+mod refine_mesh;
 mod skins;
 mod steiner;
 mod surface;
 mod triangulator;
+mod wall_fill;
 
 pub use error::TetraError;
 pub use quality::DihedralHistogram;

@@ -67,6 +67,10 @@ pub enum TetraError {
     InvalidSizeFunction { position: [f64; 3], value: f64 },
     /// The refined mesh was requested before refinement finished.
     RefinementNotFinished,
+    /// `remaining` interior edges still join opposite skins of a thin wall after every legal split
+    /// was tried, `edge` the first of them: an element joining the skins could not be removed
+    /// without changing the surface. Refine the surface there, or ask for no layers.
+    ThroughEdgeNotSplit { edge: [u32; 2], remaining: usize },
     /// Point location did not reach a tetrahedron: a broken invariant, not a property of the
     /// input.
     LocationFailed { point: u32 },
@@ -178,6 +182,12 @@ impl fmt::Display for TetraError {
                 f,
                 "the size function returned {value} at {position:?}; it must be a positive \
                  finite length everywhere"
+            ),
+            Self::ThroughEdgeNotSplit { edge, remaining } => write!(
+                f,
+                "{remaining} interior edges joining opposite skins of a thin wall could not be \
+                 split (first edge {edge:?}), so an element would still join the skins; refine \
+                 the surface there, or ask for no layers"
             ),
             Self::RefinementNotFinished => {
                 write!(

@@ -257,6 +257,34 @@ impl Flipper {
         Ok(true)
     }
 
+    /// Removes a through-wall edge by retriangulating its ring, for an edge whose ring a point on
+    /// the edge cannot be starred from (a flat ring tetrahedron holding an interior vertex in its
+    /// plane). No new edge may join opposite skins, so the removal is real. Returns whether the
+    /// edge is gone; `skins.rs` decides what that means for the wall.
+    pub(crate) fn remove_through_edge(
+        &mut self,
+        p: u32,
+        q: u32,
+        skins: &OppositeSkins,
+    ) -> Result<bool, TetraError> {
+        let Some((ring, tets)) = self.ring_public(p, q) else {
+            return Ok(false);
+        };
+        if ring.len() < 3 || ring.len() > MAX_QUALITY_RING || ring.contains(&GHOST) {
+            return Ok(false);
+        }
+        let Some((_, new)) = self.best_ring(p, q, &ring, skins) else {
+            return Ok(false);
+        };
+        self.apply(&tets, &new)?;
+        match ring.len() {
+            3 => self.counts.three_two += 1,
+            4 => self.counts.four_four += 1,
+            _ => self.counts.larger += 1,
+        }
+        Ok(true)
+    }
+
     /// The triangulation of the ring with the largest worst tetrahedron, or `None` when no legal
     /// one exists.
     fn best_ring(

@@ -20,3 +20,5 @@ mod sizing;
 mod support;
 #[path = "refine/through.rs"]
 mod through;
+#[path = "refine/wall_skins.rs"]
+mod wall_skins;

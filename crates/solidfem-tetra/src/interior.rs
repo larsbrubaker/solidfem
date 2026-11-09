@@ -26,22 +26,25 @@ const MAX_CAVITY: usize = 512;
 
 /// How far off the requested point an edge-ring split may land before it gives up: the exact
 /// tests can refuse a point rounded just outside a tetrahedron that is nearly flat, and a point
-/// a little along the edge is on the edge just the same.
+/// a little along the edge is on the edge just the same. A flat tetrahedron in the ring itself is
+/// dealt with by growing the cavity across it (`visible_cavity`); sliding along the edge cannot
+/// help, because the point stays in that tetrahedron's plane.
 const SPLIT_OFFSETS: [f64; 5] = [1.0, 0.875, 1.125, 0.75, 1.25];
 
 impl Flipper {
     /// Splits edge `(p, q)` at `fraction` of its length from `p` by replacing the ring of
-    /// tetrahedra around it, so nothing away from the edge changes. Only an edge with no ghost
-    /// in its ring can be split, so the new point is strictly inside the solid; every new
-    /// tetrahedron is checked exactly positive first. Returns the new vertex, or `None` when the
-    /// ring refuses every offset of the point.
+    /// tetrahedra around it, grown across any face the new point cannot see strictly, so nothing
+    /// away from the edge changes but what its flat ring tetrahedra force. Only an edge with no
+    /// ghost in its ring can be split, so the new point is strictly inside the solid; every new
+    /// tetrahedron is exactly positive because every outer face is seen strictly. Returns the new
+    /// vertex, or `None` when the ring refuses every offset of the point.
     pub(crate) fn split_edge(
         &mut self,
         p: u32,
         q: u32,
         fraction: f64,
     ) -> Result<Option<u32>, TetraError> {
-        let Some((ring, cavity)) = self.ring_public(p, q) else {
+        let Some((ring, tets)) = self.ring_public(p, q) else {
             return Ok(None);
         };
         if ring.contains(&GHOST) {
@@ -58,9 +61,12 @@ impl Flipper {
                 from[1] + (to[1] - from[1]) * t,
                 from[2] + (to[2] - from[2]) * t,
             ];
-            if point == from || point == to || self.first_unseen(&cavity, &point).is_some() {
+            if point == from || point == to {
                 continue;
             }
+            let Some(cavity) = self.visible_cavity(&tets, &point) else {
+                continue;
+            };
             self.add_steiner(&cavity, point)?;
             // The vertex count stays below `u32::MAX`, as the input is capped far below it.
             return Ok(Some(self.core.points.len() as u32 - 1));
@@ -175,6 +181,54 @@ impl Flipper {
             cavity = self.connected_to_seeds(&cavity, seeds);
         }
         Some(cavity)
+    }
+
+    /// `seeds` grown across every outer face `point` does not see strictly, until it sees them
+    /// all. `None` when that would cross the surface or leave an interior vertex with no
+    /// tetrahedra. This is what lets a flat tetrahedron in a split edge's ring be dealt with: the
+    /// point lies in its plane and can never see past it, so it and whatever lies across it become
+    /// part of the cavity. The star of the result is exact because every outer face is seen
+    /// strictly, and the point is inside it because a closed surface seen from one side all around
+    /// has the viewer inside.
+    fn visible_cavity(&self, seeds: &[u32], point: &[f64; 3]) -> Option<Vec<u32>> {
+        let mut cavity = seeds.to_vec();
+        loop {
+            let unseen = cavity.iter().copied().find_map(|t| {
+                let tet = self.core.tets[t as usize];
+                FACE.iter().enumerate().find_map(|(i, positions)| {
+                    let n = self.core.neighbors[t as usize][i];
+                    if cavity.contains(&n) {
+                        return None;
+                    }
+                    let [a, b, c] = positions.map(|p| &self.core.points[tet[p] as usize]);
+                    (orient(a, b, c, point) <= 0.0).then_some(n)
+                })
+            });
+            match unseen {
+                None => break,
+                Some(n) if self.is_ghost(n) || cavity.len() >= MAX_CAVITY => return None,
+                Some(n) => cavity.push(n),
+            }
+        }
+        self.keeps_every_vertex(&cavity).then_some(cavity)
+    }
+
+    /// Whether every vertex of the cavity's tetrahedra is on one of its outer faces, so starring
+    /// the cavity loses none of them.
+    fn keeps_every_vertex(&self, cavity: &[u32]) -> bool {
+        let mut on_boundary: Vec<u32> = Vec::new();
+        for &t in cavity {
+            let tet = self.core.tets[t as usize];
+            for (i, positions) in FACE.iter().enumerate() {
+                if !cavity.contains(&self.core.neighbors[t as usize][i]) {
+                    on_boundary.extend(positions.map(|p| tet[p]));
+                }
+            }
+        }
+        cavity
+            .iter()
+            .flat_map(|&t| self.core.tets[t as usize])
+            .all(|v| on_boundary.contains(&v))
     }
 
     /// The first cavity tetrahedron with an outer face `point` does not see strictly.

@@ -92,6 +92,26 @@ impl SurfaceRays {
         direction: [f64; 3],
         vertex: u32,
     ) -> Option<Hit> {
+        self.nearest_where(origin, direction, |t| t.vertices.contains(&vertex))
+    }
+
+    /// The nearest triangle crossed from `origin`, a point on triangle `face`, along unit
+    /// `direction`, ignoring `face` itself.
+    pub(crate) fn nearest_off_face(
+        &self,
+        origin: [f64; 3],
+        direction: [f64; 3],
+        face: [u32; 3],
+    ) -> Option<Hit> {
+        self.nearest_where(origin, direction, |t| t.vertices == face)
+    }
+
+    fn nearest_where(
+        &self,
+        origin: [f64; 3],
+        direction: [f64; 3],
+        skip: impl Fn(&Triangle) -> bool,
+    ) -> Option<Hit> {
         let mut best: Option<Hit> = None;
         let mut stack = vec![0usize];
         while let Some(node_index) = stack.pop() {
@@ -107,7 +127,7 @@ impl SurfaceRays {
             }
             for triangle in &self.triangles[node.first as usize..(node.first + node.count) as usize]
             {
-                if triangle.vertices.contains(&vertex) {
+                if skip(triangle) {
                     continue;
                 }
                 let Some(hit) = ray_triangle(triangle.corners, origin, direction) else {
