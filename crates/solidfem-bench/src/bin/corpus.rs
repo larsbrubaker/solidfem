@@ -6,11 +6,13 @@
 //! untrusted file costs only that file's row. Each input gets a record for the mesh; a part whose
 //! own reading says it is a closed, consistently wound solid (`corpus::measure::sample_exclusion`)
 //! also gets one for the remesh and, when the remesh produced a surface, one for the volume mesh
-//! of that surface (`corpus/volume_trial.rs`). A part left out is counted as `input:<reason>`,
+//! of that surface (`corpus/volume_trial.rs`), and when that reached 10-node elements, one for a
+//! linear static bending solve of the mesh (`corpus/solve_trial.rs`). A part left out is counted as `input:<reason>`,
 //! never as a remesher or mesher failure. `batch` prints the records as tables and summaries, the
-//! remesh and volume outcomes counted by name. A child writes and flushes its earlier records before starting the
-//! volume stage, so a child that times out or crashes there still has them, and its volume record
-//! is written by the parent as `child:timeout` or `child:crashed`. `solidfem-corpus diagnose
+//! remesh, volume and solve outcomes counted by name. A child writes and flushes each record as
+//! soon as it is known, so a child that times out or crashes in the volume or solve stage still
+//! has its earlier ones, and the parent writes that stage's record as `child:timeout` or
+//! `child:crashed`; the timeout must cover remesh, volume (60 s cap) and solve (120 s cap). `solidfem-corpus diagnose
 //! <file-or-synthetic-name> <scale,...> <cap-seconds>` remeshes one part at each multiple of its
 //! corpus target edge length and prints, a key=value line per multiple, what surface recovery
 //! made of it and where anything it left missing sits (`corpus/diagnose.rs`).
@@ -28,10 +30,12 @@ mod native {
     use solidfem_bench::corpus::measure::{measure_input, sample_exclusion};
     use solidfem_bench::corpus::parts::all_parts;
     use solidfem_bench::corpus::record::{
-        counts_by, distribution, field, input_fields, parse_line, remesh_fields, share_nonzero,
-        share_true, spread, table, to_line, volume_fields, volume_lost_fields, Record,
+        by_dihedral_bucket, counts_by, distribution, distribution_sci, field, input_fields,
+        parse_line, remesh_fields, share_nonzero, share_true, solve_fields, spread,
+        stage_lost_fields, table, to_line, volume_fields, Record,
     };
     use solidfem_bench::corpus::remesh_trial::remesh_and_measure;
+    use solidfem_bench::corpus::solve_trial::solve_and_check;
     use solidfem_bench::corpus::soup::TriSoup;
     use solidfem_bench::corpus::volume_trial::volume_and_measure;
     use solidmesh_mesh::processors::stl_processing::parse_file_contents;
@@ -96,6 +100,21 @@ mod native {
         ("mindih", "min dih"),
         ("lt1", "<1 deg"),
         ("lt5", "<5 deg"),
+        ("sec", "sec"),
+    ];
+
+    const SOLVE_COLUMNS: &[(&str, &str)] = &[
+        ("name", "part"),
+        ("status", "status"),
+        ("unknowns", "unknowns"),
+        ("mindih", "min dih"),
+        ("iters", "iters"),
+        ("resid", "residual"),
+        ("imbalance", "imbalance"),
+        ("umax_diag", "umax/diag"),
+        ("setup_sec", "setup s"),
+        ("solve_sec", "solve s"),
+        ("mg_bytes", "mg bytes"),
         ("sec", "sec"),
     ];
 
@@ -165,6 +184,14 @@ mod native {
         if let Ok(part) = &trial.outcome {
             let volume = volume_and_measure(&part.surface, trial.target_edge_length);
             emit(to_line(&volume_fields(name, &volume)))?;
+            if let Ok(meshed) = &volume.outcome {
+                let solved = solve_and_check(&meshed.mesh);
+                emit(to_line(&solve_fields(
+                    name,
+                    &solved,
+                    meshed.min_dihedral_degrees,
+                )))?;
+            }
         }
         Ok(())
     }
@@ -313,10 +340,10 @@ mod native {
                     }
                     Poll::Failed { reason, how, lines } => {
                         let partial: Vec<Record> = lines.iter().map(|l| parse_line(l)).collect();
-                        match lost_in_volume_stage(&partial) {
-                            Some(name) => {
+                        match lost_in_stage(&partial) {
+                            Some((name, kind)) => {
                                 records.extend(partial);
-                                let lost = volume_lost_fields(&name, how);
+                                let lost = stage_lost_fields(&name, kind, how);
                                 records.push(parse_line(&to_line(&lost)));
                             }
                             None => {
@@ -329,7 +356,7 @@ mod native {
             }
         }
         println!(
-            "measured {} of {} files (a child lost in the volume stage still counts)",
+            "measured {} of {} files (a child lost in the volume or solve stage still counts)",
             total - failures.len(),
             total
         );
@@ -352,14 +379,22 @@ mod native {
         },
     }
 
-    /// The part's name when the child's records hold a remesh that produced a surface and no
-    /// volume record: the child was lost in the volume stage.
-    fn lost_in_volume_stage(partial: &[Record]) -> Option<String> {
-        let remeshed = partial
-            .iter()
-            .find(|r| field(r, "kind") == "remesh" && field(r, "status") == "ok")?;
-        let has_volume = partial.iter().any(|r| field(r, "kind") == "volume");
-        (!has_volume).then(|| field(remeshed, "name").to_string())
+    /// The part's name and the stage the child was lost in: `volume` when its records hold a
+    /// remesh that produced a surface and no volume record, `solve` when they hold a finished
+    /// volume mesh and no solve record.
+    fn lost_in_stage(partial: &[Record]) -> Option<(String, &'static str)> {
+        let has = |kind: &str| partial.iter().any(|r| field(r, "kind") == kind);
+        let finished = |kind: &str| {
+            partial
+                .iter()
+                .find(|r| field(r, "kind") == kind && field(r, "status") == "ok")
+                .map(|r| field(r, "name").to_string())
+        };
+        if let Some(name) = finished("volume") {
+            return (!has("solve")).then_some((name, "solve"));
+        }
+        let name = finished("remesh")?;
+        (!has("volume")).then_some((name, "volume"))
     }
 
     /// The child's whole standard output, once it has exited.
@@ -528,6 +563,73 @@ mod native {
         println!("tets under 5 deg: {}", distribution(&ok, "lt5"));
         println!("tets: {}", distribution(&ok, "tets"));
         println!("seconds: {}", distribution(&ok, "sec"));
+        print_solve(records);
+    }
+
+    fn print_solve(records: &[Record]) {
+        let solves: Vec<Record> = records
+            .iter()
+            .filter(|r| field(r, "kind") == "solve")
+            .cloned()
+            .collect();
+        println!(
+            "\n== SOLVE ({} volume-meshed parts attempted)",
+            solves.len()
+        );
+        print!("{}", table(&solves, SOLVE_COLUMNS));
+        println!("\n== SOLVE SUMMARY");
+        println!("outcomes, most frequent first:");
+        for (status, count) in counts_by(&solves, "status") {
+            println!("  {count:>5}  {status}");
+        }
+        let ok: Vec<Record> = solves
+            .iter()
+            .filter(|r| field(r, "status") == "ok")
+            .cloned()
+            .collect();
+        println!(
+            "solved with balanced reactions and a physical displacement: {}/{}",
+            ok.len(),
+            solves.len()
+        );
+        println!("iterations (ok): {}", distribution(&ok, "iters"));
+        println!("iterations (any): {}", distribution(&solves, "iters"));
+        println!("unknowns (any): {}", distribution(&solves, "unknowns"));
+        println!(
+            "setup seconds (any): {}",
+            distribution(&solves, "setup_sec")
+        );
+        println!(
+            "solve seconds (any): {}",
+            distribution(&solves, "solve_sec")
+        );
+        println!("stage seconds (any): {}", distribution(&solves, "sec"));
+        println!(
+            "multigrid bytes (any): {}",
+            distribution(&solves, "mg_bytes")
+        );
+        println!(
+            "final relative residual (ok): {}",
+            distribution_sci(&ok, "resid")
+        );
+        println!(
+            "reaction imbalance (solved): {}",
+            distribution_sci(&solves, "imbalance")
+        );
+        println!(
+            "max displacement / diagonal (solved): {}",
+            distribution_sci(&solves, "umax_diag")
+        );
+        println!("iterations by the mesh's worst dihedral (every record with iterations):");
+        for (bucket, inside) in by_dihedral_bucket(&solves) {
+            let ok_count = inside.iter().filter(|r| field(r, "status") == "ok").count();
+            println!(
+                "  {bucket:<13} parts {:>4}  ok {:>4}  iterations {}",
+                inside.len(),
+                ok_count,
+                distribution(&inside, "iters")
+            );
+        }
     }
 
     fn share_nonzero_above_one(records: &[Record], key: &str) -> String {

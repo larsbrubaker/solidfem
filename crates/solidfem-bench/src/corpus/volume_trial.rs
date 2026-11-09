@@ -1,7 +1,8 @@
 //! One volume mesh of a remeshed part and what came of it: the remeshed surface through the same
 //! volume stage the benchmarks run (`benchmarks/volume.rs`: surface recovery, refinement with
 //! layers through thin walls, the 10-node upgrade), at an edge length taken from the remesh, and
-//! the outcome as a stable short name so a corpus can be counted by failure class.
+//! the outcome as a stable short name so a corpus can be counted by failure class. A finished
+//! mesh is kept on the result for the solve stage (`solve_trial.rs`).
 //!
 //! The work is capped two ways so one part costs at most about a minute: the edge length is
 //! raised when the remesh's would fill the part with more tetrahedra than [`TET_BUDGET`], and the
@@ -10,6 +11,7 @@
 use std::time::Instant;
 
 use solidfem::elastic::Quadrature;
+use solidfem::mesh::QuadraticTetMesh;
 use solidfem::tetra::{RefineOptions, SizeFn};
 
 use super::soup::TriSoup;
@@ -61,6 +63,8 @@ pub struct VolumePart {
     pub under_one_degree: usize,
     /// Elements whose smallest dihedral angle is under 5 degrees.
     pub under_five_degrees: usize,
+    /// The 10-node mesh itself, which the solve stage (`solve_trial.rs`) solves.
+    pub mesh: QuadraticTetMesh,
 }
 
 /// The volume edge length for a part of `volume` remeshed at `remesh_edge`.
@@ -103,6 +107,7 @@ pub fn volume_and_measure(surface: &TriSoup, remesh_edge: f64) -> VolumeTrial {
             min_dihedral_degrees: angles.iter().copied().fold(f64::INFINITY, f64::min),
             under_one_degree: angles.iter().filter(|a| **a < 1.0).count(),
             under_five_degrees: angles.iter().filter(|a| **a < 5.0).count(),
+            mesh: volume.mesh,
         }
     });
     VolumeTrial {
@@ -138,7 +143,7 @@ pub fn outcome_name(outcome: &Result<VolumePart, VolumeFailure>) -> String {
 /// The variant names at the head of a derived `Debug` text, a wrapped variant joined to its
 /// wrapper by a dot: `Mesh(Empty)` is `Mesh.Empty`, `SurfaceNotRecovered { .. }` is
 /// `SurfaceNotRecovered`. The field values, which differ per part, are dropped.
-fn variant_path(debug: &str) -> String {
+pub(crate) fn variant_path(debug: &str) -> String {
     let mut names = Vec::new();
     let mut rest = debug;
     loop {

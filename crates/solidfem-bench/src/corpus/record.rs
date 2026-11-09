@@ -3,12 +3,17 @@
 //! so a child process can hand it to the parent that runs the corpus and a crashed child costs
 //! only its own row. The input record's `sample` says whether the part was remeshed (`in`) or
 //! left out of the sample and why (`input:<reason>`, `measure::sample_exclusion`); the remesh
-//! record's `status` is `ok` or the remesher's refusal as `remesh:<variant>`.
+//! record's `status` is `ok` or the remesher's refusal as `remesh:<variant>`; the volume and
+//! solve records' `status` is their stage's outcome name (`volume_trial::outcome_name`,
+//! `solve_trial::solve_outcome_name`), or `child:<how>` when the child process was lost in that
+//! stage. A solve record carries its mesh's worst dihedral angle so iterations can be read
+//! against it (`by_dihedral_bucket`).
 
 use std::collections::BTreeMap;
 
 use super::measure::{sample_exclusion, InputMetrics};
 use super::remesh_trial::{refusal_name, RemeshTrial, RemeshedPart, TargetSource};
+use super::solve_trial::{solve_outcome_name, SolveFailure, SolveTrial};
 use super::volume_trial::{outcome_name, VolumeEdgeSource, VolumeTrial};
 
 /// A parsed record: field name to text.
@@ -157,11 +162,90 @@ pub fn volume_fields(name: &str, trial: &VolumeTrial) -> Vec<(String, String)> {
 /// how (`timeout` or `crashed`): the earlier records were already written, so the loss is the
 /// volume stage's.
 pub fn volume_lost_fields(name: &str, how: &str) -> Vec<(String, String)> {
+    stage_lost_fields(name, "volume", how)
+}
+
+/// The record of kind `kind` for a part whose child process ended during that stage.
+pub fn stage_lost_fields(name: &str, kind: &str, how: &str) -> Vec<(String, String)> {
     vec![
         ("name".to_string(), name.replace(' ', "_")),
-        ("kind".to_string(), "volume".to_string()),
+        ("kind".to_string(), kind.to_string()),
         ("status".to_string(), format!("child:{how}")),
     ]
+}
+
+/// The `key=value` fields of a solve trial on a mesh whose worst dihedral angle is
+/// `min_dihedral_degrees`.
+pub fn solve_fields(
+    name: &str,
+    trial: &SolveTrial,
+    min_dihedral_degrees: f64,
+) -> Vec<(String, String)> {
+    let mut fields = vec![
+        ("name".to_string(), name.replace(' ', "_")),
+        ("kind".to_string(), "solve".to_string()),
+        ("status".to_string(), solve_outcome_name(&trial.outcome)),
+        ("unknowns".to_string(), trial.unknowns.to_string()),
+        ("mindih".to_string(), num(min_dihedral_degrees)),
+        ("sec".to_string(), num(trial.seconds)),
+    ];
+    if let Some(report) = &trial.report {
+        fields.extend([
+            ("iters".to_string(), report.iterations.to_string()),
+            ("resid".to_string(), num(report.relative_residual)),
+            (
+                "setup_sec".to_string(),
+                num(report.assembly_seconds + report.preconditioner_seconds),
+            ),
+            ("solve_sec".to_string(), num(report.solve_seconds)),
+        ]);
+        if let Some(multigrid) = &report.multigrid {
+            fields.push(("mg_bytes".to_string(), multigrid.memory_bytes.to_string()));
+        }
+    }
+    let measured = match &trial.outcome {
+        Ok(part) | Err(SolveFailure::Unphysical(part) | SolveFailure::Imbalanced(part)) => {
+            Some(part)
+        }
+        Err(_) => None,
+    };
+    if let Some(part) = measured {
+        fields.push(("imbalance".to_string(), num(part.imbalance)));
+        fields.push((
+            "umax_diag".to_string(),
+            num(part.max_displacement_over_diagonal),
+        ));
+    }
+    if let Err(failure @ (SolveFailure::Model(_) | SolveFailure::Reactions(_))) = &trial.outcome {
+        // The error's own values, one token so the line still splits on spaces.
+        let detail = format!("{failure:?}").replace(char::is_whitespace, "");
+        fields.push(("detail".to_string(), detail));
+    }
+    fields
+}
+
+/// The worst-dihedral buckets solve iterations are read by, in degrees: `[low, high)`.
+pub const DIHEDRAL_BUCKETS: [(&str, f64, f64); 4] = [
+    ("< 0.1 deg", 0.0, 0.1),
+    ("0.1 to 1 deg", 0.1, 1.0),
+    ("1 to 5 deg", 1.0, 5.0),
+    (">= 5 deg", 5.0, f64::INFINITY),
+];
+
+/// For each of [`DIHEDRAL_BUCKETS`], the `records` whose `mindih` falls in it, in order. A record
+/// with no readable `mindih` is in none.
+pub fn by_dihedral_bucket(records: &[Record]) -> Vec<(&'static str, Vec<Record>)> {
+    DIHEDRAL_BUCKETS
+        .iter()
+        .map(|(label, low, high)| {
+            let inside = records
+                .iter()
+                .filter(|r| field_f64(r, "mindih").is_some_and(|d| d >= *low && d < *high))
+                .cloned()
+                .collect();
+            (*label, inside)
+        })
+        .collect()
 }
 
 /// How many `records` have each value of `key`, most frequent first, ties by value.
@@ -188,6 +272,24 @@ pub fn distribution(records: &[Record], key: &str) -> String {
     let at = |q: f64| super::measure::percentile(&values, q);
     format!(
         "min {first:.4}  p10 {:.4}  p50 {:.4}  p90 {:.4}  max {last:.4}  (n={})",
+        at(0.1),
+        at(0.5),
+        at(0.9),
+        values.len()
+    )
+}
+
+/// [`distribution`] in scientific notation, for values such as residuals and imbalances whose
+/// size is their exponent and that four decimals would print as zero.
+pub fn distribution_sci(records: &[Record], key: &str) -> String {
+    let mut values: Vec<f64> = records.iter().filter_map(|r| field_f64(r, key)).collect();
+    values.sort_unstable_by(f64::total_cmp);
+    let (Some(first), Some(last)) = (values.first(), values.last()) else {
+        return "no values".to_string();
+    };
+    let at = |q: f64| super::measure::percentile(&values, q);
+    format!(
+        "min {first:.3e}  p10 {:.3e}  p50 {:.3e}  p90 {:.3e}  max {last:.3e}  (n={})",
         at(0.1),
         at(0.5),
         at(0.9),

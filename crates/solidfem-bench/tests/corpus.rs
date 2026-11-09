@@ -8,3 +8,6 @@ mod remesh;
 
 #[path = "corpus/volume.rs"]
 mod volume;
+
+#[path = "corpus/solve.rs"]
+mod solve;

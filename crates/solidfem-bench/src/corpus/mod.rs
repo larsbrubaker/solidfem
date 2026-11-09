@@ -7,7 +7,8 @@
 //! solidmesh's real operations, `record.rs` the one-line key=value records and the tables built
 //! from them, `remesh_trial.rs` one remesh attempt with what it did to the part, read by the
 //! corpus's own measures rather than the remesher's report, `volume_trial.rs` the volume mesh of
-//! a remeshed part with its outcome named by failure class, `diagnose.rs` what blocks surface
+//! a remeshed part with its outcome named by failure class, `solve_trial.rs` a linear static
+//! bending solve of that volume mesh checked against its reactions and its size, `diagnose.rs` what blocks surface
 //! recovery on a part at several remesh densities. The binary is `src/bin/corpus.rs`.
 
 pub mod bvh;
@@ -17,5 +18,6 @@ pub mod parts;
 pub mod record;
 pub mod remesh_trial;
 pub mod self_intersect;
+pub mod solve_trial;
 pub mod soup;
 pub mod volume_trial;
