@@ -5,7 +5,8 @@
 //! deflection against Euler-Bernoulli plus Timoshenko shear. A capped solve is reported as not
 //! assessed, never as a pass.
 //!
-//! `solidfem-gate structured <cells> <nu> <cap-seconds>` builds the plate from a structured grid;
+//! `solidfem-gate structured <cells> <nu> <cap-seconds> [width]` builds the plate from a structured
+//! grid (a width other than 100 is the narrower strip reported as additional information);
 //! `solidfem-gate file <path> <edge> <nu> <cap-seconds>` reads a triangle surface from a text file
 //! (`vertex-count face-count`, then `x y z` lines, then `a b c` lines). Run in release.
 //!
@@ -29,7 +30,7 @@ use solidfem::meshing::quadratic_from_solid;
 use solidfem::tetra::{RefineOptions, Refiner, SolidMesh, StepStatus, SurfaceMesher, HULL};
 
 const LENGTH: f64 = 100.0;
-const WIDTH: f64 = 100.0;
+const DEFAULT_WIDTH: f64 = 100.0;
 const THICK: f64 = 0.8;
 const LOAD: f64 = 1.0;
 const YOUNGS_MODULUS: f64 = 200_000.0;
@@ -45,10 +46,11 @@ fn main() {
             let nu = get(2).parse::<f64>().ok()?;
             let cap = get(3).parse::<f64>().ok()?;
             Some((
-                structured_plate(cells),
+                structured_plate(cells, get(4).parse::<f64>().unwrap_or(DEFAULT_WIDTH)),
                 edge,
                 nu,
                 cap,
+                get(4).parse::<f64>().unwrap_or(DEFAULT_WIDTH),
                 format!("structured {cells} cells"),
             ))
         }),
@@ -62,31 +64,35 @@ fn main() {
                 edge,
                 nu,
                 cap,
+                DEFAULT_WIDTH,
                 format!("remeshed surface {}", get(1)),
             ))
         })(),
         _ => None,
     };
-    let Some(((points, triangles), edge, nu, cap, name)) = parsed else {
-        eprintln!("usage: solidfem-gate structured <cells> <nu> <cap-seconds>");
+    let Some(((points, triangles), edge, nu, cap, width, name)) = parsed else {
+        eprintln!("usage: solidfem-gate structured <cells> <nu> <cap-seconds> [width]");
         eprintln!("       solidfem-gate file <path> <edge> <nu> <cap-seconds>");
         std::process::exit(2);
     };
-    println!("GATE {name}: edge {edge}, nu {nu}, solve cap {cap} s");
-    run_gate(points, triangles, edge, nu, cap);
+    println!("GATE {name}: width {width}, edge {edge}, nu {nu}, solve cap {cap} s");
+    run_gate(points, triangles, edge, nu, cap, width);
 }
 
-/// The plate with `cells x cells` squares on each face and one quad up the rim per boundary cell.
-fn structured_plate(cells: usize) -> Surface {
-    let n = cells + 1;
-    let at = |i: usize, j: usize, layer: usize| ((layer * n + i) * n + j) as u32;
-    let mut points = Vec::with_capacity(2 * n * n);
+/// The plate with square cells of `LENGTH / cells` on each face and one quad up the rim per boundary
+/// cell; `width` sets the number of rows.
+fn structured_plate(cells: usize, width: f64) -> Surface {
+    let size = LENGTH / cells as f64;
+    let rows = (width / size).round().max(1.0) as usize;
+    let (nx, ny) = (cells + 1, rows + 1);
+    let at = |i: usize, j: usize, layer: usize| ((layer * nx + i) * ny + j) as u32;
+    let mut points = Vec::with_capacity(2 * nx * ny);
     for layer in 0..2 {
-        for i in 0..n {
-            for j in 0..n {
+        for i in 0..nx {
+            for j in 0..ny {
                 points.push([
                     LENGTH * i as f64 / cells as f64,
-                    WIDTH * j as f64 / cells as f64,
+                    width * j as f64 / rows as f64,
                     THICK * layer as f64,
                 ]);
             }
@@ -98,7 +104,7 @@ fn structured_plate(cells: usize) -> Surface {
         triangles.push([a, c, d]);
     };
     for i in 0..cells {
-        for j in 0..cells {
+        for j in 0..rows {
             quad(
                 at(i, j, 1),
                 at(i + 1, j, 1),
@@ -114,17 +120,19 @@ fn structured_plate(cells: usize) -> Surface {
         }
         quad(at(i, 0, 0), at(i + 1, 0, 0), at(i + 1, 0, 1), at(i, 0, 1));
         quad(
-            at(i + 1, cells, 0),
-            at(i, cells, 0),
-            at(i, cells, 1),
-            at(i + 1, cells, 1),
+            at(i + 1, rows, 0),
+            at(i, rows, 0),
+            at(i, rows, 1),
+            at(i + 1, rows, 1),
         );
-        quad(at(0, i + 1, 0), at(0, i, 0), at(0, i, 1), at(0, i + 1, 1));
+    }
+    for j in 0..rows {
+        quad(at(0, j + 1, 0), at(0, j, 0), at(0, j, 1), at(0, j + 1, 1));
         quad(
-            at(cells, i, 0),
-            at(cells, i + 1, 0),
-            at(cells, i + 1, 1),
-            at(cells, i, 1),
+            at(cells, j, 0),
+            at(cells, j + 1, 0),
+            at(cells, j + 1, 1),
+            at(cells, j, 1),
         );
     }
     (points, triangles)
@@ -162,7 +170,14 @@ fn coord(p: [f64; 3]) -> Coord3D<f64> {
     }
 }
 
-fn run_gate(points: Vec<[f64; 3]>, triangles: Vec<[u32; 3]>, edge: f64, nu: f64, cap: f64) {
+fn run_gate(
+    points: Vec<[f64; 3]>,
+    triangles: Vec<[u32; 3]>,
+    edge: f64,
+    nu: f64,
+    cap: f64,
+    width: f64,
+) {
     let surface_points = points.clone();
     let clock_start = Instant::now();
     let t0 = Instant::now();
@@ -218,13 +233,13 @@ fn run_gate(points: Vec<[f64; 3]>, triangles: Vec<[u32; 3]>, edge: f64, nu: f64,
     );
 
     // The mesher's contracts, checked on the arrays alone.
-    if let Err(message) = check_contracts(&refined, &surface_points) {
+    if let Err(message) = check_contracts(&refined, &surface_points, width) {
         return fail(&format!("mesher contract broken: {message}"));
     }
     println!("contracts: surface bits identical, every tet exactly positive, volume matches, added points strictly inside: PASS");
 
     // Layers through the wall, by a walk along columns.
-    let layers = measure_layers(&refined, edge, THICK);
+    let layers = measure_layers(&refined, edge, THICK, width);
     println!(
         "layers away from the rim ({} columns, margin {:.1} mm): at least two tets everywhere = {}, none crossing both skins = {} ({} columns have one), fewest tets {}, largest span {:.4} of a {:.1} wall; columns missed {}",
         layers.away_columns,
@@ -292,7 +307,7 @@ fn run_gate(points: Vec<[f64; 3]>, triangles: Vec<[u32; 3]>, edge: f64, nu: f64,
     if area <= 0.0 {
         return fail("no boundary face at x = L");
     }
-    println!("loaded end area {area:.6}, expected {}", WIDTH * THICK);
+    println!("loaded end area {area:.6}, expected {}", width * THICK);
     for face in end_faces {
         model.add_traction(face, [0.0, 0.0, -LOAD / area]);
     }
@@ -356,7 +371,7 @@ fn run_gate(points: Vec<[f64; 3]>, triangles: Vec<[u32; 3]>, edge: f64, nu: f64,
         Err(error) => return fail(&format!("recovery failed: {error}")),
     };
     println!("solver: {}", report_of(solution.report));
-    let verdict = benchmark(&mesh, &solution, nu);
+    let verdict = benchmark(&mesh, &solution, nu, width);
     println!(
         "VERDICT contracts PASS; layers away from rim {}; benchmark {}",
         if layers_pass { "PASS" } else { "FAIL" },
@@ -376,9 +391,14 @@ fn run_gate(points: Vec<[f64; 3]>, triangles: Vec<[u32; 3]>, edge: f64, nu: f64,
 
 /// Prints the free-end deflection and mid-span stress against the references, returning the
 /// deflection error.
-fn benchmark(mesh: &solidfem::mesh::QuadraticTetMesh, solution: &Solution, nu: f64) -> f64 {
-    let area = WIDTH * THICK;
-    let inertia = WIDTH * THICK * THICK * THICK / 12.0;
+fn benchmark(
+    mesh: &solidfem::mesh::QuadraticTetMesh,
+    solution: &Solution,
+    nu: f64,
+    width: f64,
+) -> f64 {
+    let area = width * THICK;
+    let inertia = width * THICK * THICK * THICK / 12.0;
     let e = YOUNGS_MODULUS;
     let g = e / (2.0 * (1.0 + nu));
     let kappa = 5.0 / 6.0;
@@ -413,8 +433,8 @@ fn benchmark(mesh: &solidfem::mesh::QuadraticTetMesh, solution: &Solution, nu: f
     for (node, position) in mesh.nodes()[..corners].iter().enumerate() {
         if (position[2] - THICK).abs() < 1e-9
             && (position[0] - LENGTH / 2.0).abs() < 1.5
-            && position[1] > 10.0
-            && position[1] < 90.0
+            && position[1] > 0.1 * width
+            && position[1] < 0.9 * width
         {
             stress += solution.nodal_von_mises[node];
             samples += 1;
@@ -436,7 +456,7 @@ fn fail(message: &str) {
 
 /// The mesher's contracts, read only from the arrays: surface vertices bit-identical, every tet
 /// exactly positive, the volume the plate's, every added point strictly inside the box.
-fn check_contracts(mesh: &SolidMesh, surface: &[[f64; 3]]) -> Result<(), String> {
+fn check_contracts(mesh: &SolidMesh, surface: &[[f64; 3]], width: f64) -> Result<(), String> {
     if &mesh.points[..surface.len()] != surface {
         return Err("a surface vertex changed".to_string());
     }
@@ -475,7 +495,7 @@ fn check_contracts(mesh: &SolidMesh, surface: &[[f64; 3]]) -> Result<(), String>
         })
         .sum();
     let thickness = surface.iter().map(|p| p[2]).fold(0.0, f64::max);
-    let expected = LENGTH * WIDTH * thickness;
+    let expected = LENGTH * width * thickness;
     // Each tet determinant accumulates at most a few dozen rounding units of the part size cubed.
     let tolerance = mesh.tets.len() as f64 * 64.0 * f64::EPSILON * (2.0 * LENGTH).powi(3);
     if (volume - expected).abs() > tolerance + 1e-9 * expected {
@@ -485,7 +505,7 @@ fn check_contracts(mesh: &SolidMesh, surface: &[[f64; 3]]) -> Result<(), String>
         if !(p[0] > 0.0
             && p[0] < LENGTH
             && p[1] > 0.0
-            && p[1] < WIDTH
+            && p[1] < width
             && p[2] > 0.0
             && p[2] < thickness)
         {
@@ -512,7 +532,7 @@ struct Layers {
 }
 
 /// Walks columns across the wall on a jittered grid, measuring tets traversed and their span in z.
-fn measure_layers(mesh: &SolidMesh, edge: f64, thick: f64) -> Layers {
+fn measure_layers(mesh: &SolidMesh, edge: f64, thick: f64, width: f64) -> Layers {
     let margin = 2.0 * edge;
     let bottom = bottom_faces(mesh, edge);
     let mut layers = Layers {
@@ -535,8 +555,8 @@ fn measure_layers(mesh: &SolidMesh, edge: f64, thick: f64) -> Layers {
             let x = (i as f64 + (0.31 + 0.617 * j as f64).fract() * 0.8 + 0.1) * LENGTH
                 / columns as f64;
             let y =
-                (j as f64 + (0.27 + 0.617 * i as f64).fract() * 0.8 + 0.1) * WIDTH / columns as f64;
-            let at_rim = x < margin || x > LENGTH - margin || y < margin || y > WIDTH - margin;
+                (j as f64 + (0.27 + 0.617 * i as f64).fract() * 0.8 + 0.1) * width / columns as f64;
+            let at_rim = x < margin || x > LENGTH - margin || y < margin || y > width - margin;
             match column_walk(mesh, &bottom, x, y, thick) {
                 None => {
                     if at_rim {
