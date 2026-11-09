@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use solidfem_solve::{JacobiError, PcgError};
+use solidfem_solve::{JacobiError, MultigridError, PcgError};
 
 use crate::constraints::Freedom;
 use crate::material::Material;
@@ -44,6 +44,15 @@ pub enum ModelError {
     Element { tet: u32, fault: ElementFault },
     /// The stiffness diagonal could not be inverted.
     Preconditioner(JacobiError),
+    /// The multigrid preconditioner could not be built.
+    Multigrid(MultigridError),
+    /// The rigid-body modes were asked for with node and fixed-flag lists of different lengths.
+    RigidBodyData {
+        /// Nodes supplied.
+        nodes: usize,
+        /// Fixed flags supplied.
+        flags: usize,
+    },
     /// The solver failed; no result is reported.
     Solver(PcgError),
     /// The cancel check stopped assembly or recovery.
@@ -79,6 +88,11 @@ impl fmt::Display for ModelError {
             ),
             ModelError::Element { tet, fault } => write!(f, "tetrahedron {tet}: {fault:?}"),
             ModelError::Preconditioner(error) => write!(f, "{error}"),
+            ModelError::Multigrid(error) => write!(f, "{error}"),
+            ModelError::RigidBodyData { nodes, flags } => write!(
+                f,
+                "the rigid-body modes need one fixed flag per node: {flags} flags for {nodes} nodes"
+            ),
             ModelError::Solver(error) => write!(f, "{error}"),
             ModelError::Cancelled => write!(f, "the study was cancelled"),
             ModelError::NotFinished => write!(f, "the solve has not converged yet"),
@@ -91,6 +105,15 @@ impl std::error::Error for ModelError {}
 impl From<PcgError> for ModelError {
     fn from(error: PcgError) -> Self {
         ModelError::Solver(error)
+    }
+}
+
+impl From<MultigridError> for ModelError {
+    fn from(error: MultigridError) -> Self {
+        match error {
+            MultigridError::Cancelled => ModelError::Cancelled,
+            other => ModelError::Multigrid(other),
+        }
     }
 }
 

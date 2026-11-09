@@ -405,6 +405,7 @@ fn run_coarse_tolerance(model: Model<impl MaterialField>) -> Solution {
             max_iterations: None,
         },
         clock: Some(clock),
+        ..StudyOptions::default()
     };
     let mut study = StaticStudy::new(model, options, &mut || false).expect("a valid model");
     loop {

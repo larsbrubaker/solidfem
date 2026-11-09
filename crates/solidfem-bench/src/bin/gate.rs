@@ -3,7 +3,8 @@
 //! theory. Everything the verdict uses is measured here, on the mesh's public arrays:
 //! an independent ray walk along columns across the wall, the mesher's contracts, and the free-end
 //! deflection against Euler-Bernoulli plus Timoshenko shear. A capped solve is reported as not
-//! assessed, never as a pass.
+//! assessed, never as a pass. The solve uses the multigrid preconditioner: diagonal scaling cannot
+//! converge on a plate this thin in any reasonable time.
 //!
 //! `solidfem-gate structured <cells> <nu> <cap-seconds> [width]` builds the plate from a structured
 //! grid (a width other than 100 is the narrower strip reported as additional information);
@@ -24,7 +25,8 @@ use std::time::Instant;
 
 use robust::{orient3d, Coord3D};
 use solidfem::elastic::{
-    Clock, Material, Model, Quadrature, Report, Solution, StaticStudy, StepOutcome, StudyOptions,
+    Clock, Material, Model, MultigridOptions, PreconditionerChoice, Quadrature, Report, Solution,
+    StaticStudy, StepOutcome, StudyOptions,
 };
 use solidfem::meshing::quadratic_from_solid;
 use solidfem::tetra::{RefineOptions, Refiner, SolidMesh, StepStatus, SurfaceMesher, HULL};
@@ -317,6 +319,7 @@ fn run_gate(
         model,
         StudyOptions {
             clock: Some(clock),
+            preconditioner: PreconditionerChoice::Multigrid(MultigridOptions::default()),
             ..StudyOptions::default()
         },
         &mut || false,
@@ -325,9 +328,18 @@ fn run_gate(
         Err(error) => return fail(&format!("study refused: {error}")),
     };
     let report_of = |r: Report| {
+        let hierarchy = r.multigrid.map_or(String::new(), |m| {
+            format!(
+                "; multigrid {} levels, {} coarse values, operator complexity {:.2}, memory {:.0} MB",
+                m.levels,
+                m.coarse_dofs,
+                m.operator_complexity,
+                m.memory_bytes as f64 / 1e6
+            )
+        });
         format!(
-            "total DOF {}, free DOF {}, nonzeros {}, iterations {}, residual {:.3e}, rounding floor {}; assembly {:.3} s, solve {:.3} s, recovery {:.3} s",
-            r.total_dofs, r.free_dofs, r.nonzeros, r.iterations, r.relative_residual, r.at_rounding_floor, r.assembly_seconds, r.solve_seconds, r.recovery_seconds
+            "total DOF {}, free DOF {}, nonzeros {}, iterations {}, residual {:.3e}, rounding floor {}; assembly {:.3} s, setup {:.3} s, solve {:.3} s, recovery {:.3} s{hierarchy}",
+            r.total_dofs, r.free_dofs, r.nonzeros, r.iterations, r.relative_residual, r.at_rounding_floor, r.assembly_seconds, r.preconditioner_seconds, r.solve_seconds, r.recovery_seconds
         )
     };
     let solve_start = Instant::now();

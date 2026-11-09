@@ -7,11 +7,19 @@
 //! uninterrupted call, which runs the same code. The caller's clock (no `std::time` here, it
 //! panics on wasm32) times each phase so a preconditioner's or a slicing decision's effect can be
 //! measured.
+//!
+//! [`StudyOptions::preconditioner`] chooses the preconditioner. Jacobi needs no setup; multigrid
+//! is built after assembly from the assembled matrix and rigid-body modes taken from the node
+//! coordinates, restricted to the free nodes, and [`StudyBuilder::step`] advances that setup in
+//! the same slices as assembly.
 
 use std::collections::BTreeSet;
 
 use solidfem_mesh::{BoundaryFace, QuadraticTetMesh};
-use solidfem_solve::{CsrMatrix, Jacobi, Pcg, PcgOptions, StepOutcome};
+use solidfem_solve::{
+    CsrMatrix, Jacobi, Multigrid, MultigridOptions, MultigridSetup, MultigridStats, Pcg,
+    PcgOptions, Preconditioner, SetupStatus, StepOutcome,
+};
 
 use crate::assembly::{add_element_stiffness, free_stiffness_pattern, FIXED};
 use crate::constraints::check_constraints;
@@ -20,6 +28,7 @@ use crate::loads::add_traction;
 use crate::material::MaterialField;
 use crate::quadrature::Quadrature;
 use crate::results::{RecoveredField, Recovery, Solution};
+use crate::rigid_modes::free_rigid_body_modes;
 
 /// A caller-supplied monotonic clock, in seconds.
 pub type Clock = Box<dyn FnMut() -> f64>;
@@ -73,11 +82,39 @@ impl<M: MaterialField> Model<M> {
     }
 }
 
+/// Which preconditioner a study solves with.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum PreconditionerChoice {
+    /// Diagonal scaling: no setup, and enough for compact parts.
+    #[default]
+    Jacobi,
+    /// Block smoothed aggregation multigrid over the rigid-body modes, for large or slender models
+    /// diagonal scaling cannot bring to convergence.
+    Multigrid(MultigridOptions),
+}
+
+/// The preconditioner behind a study's solve.
+enum StudyPreconditioner {
+    Jacobi(Jacobi),
+    Multigrid(Box<Multigrid>),
+}
+
+impl Preconditioner for StudyPreconditioner {
+    fn apply(&self, residual: &[f64], output: &mut [f64]) {
+        match self {
+            StudyPreconditioner::Jacobi(jacobi) => jacobi.apply(residual, output),
+            StudyPreconditioner::Multigrid(multigrid) => multigrid.apply(residual, output),
+        }
+    }
+}
+
 /// Settings for a study.
 #[derive(Default)]
 pub struct StudyOptions {
     /// Solver settings.
     pub pcg: PcgOptions,
+    /// The preconditioner to solve with; Jacobi by default.
+    pub preconditioner: PreconditionerChoice,
     /// The clock timing each phase; without one the reported times are zero.
     pub clock: Option<Clock>,
 }
@@ -100,6 +137,10 @@ pub struct Report {
     pub relative_residual: f64,
     /// Seconds validating, assembling and building the load.
     pub assembly_seconds: f64,
+    /// Seconds building the preconditioner, zero for Jacobi.
+    pub preconditioner_seconds: f64,
+    /// The multigrid hierarchy's shape and cost, when multigrid was chosen.
+    pub multigrid: Option<MultigridStats>,
     /// Seconds in `step`, over all slices.
     pub solve_seconds: f64,
     /// Seconds recovering stresses.
@@ -110,7 +151,7 @@ pub struct Report {
 pub struct StaticStudy<M: MaterialField> {
     model: Model<M>,
     free: Vec<u32>,
-    pcg: Pcg<Jacobi>,
+    pcg: Pcg<StudyPreconditioner>,
     clock: Option<Clock>,
     report: Report,
 }
@@ -240,11 +281,15 @@ pub struct BuildProgress {
     pub elements_done: usize,
     /// Elements in the mesh.
     pub elements_total: usize,
+    /// True once any preconditioner setup is finished too, so [`StudyBuilder::finish`] will
+    /// succeed; always true for Jacobi once the elements are done.
+    pub setup_finished: bool,
 }
 
 /// A resumable [`StaticStudy::new`]: [`StudyBuilder::new`] validates and builds the load and the
-/// matrix pattern, and [`StudyBuilder::step`] adds element stiffness in bounded slices. Stepped in
-/// any slice sizes it builds exactly the bits of `new`, which runs the same code in one slice.
+/// matrix pattern, and [`StudyBuilder::step`] adds element stiffness and then builds the
+/// preconditioner in bounded slices. Stepped in any slice sizes it builds exactly the bits of
+/// `new`, which runs the same code in one slice.
 pub struct StudyBuilder<M: MaterialField> {
     model: Model<M>,
     free: Vec<u32>,
@@ -254,8 +299,12 @@ pub struct StudyBuilder<M: MaterialField> {
     ke: [f64; 900],
     next: usize,
     pcg_options: PcgOptions,
+    preconditioner: PreconditionerChoice,
+    setup: Option<MultigridSetup>,
+    setup_status: SetupStatus,
     clock: Option<Clock>,
     assembly_seconds: f64,
+    preconditioner_seconds: f64,
 }
 
 impl<M: MaterialField> StudyBuilder<M> {
@@ -302,12 +351,17 @@ impl<M: MaterialField> StudyBuilder<M> {
             ke: [0.0; 900],
             next: 0,
             pcg_options: options.pcg,
+            preconditioner: options.preconditioner,
+            setup: None,
+            setup_status: SetupStatus::Running,
             clock,
             assembly_seconds,
+            preconditioner_seconds: 0.0,
         })
     }
 
-    /// Adds the stiffness of up to `max_elements` more elements.
+    /// Adds the stiffness of up to `max_elements` more elements, then advances any multigrid
+    /// setup by up to `max_elements` block rows; `cancel` is read per element and per row.
     pub fn step(
         &mut self,
         max_elements: usize,
@@ -329,10 +383,48 @@ impl<M: MaterialField> StudyBuilder<M> {
         self.assembly_seconds += elapsed(&mut self.clock, start);
         result?;
         self.next = end;
+        if self.next == total {
+            if let PreconditionerChoice::Multigrid(options) = self.preconditioner {
+                self.advance_setup(options, max_elements, cancel)?;
+            }
+        }
         Ok(BuildProgress {
             elements_done: self.next,
             elements_total: total,
+            setup_finished: self.next == total && self.setup_is_finished(),
         })
+    }
+
+    /// True when no preconditioner setup is outstanding.
+    fn setup_is_finished(&self) -> bool {
+        match self.preconditioner {
+            PreconditionerChoice::Jacobi => true,
+            PreconditionerChoice::Multigrid(_) => self.setup_status == SetupStatus::Finished,
+        }
+    }
+
+    /// Starts the multigrid setup on first call and runs up to `budget` rows of it.
+    fn advance_setup(
+        &mut self,
+        options: MultigridOptions,
+        budget: usize,
+        cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<(), ModelError> {
+        if self.setup_status == SetupStatus::Finished {
+            return Ok(());
+        }
+        let start = now(&mut self.clock);
+        if self.setup.is_none() {
+            let modes = free_rigid_body_modes(self.model.mesh.nodes(), &self.free, self.free_count);
+            self.setup = Some(MultigridSetup::new(&self.matrix, &modes, options)?);
+        }
+        let status = match &mut self.setup {
+            Some(setup) => setup.step(budget, cancel),
+            None => Ok(SetupStatus::Running),
+        };
+        self.preconditioner_seconds += elapsed(&mut self.clock, start);
+        self.setup_status = status?;
+        Ok(())
     }
 
     /// The mesh being assembled.
@@ -342,7 +434,7 @@ impl<M: MaterialField> StudyBuilder<M> {
 
     /// The assembled study, ready to solve; refuses while elements remain.
     pub fn finish(self) -> Result<StaticStudy<M>, ModelError> {
-        if self.next != self.model.mesh.tets().len() {
+        if self.next != self.model.mesh.tets().len() || !self.setup_is_finished() {
             return Err(ModelError::NotFinished);
         }
         let StudyBuilder {
@@ -352,14 +444,24 @@ impl<M: MaterialField> StudyBuilder<M> {
             rhs,
             matrix,
             pcg_options,
+            setup,
             mut clock,
             assembly_seconds,
+            preconditioner_seconds,
             ..
         } = self;
         let start = now(&mut clock);
-        let jacobi = Jacobi::new(&matrix)?;
+        let mut multigrid_stats = None;
+        let preconditioner = match setup {
+            Some(setup) => {
+                let multigrid = Box::new(setup.finish()?);
+                multigrid_stats = Some(multigrid.stats());
+                StudyPreconditioner::Multigrid(multigrid)
+            }
+            None => StudyPreconditioner::Jacobi(Jacobi::new(&matrix)?),
+        };
         let nonzeros = matrix.nonzeros();
-        let pcg = Pcg::new(matrix, jacobi, rhs, pcg_options);
+        let pcg = Pcg::new(matrix, preconditioner, rhs, pcg_options);
         let report = Report {
             total_dofs: 3 * model.mesh.nodes().len(),
             free_dofs: 3 * free_count,
@@ -368,6 +470,8 @@ impl<M: MaterialField> StudyBuilder<M> {
             iterations: 0,
             relative_residual: 1.0,
             assembly_seconds: assembly_seconds + elapsed(&mut clock, start),
+            preconditioner_seconds,
+            multigrid: multigrid_stats,
             solve_seconds: 0.0,
             recovery_seconds: 0.0,
         };

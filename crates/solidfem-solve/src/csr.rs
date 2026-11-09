@@ -133,6 +133,12 @@ impl CsrMatrix {
         sum.sqrt()
     }
 
+    /// The sorted columns and values of one scalar row.
+    pub fn row(&self, row: usize) -> (&[u32], &[f64]) {
+        let range = self.row_starts[row]..self.row_starts[row + 1];
+        (&self.columns[range.clone()], &self.values[range])
+    }
+
     /// The main diagonal.
     pub fn diagonal(&self) -> Vec<f64> {
         (0..self.size)

@@ -10,6 +10,8 @@
 //! and [`StaticStudy::solution`] recovers displacements and von Mises stress. A host with no
 //! threads uses the resumable forms: [`StudyBuilder`] assembles in slices and
 //! [`StaticStudy::begin_recovery`] recovers in slices, each giving the bits of the one-call form.
+//! [`StudyOptions::preconditioner`] picks Jacobi (the default) or multigrid, whose rigid-body
+//! near-null space [`rigid_body_modes`] builds from the node coordinates.
 //!
 //! Exactness: every loop runs in node or element order on one thread and the solver's iterations
 //! depend only on its input, so results are bit-identical across runs and however a solve is
@@ -24,6 +26,7 @@ mod loads;
 mod material;
 mod quadrature;
 mod results;
+mod rigid_modes;
 mod shape;
 mod study;
 
@@ -36,6 +39,10 @@ pub use error::{ElementFault, ModelError};
 pub use material::{Material, MaterialField};
 pub use quadrature::{Quadrature, QuadraturePoint, TRIANGLE_POINTS};
 pub use results::{PointStress, RecoveredField, Recovery, Solution};
+pub use rigid_modes::rigid_body_modes;
 pub use shape::{shape_derivatives, shape_values, NODE_COUNT, NODE_NATURAL};
-pub use solidfem_solve::{PcgOptions, Progress, StepOutcome};
-pub use study::{BuildProgress, Clock, Model, Report, StaticStudy, StudyBuilder, StudyOptions};
+pub use solidfem_solve::{MultigridOptions, MultigridStats, PcgOptions, Progress, StepOutcome};
+pub use study::{
+    BuildProgress, Clock, Model, PreconditionerChoice, Report, StaticStudy, StudyBuilder,
+    StudyOptions,
+};
