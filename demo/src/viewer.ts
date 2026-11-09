@@ -2,7 +2,8 @@
 // flat-shaded stress colours from src/colormap.ts, the bending animation from src/animation.ts,
 // and the markings that say what is happening to the part: a hatched plate at each fixed end and
 // an arrow (push) or curved arrow (twist) at the load. The part stays on screen across a restart;
-// the page calls `showPart` when it has something new to draw.
+// the page calls `showPart` when it has something new to draw. Where the camera goes is decided in
+// src/framing.ts, which this file feeds with the container's size and the camera's pose.
 //
 // Vertex positions change every frame, so they are computed on the CPU and normals come from
 // flatShading's screen-space derivatives, with no normal recomputation. The mesh edges share the
@@ -12,6 +13,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { animationPhase, displacePositions } from './animation.ts';
 import { fillColors } from './colormap.ts';
+import { CameraFraming, partBounds, type CameraPlacement, type CameraPose } from './framing.ts';
 import type { Load, Restraint } from './catalog.ts';
 
 /** What the viewer draws for one result. */
@@ -37,6 +39,9 @@ export interface PartSetup {
 }
 
 const COLORS = { neutral: 0x9aa6b8, plate: 0x14213d, hatch: 0xf6f7f9, arrow: 0xd1495b, edge: 0x14213d };
+
+/** The camera's vertical field of view. */
+const FOV_DEGREES = 36;
 
 /** A text label that always faces the camera. */
 function labelSprite(text: string, color: string): THREE.Sprite {
@@ -106,7 +111,7 @@ export class Viewer {
   private current: PartView | null = null;
   private drawn = new Float32Array(0);
   private colors = new Float32Array(0);
-  private framedFor = '';
+  private framing = new CameraFraming(FOV_DEGREES);
   private markingsFor = '';
   private animId = 0;
   private resize: ResizeObserver;
@@ -121,7 +126,7 @@ export class Viewer {
     container.prepend(this.renderer.domElement);
 
     THREE.Object3D.DEFAULT_UP.set(0, 0, 1);
-    this.camera = new THREE.PerspectiveCamera(36, 1, 1, 5000);
+    this.camera = new THREE.PerspectiveCamera(FOV_DEGREES, 1, 1, 5000);
     this.camera.up.set(0, 0, 1);
     this.controls = new OrbitControls(this.camera, this.renderer.domElement);
     this.controls.enableDamping = true;
@@ -140,15 +145,34 @@ export class Viewer {
   }
 
   private fit() {
-    const w = Math.max(this.container.clientWidth, 1);
-    const h = Math.max(this.container.clientHeight, 1);
-    this.renderer.setSize(w, h);
-    this.camera.aspect = w / h;
+    const { viewport, placement } = this.framing.viewportChanged(this.container.clientWidth, this.container.clientHeight, this.pose());
+    if (!viewport) return;
+    this.renderer.setSize(viewport.width, viewport.height);
+    this.camera.aspect = viewport.width / viewport.height;
     this.camera.updateProjectionMatrix();
+    this.applyPlacement(placement);
+  }
+
+  private pose(): CameraPose {
+    const { x, y, z } = this.camera.position;
+    const target = this.controls.target;
+    return { position: [x, y, z], target: [target.x, target.y, target.z] };
+  }
+
+  private applyPlacement(placement: CameraPlacement | null) {
+    if (!placement) return;
+    this.camera.position.set(...placement.position);
+    this.controls.target.set(...placement.target);
+    this.camera.near = placement.near;
+    this.camera.far = placement.far;
+    this.camera.updateProjectionMatrix();
+    this.controls.update();
   }
 
   private animate = () => {
     this.animId = requestAnimationFrame(this.animate);
+    // A part waiting for a real view size has no camera yet; drawing it would look out from inside it.
+    if (this.framing.waitingForViewport) return;
     this.update();
     this.controls.update();
     this.renderer.render(this.scene, this.camera);
@@ -186,7 +210,7 @@ export class Viewer {
     colors.needsUpdate = true;
     this.current = view;
     this.placeMarkings(view, setup);
-    this.frame(setup);
+    this.applyPlacement(this.framing.showPart(partBounds(setup), this.pose()));
   }
 
   private sameData(a: ArrayLike<number>, b: ArrayLike<number>): boolean {
@@ -367,32 +391,6 @@ export class Viewer {
     label.scale.set(labelHeight * (label.userData.aspect as number), labelHeight, 1);
     label.position.set(x, centreY, centreZ + radius + side * 0.7);
     group.add(label);
-  }
-
-  /** Aims the camera at the part, once per part size, leaving later orbiting alone. */
-  private frame(setup: PartSetup) {
-    const key = `${setup.length}|${setup.width}|${setup.height}|${setup.restraint}`;
-    if (key === this.framedFor) return;
-    const firstFrame = this.framedFor === '';
-    this.framedFor = key;
-    const centre = new THREE.Vector3(0.5 * setup.length, 0.5 * setup.width, 0.5 * setup.height);
-    const radius = 0.5 * Math.hypot(setup.length, setup.width, setup.height) + Math.max(setup.width, setup.height) * 2;
-    const fov = (this.camera.fov * Math.PI) / 180;
-    const fitHeight = radius / Math.sin(fov / 2);
-    const fitWidth = fitHeight / Math.min(this.camera.aspect, 1);
-    const dist = Math.max(fitHeight, fitWidth) * 1.02;
-    this.controls.target.copy(centre);
-    if (firstFrame) {
-      this.camera.position.copy(centre).addScaledVector(new THREE.Vector3(0.3, -0.85, 0.45).normalize(), dist);
-    } else {
-      // Keep the visitor's viewing direction; only the distance follows the new size.
-      const direction = this.camera.position.clone().sub(centre).normalize();
-      this.camera.position.copy(centre).addScaledVector(direction, dist);
-    }
-    this.camera.near = dist / 100;
-    this.camera.far = dist * 10;
-    this.camera.updateProjectionMatrix();
-    this.controls.update();
   }
 
   dispose() {
