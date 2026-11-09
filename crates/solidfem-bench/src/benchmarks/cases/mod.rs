@@ -284,8 +284,9 @@ fn nodal_stress(solution: &Solution, targets: &[u32]) -> Vec<[f64; 6]> {
         .collect()
 }
 
-/// The smallest dihedral angle of the corners of a tetrahedron, in degrees.
-fn min_dihedral_degrees(p: [[f64; 3]; 4]) -> f64 {
+/// The smallest dihedral angle of the corners of a tetrahedron, in degrees. The corpus counts
+/// near-flat elements with it too, so both read one formula.
+pub fn min_dihedral_degrees(p: [[f64; 3]; 4]) -> f64 {
     const EDGES: [(usize, usize, usize, usize); 6] = [
         (0, 1, 2, 3),
         (0, 2, 1, 3),

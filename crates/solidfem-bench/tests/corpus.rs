@@ -2,3 +2,6 @@
 
 #[path = "corpus/metrics.rs"]
 mod metrics;
+
+#[path = "corpus/volume.rs"]
+mod volume;

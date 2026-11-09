@@ -67,6 +67,8 @@ pub struct RemeshedPart {
     /// Of the sampled input sharp edges, the percentage still lying along an output sharp edge.
     pub sharp_survival_percent: f64,
     pub quality: Quality,
+    /// The remeshed surface itself, which the volume stage (`volume_trial.rs`) meshes next.
+    pub surface: TriSoup,
 }
 
 /// Chooses the target edge length for a part.
@@ -117,6 +119,7 @@ pub fn remesh_and_measure(soup: &TriSoup, metrics: &InputMetrics) -> RemeshTrial
             sharp_edges_after: after.sharp_edges.len(),
             sharp_survival_percent: sharp_survival(soup, metrics, &output.soup, &after, target),
             quality: quality(&output.soup),
+            surface: output.soup,
         }
     });
     RemeshTrial {

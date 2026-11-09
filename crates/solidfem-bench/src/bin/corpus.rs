@@ -3,13 +3,18 @@
 //! Thingi10K's `.stl.zip` files with the system `unzip`; `solidfem-corpus batch <jobs>
 //! <timeout-seconds> <path>...` measures every `.stl` under the given files and directories, each
 //! in its own child process (`solidfem-corpus stl <file>`), so a crash or a runaway remesh on one
-//! untrusted file costs only that file's row. Each input gets two records, one for the mesh and
-//! one for the remesh; `batch` prints them as tables and summaries.
+//! untrusted file costs only that file's row. Each input gets a record for the mesh and one for
+//! the remesh and, when the remesh produced a surface, one for the volume mesh of that surface
+//! (`corpus/volume_trial.rs`); `batch` prints them as tables and summaries, the volume outcomes
+//! counted by failure class. A child writes and flushes its earlier records before starting the
+//! volume stage, so a child that times out or crashes there still has them, and its volume record
+//! is written by the parent as `child:timeout` or `child:crashed`.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use std::collections::VecDeque;
     use std::error::Error;
+    use std::io::Write;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
@@ -17,11 +22,12 @@ mod native {
     use solidfem_bench::corpus::measure::measure_input;
     use solidfem_bench::corpus::parts::all_parts;
     use solidfem_bench::corpus::record::{
-        field, input_fields, parse_line, remesh_fields, share_nonzero, share_true, spread, table,
-        to_line, Record,
+        counts_by, distribution, field, input_fields, parse_line, remesh_fields, share_nonzero,
+        share_true, spread, table, to_line, volume_fields, volume_lost_fields, Record,
     };
     use solidfem_bench::corpus::remesh_trial::remesh_and_measure;
     use solidfem_bench::corpus::soup::TriSoup;
+    use solidfem_bench::corpus::volume_trial::volume_and_measure;
     use solidmesh_mesh::processors::stl_processing::parse_file_contents;
     use solidmesh_mesh::{CancelToken, Mesh};
 
@@ -71,6 +77,19 @@ mod native {
         ("sec", "sec"),
     ];
 
+    const VOLUME_COLUMNS: &[(&str, &str)] = &[
+        ("name", "part"),
+        ("status", "status"),
+        ("vhsrc", "h from"),
+        ("vh", "h"),
+        ("tets", "tets"),
+        ("nodes", "nodes"),
+        ("mindih", "min dih"),
+        ("lt1", "<1 deg"),
+        ("lt5", "<5 deg"),
+        ("sec", "sec"),
+    ];
+
     pub fn run() -> Result<(), Box<dyn Error>> {
         let args: Vec<String> = std::env::args().skip(1).collect();
         match args.first().map(String::as_str) {
@@ -90,14 +109,22 @@ mod native {
         }
     }
 
-    fn measure_mesh(name: &str, mesh: &Mesh) -> [String; 2] {
+    /// Measures one mesh, handing each record line to `emit` as soon as it is known.
+    fn measure_mesh(
+        name: &str,
+        mesh: &Mesh,
+        emit: &mut dyn FnMut(String) -> Result<(), Box<dyn Error>>,
+    ) -> Result<(), Box<dyn Error>> {
         let soup = TriSoup::from_mesh(mesh);
         let metrics = measure_input(&soup);
+        emit(to_line(&input_fields(name, &metrics)))?;
         let trial = remesh_and_measure(&soup, &metrics);
-        [
-            to_line(&input_fields(name, &metrics)),
-            to_line(&remesh_fields(name, &trial)),
-        ]
+        emit(to_line(&remesh_fields(name, &trial)))?;
+        if let Ok(part) = &trial.outcome {
+            let volume = volume_and_measure(&part.surface, trial.target_edge_length);
+            emit(to_line(&volume_fields(name, &volume)))?;
+        }
+        Ok(())
     }
 
     fn measure_stl(path: &Path) -> Result<(), Box<dyn Error>> {
@@ -108,19 +135,22 @@ mod native {
             .replace(' ', "_");
         let bytes = std::fs::read(path)?;
         let mesh = parse_file_contents(&bytes, &CancelToken::new(), None)?;
-        for line in measure_mesh(&name, &mesh) {
-            println!("{line}");
-        }
-        Ok(())
+        let mut stdout = std::io::stdout();
+        measure_mesh(&name, &mesh, &mut |line| {
+            writeln!(stdout, "{line}")?;
+            stdout.flush()?;
+            Ok(())
+        })
     }
 
     fn synthetic() -> Result<(), Box<dyn Error>> {
         let mut records = Vec::new();
         for part in all_parts()? {
             let started = Instant::now();
-            for line in measure_mesh(part.name, &part.mesh) {
+            measure_mesh(part.name, &part.mesh, &mut |line| {
                 records.push(parse_line(&line));
-            }
+                Ok(())
+            })?;
             eprintln!("{} took {:.1}s", part.name, started.elapsed().as_secs_f64());
         }
         print_tables(&records);
@@ -239,14 +269,28 @@ mod native {
                         records.extend(lines.iter().map(|l| parse_line(l)));
                         running.swap_remove(i);
                     }
-                    Poll::Failed(reason) => {
-                        failures.push(format!("{}: {reason}", running[i].path.display()));
+                    Poll::Failed { reason, how, lines } => {
+                        let partial: Vec<Record> = lines.iter().map(|l| parse_line(l)).collect();
+                        match lost_in_volume_stage(&partial) {
+                            Some(name) => {
+                                records.extend(partial);
+                                let lost = volume_lost_fields(&name, how);
+                                records.push(parse_line(&to_line(&lost)));
+                            }
+                            None => {
+                                failures.push(format!("{}: {reason}", running[i].path.display()));
+                            }
+                        }
                         running.swap_remove(i);
                     }
                 }
             }
         }
-        println!("measured {} of {} files", total - failures.len(), total);
+        println!(
+            "measured {} of {} files (a child lost in the volume stage still counts)",
+            total - failures.len(),
+            total
+        );
         for failure in &failures {
             println!("  no row: {failure}");
         }
@@ -258,25 +302,54 @@ mod native {
     enum Poll {
         Running,
         Done(Vec<String>),
-        Failed(String),
+        /// The child crashed or timed out, with the record lines it had written by then.
+        Failed {
+            reason: String,
+            how: &'static str,
+            lines: Vec<String>,
+        },
+    }
+
+    /// The part's name when the child's records hold a remesh that produced a surface and no
+    /// volume record: the child was lost in the volume stage.
+    fn lost_in_volume_stage(partial: &[Record]) -> Option<String> {
+        let remeshed = partial
+            .iter()
+            .find(|r| field(r, "kind") == "remesh" && field(r, "status") == "ok")?;
+        let has_volume = partial.iter().any(|r| field(r, "kind") == "volume");
+        (!has_volume).then(|| field(remeshed, "name").to_string())
+    }
+
+    /// The child's whole standard output, once it has exited.
+    fn written_lines(run: &mut Running) -> Result<Vec<String>, Box<dyn Error>> {
+        let mut text = String::new();
+        if let Some(mut out) = run.child.stdout.take() {
+            std::io::Read::read_to_string(&mut out, &mut text)?;
+        }
+        Ok(text.lines().map(str::to_string).collect())
     }
 
     /// Checks one child: finished, crashed, or past its timeout (killed by its own handle).
     fn poll(run: &mut Running, timeout: Duration) -> Result<Poll, Box<dyn Error>> {
         if let Some(status) = run.child.try_wait()? {
+            let lines = written_lines(run)?;
             if !status.success() {
-                return Ok(Poll::Failed(format!("exited with {status}")));
+                return Ok(Poll::Failed {
+                    reason: format!("exited with {status}"),
+                    how: "crashed",
+                    lines,
+                });
             }
-            let mut text = String::new();
-            if let Some(mut out) = run.child.stdout.take() {
-                std::io::Read::read_to_string(&mut out, &mut text)?;
-            }
-            return Ok(Poll::Done(text.lines().map(str::to_string).collect()));
+            return Ok(Poll::Done(lines));
         }
         if run.started.elapsed() > timeout {
             run.child.kill()?;
             run.child.wait()?;
-            return Ok(Poll::Failed(format!("timed out after {timeout:?}")));
+            return Ok(Poll::Failed {
+                reason: format!("timed out after {timeout:?}"),
+                how: "timeout",
+                lines: written_lines(run)?,
+            });
         }
         Ok(Poll::Running)
     }
@@ -362,6 +435,37 @@ mod native {
             spread(&ok, "min_ang_after")
         );
         println!("remesh seconds: {}", spread(&remeshes, "sec"));
+        print_volume(records);
+    }
+
+    fn print_volume(records: &[Record]) {
+        let volumes: Vec<Record> = records
+            .iter()
+            .filter(|r| field(r, "kind") == "volume")
+            .cloned()
+            .collect();
+        println!("\n== VOLUME ({} remeshed parts attempted)", volumes.len());
+        print!("{}", table(&volumes, VOLUME_COLUMNS));
+        println!("\n== VOLUME SUMMARY");
+        println!("outcomes, most frequent first:");
+        for (status, count) in counts_by(&volumes, "status") {
+            println!("  {count:>5}  {status}");
+        }
+        let ok: Vec<Record> = volumes
+            .iter()
+            .filter(|r| field(r, "status") == "ok")
+            .cloned()
+            .collect();
+        println!(
+            "volume meshed to 10-node elements: {}/{}",
+            ok.len(),
+            volumes.len()
+        );
+        println!("min dihedral (deg): {}", distribution(&ok, "mindih"));
+        println!("tets under 1 deg: {}", distribution(&ok, "lt1"));
+        println!("tets under 5 deg: {}", distribution(&ok, "lt5"));
+        println!("tets: {}", distribution(&ok, "tets"));
+        println!("seconds: {}", distribution(&ok, "sec"));
     }
 
     fn share_nonzero_above_one(records: &[Record], key: &str) -> String {

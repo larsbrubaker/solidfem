@@ -1,6 +1,7 @@
 //! The pipeline each real-part benchmark runs at each mesh density: a closed surface, this
-//! workspace's volume mesher with through-wall layers and a size function, 10-node elements, the
-//! multigrid solve under a time cap, and a load-balance check from the recovered stresses.
+//! workspace's volume mesher with through-wall layers and a size function and the upgrade to
+//! 10-node elements (`volume.rs`, shared with the corpus), the multigrid solve under a time cap,
+//! and a load-balance check from the recovered stresses.
 //! `cases/` says what each part is; `verdict.rs` decides what its numbers mean.
 //!
 //! **The load balance is measured, not assumed.** The applied load is summed here from each loaded
@@ -16,11 +17,11 @@ use solidfem::elastic::{
     Solution, StaticStudy, StepOutcome, StudyOptions,
 };
 use solidfem::mesh::{BoundaryFace, QuadraticTetMesh};
-use solidfem::meshing::quadratic_from_solid;
-use solidfem::tetra::{RefineOptions, Refiner, SizeFn, StepStatus, SurfaceMesher};
+use solidfem::tetra::{RefineOptions, SizeFn};
 
 use super::cases::{Case, Density};
 use super::verdict::{within_limit, LoadBalance, Verdict, LOAD_BALANCE_LIMIT};
+use super::volume::{volume_mesh, VolumeFailure, VolumeStage};
 use crate::gate_diagnostics::multigrid_options;
 
 /// A closed triangle surface: vertices and outward-wound triangles.
@@ -239,44 +240,25 @@ fn solve_density(
     cap_seconds: f64,
 ) -> DensityOutcome {
     let start = Instant::now();
-    let mut mesher = match SurfaceMesher::new(points, triangles) {
-        Ok(mesher) => mesher,
-        Err(error) => return DensityOutcome::Refused(format!("surface mesher: {error}")),
-    };
-    match mesher.step(usize::MAX, &mut || false) {
-        Ok(StepStatus::Done) => {}
-        Ok(other) => return DensityOutcome::MesherRefused(format!("stopped: {other:?}")),
-        Err(error) => return DensityOutcome::MesherRefused(error.to_string()),
-    }
-    let solid = match mesher.result() {
-        Ok(solid) => solid,
-        Err(error) => return DensityOutcome::MesherRefused(error.to_string()),
-    };
     let sizing = density.size;
     let size_function: SizeFn = Box::new(move |p| sizing.at(p));
     let options = RefineOptions {
         layers_through_walls: case.layers,
         ..RefineOptions::default()
     };
-    let mut refiner = match Refiner::new(solid, size_function, options) {
-        Ok(refiner) => refiner,
-        Err(error) => return DensityOutcome::Refused(format!("refiner: {error}")),
-    };
-    match refiner.step(usize::MAX, &mut || false) {
-        Ok(StepStatus::Done) => {}
-        Ok(other) => return DensityOutcome::Refused(format!("refinement stopped: {other:?}")),
-        Err(error) => return DensityOutcome::Refused(format!("refinement: {error}")),
-    }
-    let refined = match refiner.result() {
-        Ok(refined) => refined,
-        Err(error) => return DensityOutcome::Refused(format!("refinement: {error}")),
-    };
-    let min_dihedral = refiner.report().after.min_degrees;
     let quadrature = Quadrature::FourPoint;
-    let mesh = match quadratic_from_solid(&refined, quadrature) {
-        Ok(mesh) => mesh,
-        Err(error) => return DensityOutcome::Refused(format!("10-node upgrade: {error}")),
+    let volume = match volume_mesh(
+        (points, triangles),
+        size_function,
+        options,
+        quadrature,
+        &mut || false,
+    ) {
+        Ok(volume) => volume,
+        Err(failure) => return refused_by_volume(failure),
     };
+    let min_dihedral = volume.report.after.min_degrees;
+    let mesh = volume.mesh;
     let supports = match (case.apply)(&mesh) {
         Ok(supports) => supports,
         Err(error) => return DensityOutcome::Refused(format!("supports and loads: {error}")),
@@ -330,6 +312,30 @@ fn solve_density(
         min_dihedral,
         seconds: start.elapsed().as_secs_f64(),
     }))
+}
+
+/// The wording of a volume-stage refusal: surface recovery's own failures are the mesher's,
+/// everything else is the stage's refusal of this part.
+fn refused_by_volume(failure: VolumeFailure) -> DensityOutcome {
+    match failure {
+        VolumeFailure::Surface(error) => {
+            DensityOutcome::Refused(format!("surface mesher: {error}"))
+        }
+        VolumeFailure::Recovery(error) => DensityOutcome::MesherRefused(error.to_string()),
+        VolumeFailure::Stopped {
+            stage: VolumeStage::Recovery,
+            status,
+        } => DensityOutcome::MesherRefused(format!("stopped: {status:?}")),
+        VolumeFailure::Refiner(error) => DensityOutcome::Refused(format!("refiner: {error}")),
+        VolumeFailure::Refinement(error) => DensityOutcome::Refused(format!("refinement: {error}")),
+        VolumeFailure::Stopped {
+            stage: VolumeStage::Refinement,
+            status,
+        } => DensityOutcome::Refused(format!("refinement stopped: {status:?}")),
+        VolumeFailure::Upgrade(error) => {
+            DensityOutcome::Refused(format!("10-node upgrade: {error}"))
+        }
+    }
 }
 
 pub(crate) enum SolveEnd {

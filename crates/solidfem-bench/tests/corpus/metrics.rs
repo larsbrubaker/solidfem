@@ -11,7 +11,7 @@ use solidfem_bench::corpus::self_intersect::count_penetrating_pairs;
 use solidfem_bench::corpus::soup::TriSoup;
 
 /// A closed axis-aligned box from the origin to `size`, wound outward.
-fn cuboid(size: [f64; 3], offset: [f64; 3]) -> TriSoup {
+pub fn cuboid(size: [f64; 3], offset: [f64; 3]) -> TriSoup {
     let corner = |x: usize, y: usize, z: usize| {
         [
             offset[0] + x as f64 * size[0],

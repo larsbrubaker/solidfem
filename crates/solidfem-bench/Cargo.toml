@@ -1,5 +1,6 @@
 # solidfem-bench: measures what real inputs do to the mesher and the solver. Never published. The
-# `solidfem-corpus` binary measures real triangle meshes and the solidmesh surface remesher,
+# `solidfem-corpus` binary measures real triangle meshes, the solidmesh surface remesher and this
+# workspace's volume mesher on the remeshed surfaces,
 # natively only, through a path dependency on a solidmesh checkout with a version floor. The
 # `solidfem-sliver` binary measures what bad boundary triangles cost a stress result. The
 # `solidfem-gate` binary is the end-of-mesher gate: this workspace's mesher into the solver on a

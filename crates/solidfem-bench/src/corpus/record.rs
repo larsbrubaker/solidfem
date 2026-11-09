@@ -1,5 +1,5 @@
-//! The one-line record of a measured part, and the tables and summaries the binary prints from
-//! them. A record is a `key=value` list on one line, so a child process can hand it to the parent
+//! The one-line records of a measured part (its input, its remesh and its volume mesh), and the
+//! tables and summaries the binary prints from them. A record is a `key=value` list on one line, so a child process can hand it to the parent
 //! that runs the corpus and a crashed child costs only its own row.
 
 use std::collections::BTreeMap;
@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 use super::g3_mount::remesh::RemeshRefusal;
 use super::measure::InputMetrics;
 use super::remesh_trial::{RemeshTrial, RemeshedPart, TargetSource};
+use super::volume_trial::{outcome_name, VolumeEdgeSource, VolumeTrial};
 
 /// A parsed record: field name to text.
 pub type Record = BTreeMap<String, String>;
@@ -112,6 +113,78 @@ fn append_remeshed(fields: &mut Vec<(String, String)>, part: &RemeshedPart) {
     );
 }
 
+/// The `key=value` fields of a volume trial.
+pub fn volume_fields(name: &str, trial: &VolumeTrial) -> Vec<(String, String)> {
+    let source = match trial.edge_source {
+        VolumeEdgeSource::Remesh => "remesh",
+        VolumeEdgeSource::TetBudget => "budget",
+    };
+    let mut fields = vec![
+        ("name".to_string(), name.replace(' ', "_")),
+        ("kind".to_string(), "volume".to_string()),
+        ("vh".to_string(), num(trial.edge_length)),
+        ("vhsrc".to_string(), source.to_string()),
+        ("status".to_string(), outcome_name(&trial.outcome)),
+        ("sec".to_string(), num(trial.seconds)),
+    ];
+    if let Ok(part) = &trial.outcome {
+        fields.extend(
+            [
+                ("tets", part.tets.to_string()),
+                ("nodes", part.nodes.to_string()),
+                ("mindih", num(part.min_dihedral_degrees)),
+                ("lt1", part.under_one_degree.to_string()),
+                ("lt5", part.under_five_degrees.to_string()),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v)),
+        );
+    }
+    fields
+}
+
+/// The volume record of a part whose child process ended during the volume stage, `how` saying
+/// how (`timeout` or `crashed`): the earlier records were already written, so the loss is the
+/// volume stage's.
+pub fn volume_lost_fields(name: &str, how: &str) -> Vec<(String, String)> {
+    vec![
+        ("name".to_string(), name.replace(' ', "_")),
+        ("kind".to_string(), "volume".to_string()),
+        ("status".to_string(), format!("child:{how}")),
+    ]
+}
+
+/// How many `records` have each value of `key`, most frequent first, ties by value.
+pub fn counts_by(records: &[Record], key: &str) -> Vec<(String, usize)> {
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for record in records {
+        *counts.entry(field(record, key)).or_insert(0) += 1;
+    }
+    let mut sorted: Vec<(String, usize)> = counts
+        .into_iter()
+        .map(|(value, count)| (value.to_string(), count))
+        .collect();
+    sorted.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    sorted
+}
+
+/// The minimum, 10th, 50th and 90th percentile and maximum of the numeric field `key`.
+pub fn distribution(records: &[Record], key: &str) -> String {
+    let mut values: Vec<f64> = records.iter().filter_map(|r| field_f64(r, key)).collect();
+    values.sort_unstable_by(f64::total_cmp);
+    let (Some(first), Some(last)) = (values.first(), values.last()) else {
+        return "no values".to_string();
+    };
+    let at = |q: f64| super::measure::percentile(&values, q);
+    format!(
+        "min {first:.4}  p10 {:.4}  p50 {:.4}  p90 {:.4}  max {last:.4}  (n={})",
+        at(0.1),
+        at(0.5),
+        at(0.9),
+        values.len()
+    )
+}
+
 /// One `key=value` line from `fields`.
 pub fn to_line(fields: &[(String, String)]) -> String {
     fields
@@ -144,18 +217,20 @@ pub fn field<'a>(record: &'a Record, key: &str) -> &'a str {
     record.get(key).map_or("-", String::as_str)
 }
 
-/// `records` as a fixed-width table of `columns`.
+/// `records` as a fixed-width table of `columns`. A cell is cut at 18 characters, except a
+/// `status`, which is a failure class's name: cut short, two classes would read alike.
 pub fn table(records: &[Record], columns: &[(&str, &str)]) -> String {
     let widths: Vec<usize> = columns
         .iter()
         .map(|(key, title)| {
+            let cap = if *key == "status" { 48 } else { 18 };
             records
                 .iter()
                 .map(|r| field(r, key).len())
                 .chain([title.len()])
                 .max()
                 .unwrap_or(0)
-                .min(18)
+                .min(cap)
         })
         .collect();
     let mut out = String::new();

@@ -1,5 +1,6 @@
 //! solidfem-bench: measurements of what real inputs do to the mesher and the solver, native only,
-//! never published. `corpus` measures real triangle meshes and the solidmesh surface remesher
+//! never published. `corpus` measures real triangle meshes, the solidmesh surface remesher and the
+//! volume mesher on what it produces
 //! (`src/bin/corpus.rs` runs it); `sliver` measures what bad boundary triangles cost a stress
 //! result (`src/bin/sliver.rs` runs it). The end-of-mesher gate, this workspace's mesher into the
 //! solver on a thin plate, is `src/bin/gate.rs`; what it prints on request about the multigrid is
