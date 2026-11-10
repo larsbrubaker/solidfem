@@ -83,6 +83,8 @@ pub(crate) struct FlipCounts {
     pub(crate) three_two: usize,
     pub(crate) four_four: usize,
     pub(crate) larger: usize,
+    /// Stuck edges made by replacing the region around them with a star (`reconnect.rs`).
+    pub(crate) star_reconnections: usize,
     /// Edges inside a flat patch flipped towards its Delaunay triangulation (`plane_delaunay.rs`).
     pub(crate) in_plane_flips: usize,
     /// Inner patch edges that fail the in-circle test but had no legal flip in the end.
@@ -695,6 +697,18 @@ impl Flipper {
                 new.push([face[0], face[1], face[2], index]);
             }
         }
+        self.steiner_points += 1;
+        self.replace_cavity(cavity, &new)
+    }
+
+    /// Replaces the tetrahedra `cavity` by `new`, which tile the same region. A point whose whole
+    /// star was in the cavity is in no tetrahedron afterwards: nothing may reach it through a
+    /// slot that has since been freed or reused.
+    pub(crate) fn replace_cavity(
+        &mut self,
+        cavity: &[u32],
+        new: &[[u32; 4]],
+    ) -> Result<(), TetraError> {
         let mut before: Vec<u32> = cavity
             .iter()
             .flat_map(|&t| self.core.tets[t as usize])
@@ -702,10 +716,7 @@ impl Flipper {
             .collect();
         before.sort_unstable();
         before.dedup();
-        self.apply(cavity, &new)?;
-        self.steiner_points += 1;
-        // A point whose whole star was in the cavity is in no tetrahedron now: nothing may reach
-        // it through a slot that has since been freed or reused.
+        self.apply(cavity, new)?;
         let kept: HashSet<u32> = new.iter().flatten().copied().collect();
         for vertex in before {
             if !kept.contains(&vertex) {

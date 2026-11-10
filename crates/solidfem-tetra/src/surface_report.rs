@@ -35,6 +35,9 @@ pub struct RecoveryReport {
     pub flips_three_to_two: usize,
     pub flips_four_to_four: usize,
     pub flips_larger_ring: usize,
+    /// Stuck edges recovered by replacing the region around them with a star from one end, adding
+    /// no point.
+    pub star_reconnections: usize,
     /// Points added strictly inside the solid and still in the mesh. A point swallowed by a later
     /// point's cavity is gone and is not counted.
     pub steiner_points: usize,

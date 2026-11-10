@@ -12,10 +12,12 @@
 //! patch's constrained Delaunay triangulation in its own plane (`plane_delaunay.rs`), except at
 //! the inner edges [`RecoveryReport::in_plane_flips_refused`] counts, where no legal flip exists.
 //!
-//! **When flips run out.** Flips alone cannot recover every surface: a stuck edge or patch gets a
-//! point added strictly inside the solid (`steiner.rs`), a bounded number per constraint and in
-//! total, after the rounds of retrying without one. What remains after that is reported by
-//! [`TetraError::SurfaceNotRecovered`], never returned as a mesh with a triangle missing.
+//! **When flips run out.** Flips alone cannot recover every surface. A stuck edge is first made
+//! by replacing the whole region its segment passes through with a star from one end
+//! (`reconnect.rs`), which adds no point; a stuck edge the star cannot make, or a stuck patch,
+//! gets a point added strictly inside the solid (`steiner.rs`), a bounded number per constraint
+//! and in total, after the rounds of retrying without one. What remains after that is reported
+//! by [`TetraError::SurfaceNotRecovered`], never returned as a mesh with a triangle missing.
 //!
 //! **Which tetrahedra are solid.** Layers are counted from outside through the surface faces
 //! (`recover.rs`): an odd layer is solid, whether a body, a void or a body in a void. The
@@ -374,6 +376,7 @@ impl SurfaceMesher {
         self.report.flips_three_to_two = counts.three_two;
         self.report.flips_four_to_four = counts.four_four;
         self.report.flips_larger_ring = counts.larger;
+        self.report.star_reconnections = counts.star_reconnections;
         self.report.in_plane_flips = counts.in_plane_flips;
         self.report.in_plane_flips_refused = counts.in_plane_flips_refused;
         let recovery = self
@@ -602,7 +605,8 @@ enum PointOutcome {
     Stopped(GaveUp),
 }
 
-/// Places one point inside the solid for stuck edge `(u, v)`. A point placed over a chord's ring
+/// Makes stuck edge `(u, v)` with a star of the region around it, or failing that places one
+/// point inside the solid for it. A point placed over a chord's ring
 /// exists to make that ring small enough to flip, so that flip is tried here, with no relief so
 /// the point's star stays. If the point's cavity took the chord or an end of it (an earlier added
 /// point can be swallowed), the flip finds no such edge and does nothing.
@@ -611,6 +615,11 @@ fn place_point_for_edge(
     u: u32,
     v: u32,
 ) -> Result<PointOutcome, TetraError> {
+    // A reconnection adds no point, so it comes first: every point placed for this edge changes
+    // the tetrahedra around it, and a later attempt starts from the new ones.
+    if recovery.flipper.reconnect_edge(u, v)? {
+        return Ok(PointOutcome::Recovered);
+    }
     if recovery.flipper.steiner_points >= recovery.steiner_limit {
         return Ok(PointOutcome::Stopped(GaveUp::PointLimit));
     }

@@ -11,6 +11,8 @@ mod errors;
 mod flat_patches;
 #[path = "surface/instances.rs"]
 mod instances;
+#[path = "surface/reconnect.rs"]
+mod reconnect;
 #[path = "surface/resumable.rs"]
 mod resumable;
 #[path = "surface/rotations.rs"]

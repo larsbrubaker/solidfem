@@ -10,7 +10,8 @@
 //! [`SurfaceMesher`] takes a closed surface and builds a tetrahedralization of the solid it
 //! bounds, its boundary the same surface: the Delaunay tetrahedralization of the surface's
 //! vertices, then the surface's real edges and flat regions recovered by flips (`flips.rs`,
-//! `recover.rs`) and a point inside the solid where no flip can finish (`steiner.rs`), and every
+//! `recover.rs`), by a star of the region around a stuck edge (`reconnect.rs`) and by a point
+//! inside the solid where neither can finish (`steiner.rs`), and every
 //! exterior tetrahedron removed by a flood fill. Triangles inside a flat region may change;
 //! nothing about the surface's shape does.
 //!
@@ -66,6 +67,7 @@ mod plane_delaunay;
 mod predicates;
 mod quality;
 mod quality_points;
+mod reconnect;
 mod recover;
 mod refine;
 mod refine_mesh;

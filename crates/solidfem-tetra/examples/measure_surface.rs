@@ -137,7 +137,7 @@ fn measure(name: &str, surface: Surface) {
     println!(
         "{name}: triangles={triangles} time {seconds:.3}s longest unit {longest_unit:.4}s \
          tets={tets} edges {}/{} present, faces \
-         {}/{} present; flips 2-3={} 3-2={} 4-4={} larger={} steiner={} failed edges={} faces={} \
+         {}/{} present; flips 2-3={} 3-2={} 4-4={} larger={} stars={} steiner={} failed edges={} faces={} \
          changed triangles={} patches={} => {outcome}",
         report.edges_present_after_delaunay,
         report.edges_total,
@@ -147,6 +147,7 @@ fn measure(name: &str, surface: Surface) {
         report.flips_three_to_two,
         report.flips_four_to_four,
         report.flips_larger_ring,
+        report.star_reconnections,
         report.steiner_points,
         report.edges_failed,
         report.faces_failed,

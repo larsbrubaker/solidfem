@@ -371,6 +371,59 @@ pub fn needle_box(length: f64, n: usize) -> Surface {
     s
 }
 
+/// A closed tube with a thin wall: skins `wall` apart at `radius`, `n` facets round, `rings`
+/// layers up to `height`, each layer turned `twist` radians from the one below. The wall's quads
+/// are split along one diagonal, so a small twist folds each skin slightly and the two skins
+/// stay close: long nearly flat triangles with another skin a fraction of their length away.
+pub fn twisted_tube(
+    n: usize,
+    rings: usize,
+    radius: f64,
+    wall: f64,
+    height: f64,
+    twist: f64,
+) -> Surface {
+    let at = |r: f64, i: usize, k: usize| {
+        let (sine, cosine) = sin_cos(TAU * (i % n) as f64 / n as f64 + twist * k as f64);
+        [r * cosine, r * sine, height * k as f64 / rings as f64]
+    };
+    let inner = radius - wall;
+    let mut s = Surface::default();
+    for k in 0..rings {
+        for i in 0..n {
+            let j = i + 1;
+            s.quad(
+                at(radius, i, k),
+                at(radius, j, k),
+                at(radius, j, k + 1),
+                at(radius, i, k + 1),
+            );
+            s.quad(
+                at(inner, j, k),
+                at(inner, i, k),
+                at(inner, i, k + 1),
+                at(inner, j, k + 1),
+            );
+        }
+    }
+    for i in 0..n {
+        let j = i + 1;
+        s.quad(
+            at(inner, j, 0),
+            at(radius, j, 0),
+            at(radius, i, 0),
+            at(inner, i, 0),
+        );
+        s.quad(
+            at(radius, i, rings),
+            at(radius, j, rings),
+            at(inner, j, rings),
+            at(inner, i, rings),
+        );
+    }
+    s
+}
+
 /// The Schoenhardt polyhedron: a triangular prism twisted so each side quad folds inward along
 /// its reflex diagonal. Six vertices, eight faces, and no tetrahedralization without a new point.
 pub fn schoenhardt() -> Surface {

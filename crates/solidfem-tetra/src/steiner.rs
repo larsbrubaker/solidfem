@@ -1,7 +1,8 @@
 //! Adding a point strictly inside the solid when no flip can make a constraint appear. Stuck
 //! constraints are stuck because the tetrahedra around them have coplanar apexes and locked sides;
 //! a new point in general position changes that geometry where flips cannot. `surface.rs` calls
-//! this between recovery attempts, a bounded number of times.
+//! this between recovery attempts, a bounded number of times, after a stuck edge has failed to be
+//! made by the star of its region (`reconnect.rs`), which grows its cavity by the same rules.
 //!
 //! **Where the point goes.** The obstruction is a mesh edge, or the face a missing surface edge
 //! passes through. The union of the tetrahedra around it is star-shaped from every point on the
@@ -292,7 +293,7 @@ impl Flipper {
                 if candidate.iter().any(|value| !value.is_finite()) {
                     continue;
                 }
-                let Some(cavity) = self.steiner_cavity(&seeds, candidate) else {
+                let Some(cavity) = self.steiner_cavity(&seeds, candidate, None) else {
                     continue;
                 };
                 match region.classify(&self.core.points, candidate) {
@@ -310,7 +311,16 @@ impl Flipper {
     /// constraints. Grows from `seeds` across any boundary face the point cannot see, then
     /// checks no locked face or edge would be destroyed. A surface vertex must keep a
     /// tetrahedron outside the cavity; a point added earlier may be swallowed (see `add_steiner`).
-    fn steiner_cavity(&mut self, seeds: &[u32], candidate: [f64; 3]) -> Option<Vec<u32>> {
+    ///
+    /// With `apex` the point at `candidate` is that existing vertex (`reconnect.rs`): faces
+    /// holding it are the star's own sides and need no tetrahedron, and it stays whatever the
+    /// cavity takes, so what it holds is kept by the star rather than by the cavity's rim.
+    pub(crate) fn steiner_cavity(
+        &mut self,
+        seeds: &[u32],
+        candidate: [f64; 3],
+        apex: Option<u32>,
+    ) -> Option<Vec<u32>> {
         let mut cavity: Vec<u32> = seeds.to_vec();
         let mut grew = true;
         while grew {
@@ -326,12 +336,17 @@ impl Flipper {
                     if cavity.contains(&n) {
                         continue;
                     }
+                    let face = positions.map(|position| tet[position]);
+                    if apex.is_some_and(|vertex| face.contains(&vertex)) {
+                        continue;
+                    }
                     let [a, b, c] =
                         positions.map(|position| &self.core.points[tet[position] as usize]);
                     if orient(a, b, c, &candidate) > 0.0 {
                         continue;
                     }
-                    let face = positions.map(|position| tet[position]);
+                    // The cavity would refuse this face below for being inside it; stopping
+                    // here only saves growing a region that is already lost.
                     if self
                         .locked_faces
                         .contains(&face_key(face[0], face[1], face[2]))
@@ -357,10 +372,9 @@ impl Flipper {
         let surface_count = self.core.points.len() - self.steiner_points;
         for &t in &inside {
             let tet = self.core.tets[t as usize];
-            if tet
-                .iter()
-                .any(|&v| (v as usize) < surface_count && !self.vertex_survives(v, &inside))
-            {
+            if tet.iter().any(|&v| {
+                (v as usize) < surface_count && Some(v) != apex && !self.vertex_survives(v, &inside)
+            }) {
                 return None;
             }
             for (i, positions) in FACE.iter().enumerate() {
@@ -370,6 +384,7 @@ impl Flipper {
                     if self
                         .locked_faces
                         .contains(&face_key(face[0], face[1], face[2]))
+                        && !self.apex_keeps_face(face, apex, &inside)
                     {
                         return None;
                     }
@@ -378,6 +393,8 @@ impl Flipper {
             for a in 0..4 {
                 for b in a + 1..4 {
                     if self.locked_edges.contains(&edge_key(tet[a], tet[b]))
+                        && Some(tet[a]) != apex
+                        && Some(tet[b]) != apex
                         && !self.edge_survives(tet[a], tet[b], &inside)
                     {
                         return None;
@@ -411,6 +428,21 @@ impl Flipper {
             .into_iter()
             .filter(|&(x, z)| !self.tet_positive(&[u, y, x, z]))
             .collect()
+    }
+
+    /// Whether a star on `apex` keeps inner locked face `face`: it must hold the apex, and the
+    /// edge across from the apex must stay on the cavity's rim, where a star tetrahedron has it.
+    /// A surface's locked faces have their edges locked too and the cavity check already holds
+    /// those, so the edge test here is defence in depth for a face locked on its own.
+    fn apex_keeps_face(&mut self, face: [u32; 3], apex: Option<u32>, cavity: &[u32]) -> bool {
+        let Some(apex) = apex else {
+            return false;
+        };
+        let mut rest = face.iter().copied().filter(|&v| v != apex);
+        let (Some(a), Some(b), None) = (rest.next(), rest.next(), rest.next()) else {
+            return false;
+        };
+        self.edge_survives(a, b, cavity)
     }
 
     /// Whether vertex `v` keeps a tetrahedron outside `cavity`.
