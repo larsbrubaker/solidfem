@@ -47,7 +47,8 @@
 //! Layout: `refine.rs` is the refinement run, `refine_options.rs` its options and report, `refine_mesh.rs` reads a solid in and writes
 //! the refined one out, `layers.rs` the through-wall points from
 //! surface vertices, `wall_fill.rs` those from the middle of large wall faces, `skins.rs`
-//! the opposite skins of a wall and the splitting of the edges joining them, `interior.rs` the
+//! the opposite skins of a wall and the splitting of the edges joining them, `quad_chords.rs` the
+//! chords that run along the surface and are never called through, `interior.rs` the
 //! insertion, `quality.rs` the improvement, `quality_points.rs` the points for slivers no flip can remove, `surface.rs` is the surface-recovery interface and
 //! classifies the solid, `surface_report.rs` what a recovery run reports, `patches.rs`
 //! finds the flat regions, `recover.rs` orders the recovery of each constraint, `plane_delaunay.rs`
@@ -65,6 +66,7 @@ mod order;
 mod patches;
 mod plane_delaunay;
 mod predicates;
+mod quad_chords;
 mod quality;
 mod quality_points;
 mod reconnect;

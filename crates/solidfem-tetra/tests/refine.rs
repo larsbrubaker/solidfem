@@ -13,6 +13,8 @@ mod contracts;
 mod layers;
 #[path = "refine/resumable.rs"]
 mod resumable;
+#[path = "refine/rib.rs"]
+mod rib;
 #[allow(dead_code)]
 #[path = "surface/shapes.rs"]
 mod shapes;
@@ -22,6 +24,8 @@ mod sizing;
 mod slivers;
 #[path = "refine/support.rs"]
 mod support;
+#[path = "refine/surface_chords.rs"]
+mod surface_chords;
 #[path = "refine/sweep.rs"]
 mod sweep;
 #[path = "refine/through.rs"]

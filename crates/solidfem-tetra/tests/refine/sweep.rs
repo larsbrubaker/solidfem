@@ -17,22 +17,22 @@ use crate::support::{constant_size, options_with_layers, run_refine};
 /// One skin membership of one surface vertex: which wall, which of its two skins, and which of the
 /// wall's free rim sides the vertex is on, as a bit mask.
 #[derive(Clone, Copy)]
-struct Tag {
-    wall: u16,
-    side: u8,
-    rim: u8,
+pub(crate) struct Tag {
+    pub(crate) wall: u16,
+    pub(crate) side: u8,
+    pub(crate) rim: u8,
 }
 
 /// A surface and each vertex's skin memberships, recorded by its generator.
 #[derive(Default, Clone)]
-struct Probe {
-    surface: Surface,
-    tags: Vec<Vec<Tag>>,
+pub(crate) struct Probe {
+    pub(crate) surface: Surface,
+    pub(crate) tags: Vec<Vec<Tag>>,
 }
 
 impl Probe {
     /// The welded vertex at `point`, adding `tags` the first time it is seen.
-    fn vertex(&mut self, point: [f64; 3], tags: impl FnOnce() -> Vec<Tag>) -> u32 {
+    pub(crate) fn vertex(&mut self, point: [f64; 3], tags: impl FnOnce() -> Vec<Tag>) -> u32 {
         let before = self.surface.points.len();
         let index = self.surface.vertex(point);
         if self.surface.points.len() > before {
@@ -45,7 +45,7 @@ impl Probe {
         self.surface.triangles.push([a, b, c]);
     }
 
-    fn quad(&mut self, a: u32, b: u32, c: u32, d: u32) {
+    pub(crate) fn quad(&mut self, a: u32, b: u32, c: u32, d: u32) {
         self.triangle(a, b, c);
         self.triangle(a, c, d);
     }
@@ -68,7 +68,7 @@ impl Probe {
         }
     }
 
-    fn rotated(&self, angles: [f64; 3]) -> Probe {
+    pub(crate) fn rotated(&self, angles: [f64; 3]) -> Probe {
         let (points, triangles) = rotated_by(&self.surface, angles);
         Probe {
             surface: Surface {
@@ -599,7 +599,7 @@ fn shapes() -> Vec<(String, Probe, f64)> {
 }
 
 /// The interior edges of `tets` joining the two skins of one wall, away from a shared free rim.
-fn false_edges(probe: &Probe, tets: &[[u32; 4]]) -> Vec<(u32, u32)> {
+pub(crate) fn false_edges(probe: &Probe, tets: &[[u32; 4]]) -> Vec<(u32, u32)> {
     let surface_points = probe.surface.points.len();
     let mut surface_edges = HashSet::new();
     for t in &probe.surface.triangles {

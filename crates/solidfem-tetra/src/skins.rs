@@ -24,8 +24,11 @@
 //! thickness never qualifies, and a part meshed so coarsely that one element spans it (an
 //! 8-vertex cube) does and loses its few interior edges, by the option's own definition of thin.
 //! Where "opposite" has no clear answer, this falls on the side of splitting. The one exclusion is
-//! an edge lying in a surface plane both of its ends share (a rim quad's other diagonal): it runs
-//! along that surface, and a point on it could not be inside the solid.
+//! a chord that runs across the triangles of one flat patch (`quad_chords.rs`), such as a flat
+//! quad's other diagonal: every point of it is within the coordinates' rounding of those
+//! triangles, so a point on it is inside the solid by no more than the coordinates can resolve,
+//! and would make an element flat in the patch's plane. A chord merely in a plane both ends share
+//! is not excluded: across the root of a rib standing in a plate it passes through the rib.
 //!
 //! **The split.** Each such edge is replaced by a chain of `layers_through_walls` pieces, its
 //! interior points placed on the edge by an edge-ring split (`Flipper::split_edge`), the tetrahedra
@@ -48,7 +51,8 @@ use std::collections::HashMap;
 use crate::core::{DEAD, GHOST};
 use crate::error::TetraError;
 use crate::flips::{edge_key, Flipper};
-use crate::quality::{cross, dot, length, normalized, subtract};
+use crate::quad_chords::QuadChords;
+use crate::quality::{cross, dot, normalized, subtract};
 
 /// The cosine of the angle between two outward normals at or beyond which two faces count as
 /// facing away from each other: 120 degrees. The value is a judgement, between the 90 degrees of
@@ -58,7 +62,7 @@ pub(crate) const OPPOSED_COSINE: f64 = -0.5;
 
 /// Two normals this nearly equal are the same skin facing, at a vertex: well below the angle
 /// between facets of a curved wall, well above the rounding of a unit normal.
-const SAME_FACING_COSINE: f64 = 1.0 - 1e-6;
+pub(crate) const SAME_FACING_COSINE: f64 = 1.0 - 1e-6;
 
 /// The normals and local edge lengths that decide which surface vertices face each other.
 /// Empty when through-wall layers were not requested, so nothing is ever opposite.
@@ -68,7 +72,15 @@ pub(crate) struct OppositeSkins {
     edge_mean: Vec<f64>,
     /// Each surface vertex's distinct incident facings.
     faces: Vec<Vec<Facing>>,
+    /// The surface triangles that decide which chords run along a flat patch.
+    chords: QuadChords,
     ratio: f64,
+}
+
+/// What [`incident_faces`] reads off the surface: each vertex's facings and the chord data.
+pub(crate) struct SurfaceFacings {
+    faces: Vec<Vec<Facing>>,
+    chords: QuadChords,
 }
 
 /// One facing at a surface vertex: a unit normal and the flat patch it belongs to, patches being
@@ -119,12 +131,13 @@ fn flat_patches(normals: &[[f64; 3]], boundary: &[[u32; 3]]) -> Vec<u32> {
 }
 
 /// Each vertex's distinct incident facings, for [`OppositeSkins`], in a stable order: first seen
-/// in the surface's triangle order, one entry per flat patch at the vertex.
+/// in the surface's triangle order, one entry per flat patch at the vertex; and the surface's quad
+/// chords.
 pub(crate) fn incident_faces(
     points: &[[f64; 3]],
     boundary: &[[u32; 3]],
     count: usize,
-) -> Vec<Vec<Facing>> {
+) -> SurfaceFacings {
     let normals: Vec<[f64; 3]> = boundary
         .iter()
         .map(|face| {
@@ -145,20 +158,22 @@ pub(crate) fn incident_faces(
             }
         }
     }
-    faces
+    let chords = QuadChords::new(points, boundary, &normals, &patches, count);
+    SurfaceFacings { faces, chords }
 }
 
 impl OppositeSkins {
     pub(crate) fn new(
         normals: Vec<[f64; 3]>,
         edge_mean: Vec<f64>,
-        faces: Vec<Vec<Facing>>,
+        facings: SurfaceFacings,
         ratio: f64,
     ) -> Self {
         Self {
             normals,
             edge_mean,
-            faces,
+            faces: facings.faces,
+            chords: facings.chords,
             ratio,
         }
     }
@@ -171,8 +186,8 @@ impl OppositeSkins {
 
     /// The through-wall direction of the edge from `u` to `v` if it joins opposite skins: the
     /// vertex normals first (one averaged direction per vertex), then every pair of faces at the
-    /// two ends, so a ridge or reflex corner cannot hide a skin behind its average. An edge lying
-    /// in a surface plane both ends share is the one exception.
+    /// two ends, so a ridge or reflex corner cannot hide a skin behind its average. A chord that
+    /// runs along one flat patch is the one exception. Symmetric in `u` and `v`.
     fn through_axis(&self, points: &[[f64; 3]], u: u32, v: u32) -> Option<[f64; 3]> {
         let (nu, nv) = (
             *self.normals.get(u as usize)?,
@@ -181,14 +196,13 @@ impl OppositeSkins {
         let along = subtract(points[v as usize], points[u as usize]);
         let thin = self.ratio * self.edge_mean[u as usize].max(self.edge_mean[v as usize]);
         let (at_u, at_v) = (&self.faces[u as usize], &self.faces[v as usize]);
-        if shares_plane(at_u, at_v, along) {
-            return None;
-        }
-        opposed_axis(nu, nv, along, thin).or_else(|| {
+        // The opposed test first, as it is cheaper than the walk; the answer is both together.
+        let axis = opposed_axis(nu, nv, along, thin).or_else(|| {
             at_u.iter()
                 .flat_map(|&a| at_v.iter().map(move |&b| (a.normal, b.normal)))
                 .find_map(|(a, b)| opposed_axis(a, b, along, thin))
-        })
+        })?;
+        (!self.chords.along_surface(points, u, v)).then_some(axis)
     }
 
     /// Every interior edge joining opposite skins, sorted so the work order is the same every run.
@@ -258,22 +272,6 @@ fn opposed_axis(nu: [f64; 3], nv: [f64; 3], along: [f64; 3], thin: f64) -> Optio
     }
     let axis = normalized(subtract(nu, nv));
     (dot(along, axis).abs() <= thin).then_some(axis)
-}
-
-/// How far from a shared plane a segment may lean and still be called in it: rounding on a
-/// segment's end coordinates of the magnitudes the mesher accepts is far below this, and an edge
-/// meant to lean through a wall tilts by far more than this.
-const IN_PLANE_RATIO: f64 = 1e-9;
-
-/// Whether both vertices lie on one flat patch and the segment between them lies in its plane: such
-/// an edge runs along that surface, not through a wall. Two ends on different patches of one plane
-/// (the base either side of a stem) do not count: their chord passes through the solid.
-fn shares_plane(at_u: &[Facing], at_v: &[Facing], along: [f64; 3]) -> bool {
-    let reach = length(along);
-    at_u.iter().any(|a| {
-        dot(along, a.normal).abs() <= IN_PLANE_RATIO * reach
-            && at_v.iter().any(|b| b.patch == a.patch)
-    })
 }
 
 /// What one through-edge split did.
