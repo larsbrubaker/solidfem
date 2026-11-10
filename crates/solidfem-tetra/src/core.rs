@@ -458,6 +458,11 @@ impl Core {
         Ok(slots)
     }
 
+    /// Slots holding a tetrahedron, real or ghost: every slot but the freed ones.
+    pub(crate) fn live_slots(&self) -> usize {
+        self.tets.len() - self.free.len()
+    }
+
     /// Adds a point to the point list, returning its index.
     pub(crate) fn push_point(&mut self, point: [f64; 3]) -> u32 {
         // The caller checked the count is below the index limit.

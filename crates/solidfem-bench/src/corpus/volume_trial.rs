@@ -84,6 +84,9 @@ pub fn volume_and_measure(surface: &TriSoup, remesh_edge: f64) -> VolumeTrial {
     let size: SizeFn = Box::new(move |_| edge);
     let options = RefineOptions {
         layers_through_walls: LAYERS_THROUGH_WALLS,
+        // The mesher keeps the budget as a promise, refusing a surface that alone exceeds it.
+        // `TET_BUDGET` is a whole number far below `usize::MAX`, so the cast is exact.
+        max_tets: TET_BUDGET as usize,
         ..RefineOptions::default()
     };
     let mut past_cap = || start.elapsed().as_secs_f64() >= TIME_CAP_SECONDS;

@@ -147,6 +147,9 @@ impl Flipper {
                 }
             }
         }
+        if !self.fits(cavity.len(), self.star_size(&cavity)) {
+            return Ok(false);
+        }
         self.add_steiner(&cavity, point)?;
         Ok(true)
     }

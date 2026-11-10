@@ -24,10 +24,13 @@
 //! points dividing the wall would be separated by only a few units in the last place of the part
 //! size, so the wall gets no layers at all: it is counted in the report, no point is added and no
 //! error is raised. The mesh stays exactly valid with the wall one element thick there.
+//!
+//! [`layer_run`] prepares the stage `refine.rs` runs: the ray tree, the separation grid and each
+//! surface vertex's normal and mean edge length.
 
 use std::collections::HashMap;
 
-use crate::quality::{cross, dot, subtract};
+use crate::quality::{cross, dot, length, normalized, subtract};
 
 /// A surface triangle, with its vertex indices so a ray can ignore the ones at its start.
 #[derive(Clone, Copy)]
@@ -355,4 +358,76 @@ fn too_close(kept: &Accepted, point: [f64; 3], axis: [f64; 3], across: f64, thro
     let rest = (dot(delta, delta) - along * along).max(0.0).sqrt();
     let along = along.abs();
     along < through.min(kept.through) && rest < across.min(kept.across)
+}
+
+/// The layer stage's state: the ray tree, the separation grid, each surface vertex's normal and
+/// mean incident edge length, and how far through the vertices and wall faces it is.
+pub(crate) struct LayerRun {
+    pub(crate) rays: SurfaceRays,
+    pub(crate) separation: Separation,
+    pub(crate) normals: Vec<[f64; 3]>,
+    pub(crate) edge_mean: Vec<f64>,
+    pub(crate) vertices: Vec<u32>,
+    pub(crate) cursor: usize,
+    /// The surface triangles and the one the wall fill is on, after the vertices are done.
+    pub(crate) boundary: Vec<[u32; 3]>,
+    pub(crate) fill_cursor: usize,
+    pub(crate) magnitude: f64,
+}
+
+/// Prepares the layer stage: the ray tree, the separation grid and each surface vertex's normal
+/// and mean incident edge length.
+pub(crate) fn layer_run(points: &[[f64; 3]], boundary: &[[u32; 3]], fixed: &[bool]) -> LayerRun {
+    let mut normals = vec![[0.0; 3]; points.len()];
+    let mut edge_total = vec![0.0; points.len()];
+    let mut edge_count = vec![0u32; points.len()];
+    let (mut total_edge, mut edges) = (0.0_f64, 0u32);
+    for face in boundary {
+        let p = face.map(|v| points[v as usize]);
+        let normal = normalized(cross(subtract(p[1], p[0]), subtract(p[2], p[0])));
+        for k in 0..3 {
+            let (v, from, to) = (face[k], p[(k + 1) % 3], p[(k + 2) % 3]);
+            let (e1, e2) = (subtract(from, p[k]), subtract(to, p[k]));
+            let angle = dot(normalized(e1), normalized(e2)).clamp(-1.0, 1.0).acos();
+            let n = &mut normals[v as usize];
+            n[0] += normal[0] * angle;
+            n[1] += normal[1] * angle;
+            n[2] += normal[2] * angle;
+            let l = length(e1);
+            edge_total[v as usize] += l;
+            edge_count[v as usize] += 1;
+            total_edge += l;
+            edges += 1;
+        }
+    }
+    let mean_edge = total_edge / f64::from(edges.max(1));
+    let edge_mean: Vec<f64> = edge_total
+        .iter()
+        .zip(&edge_count)
+        .map(|(total, count)| total / f64::from((*count).max(1)))
+        .collect();
+    let normals: Vec<[f64; 3]> = normals.into_iter().map(normalized).collect();
+    let magnitude = points
+        .iter()
+        .flatten()
+        .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+    let vertices: Vec<u32> = (0..points.len() as u32)
+        .filter(|&v| fixed[v as usize])
+        .collect();
+    let rays = SurfaceRays::new(points, boundary);
+    let mut separation = Separation::new(mean_edge);
+    for &v in &vertices {
+        separation.add_surface(points[v as usize]);
+    }
+    LayerRun {
+        rays,
+        separation,
+        normals,
+        edge_mean,
+        vertices,
+        cursor: 0,
+        boundary: boundary.to_vec(),
+        fill_cursor: 0,
+        magnitude,
+    }
 }

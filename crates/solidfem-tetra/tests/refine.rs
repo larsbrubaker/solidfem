@@ -2,6 +2,8 @@
 // size control measured on the output tetrahedra, determinism, cancel and the budget.
 // `support` reads only public results; `shapes` and `check` are shared with the surface tests.
 
+#[path = "refine/budget.rs"]
+mod budget;
 #[allow(dead_code)]
 #[path = "surface/check.rs"]
 mod check;

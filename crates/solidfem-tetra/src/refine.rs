@@ -32,6 +32,15 @@
 //! optional improvement, so at the limit the pass stops adding points and still returns `Ok`). An edge on the surface cannot be split in this
 //! stage, so it is not counted as too long.
 //!
+//! **The tetrahedron budget.** [`RefineOptions::max_tets`] is a promise: an `Ok` run has at most
+//! that many tetrahedra. The surface and the layers through its thin walls are what the caller
+//! asked for, so a solid over the budget as given (checked in [`Refiner::new`]) or once its
+//! layers are in is [`TetraError::TetBudgetExceeded`], with its count. After that every move that
+//! adds tetrahedra asks the flipper whether it fits (`flips.rs`): the size stage ends at the first
+//! point that would cross ([`RefineReport::size_stopped_at_budget`]), and the quality pass skips
+//! flips and points that would. The stop leaves the interior coarser than the size function where
+//! the stage had not reached yet; nothing about the surface changes.
+//!
 //! **Order and determinism.** Work runs in slot and index order, every choice is made by the exact
 //! predicates or by floating-point values computed the same way each run, and the only hash maps
 //! are read for membership. A slice boundary falls between two units, so slicing changes nothing.
@@ -41,10 +50,8 @@ use std::collections::{HashMap, HashSet};
 use crate::core::{Core, DEAD, GHOST};
 use crate::error::TetraError;
 use crate::flips::{edge_key, face_key, FlipCounts, Flipper};
-use crate::layers::{min_layer_thickness, Separation, SurfaceRays};
-use crate::quality::{
-    cross, histogram, length, min_dihedral_degrees, normalized, subtract, DihedralHistogram,
-};
+use crate::layers::{layer_run, min_layer_thickness, LayerRun};
+use crate::quality::{histogram, min_dihedral_degrees, subtract, DihedralHistogram};
 use crate::refine_mesh::{boundary_faces, centroid_of, checked_size, circumcentre_of, extract};
 use crate::skins::{incident_faces, OppositeSkins};
 use crate::surface::SolidMesh;
@@ -84,6 +91,12 @@ pub struct RefineOptions {
     /// error; a quality point is an optional improvement, so the quality pass just stops adding
     /// them at the limit and still finishes.
     pub max_added_points: usize,
+    /// The most tetrahedra the refined solid may have, a promise: a run that returns `Ok` has at
+    /// most this many. A solid already over it, as given or once its layers are in, is
+    /// [`TetraError::TetBudgetExceeded`]; past that the size stage stops adding points where the
+    /// next would cross it ([`RefineReport::size_stopped_at_budget`]) and the quality pass makes
+    /// no flip or point that would.
+    pub max_tets: usize,
 }
 
 impl Default for RefineOptions {
@@ -93,6 +106,7 @@ impl Default for RefineOptions {
             thin_wall_ratio: 2.0,
             quality_passes: 8,
             max_added_points: 50_000_000,
+            max_tets: usize::MAX,
         }
     }
 }
@@ -138,8 +152,15 @@ pub struct RefineReport {
     pub walls_too_thin_for_rounding: usize,
     /// Points added by the size function.
     pub size_points: usize,
-    /// Size candidates that were refused: too close to a neighbour or with no legal cavity.
+    /// Size candidates that were refused: too close to a neighbour, with no legal cavity, or
+    /// over the tetrahedron budget.
     pub size_points_refused: usize,
+    /// The size stage ended because its next point would have crossed
+    /// [`RefineOptions::max_tets`], so the interior may be coarser than the size function asks.
+    pub size_stopped_at_budget: bool,
+    /// Size points, quality flips and quality points refused because they would have crossed
+    /// [`RefineOptions::max_tets`].
+    pub moves_refused_for_budget: usize,
     /// Flips made by the quality pass, by kind.
     pub flips_two_to_three: usize,
     pub flips_three_to_two: usize,
@@ -153,19 +174,6 @@ pub struct RefineReport {
     pub before: DihedralHistogram,
     /// Minimum dihedral angles after the quality pass.
     pub after: DihedralHistogram,
-}
-
-struct LayerRun {
-    rays: SurfaceRays,
-    separation: Separation,
-    normals: Vec<[f64; 3]>,
-    edge_mean: Vec<f64>,
-    vertices: Vec<u32>,
-    cursor: usize,
-    /// The surface triangles and the one the wall fill is on, after the vertices are done.
-    boundary: Vec<[u32; 3]>,
-    fill_cursor: usize,
-    magnitude: f64,
 }
 
 struct SplitRun {
@@ -214,7 +222,23 @@ pub struct Refiner {
 
 impl Refiner {
     /// Prepares refinement of `solid`. The surface is read from its boundary faces.
+    ///
+    /// # Errors
+    /// [`TetraError::TetBudgetExceeded`] when `solid` already has more tetrahedra than
+    /// [`RefineOptions::max_tets`], and the errors of rebuilding the triangulation.
     pub fn new(solid: SolidMesh, size: SizeFn, options: RefineOptions) -> Result<Self, TetraError> {
+        let first_phase = if options.layers_through_walls >= 2 {
+            RefinePhase::Layers
+        } else {
+            RefinePhase::Sizing
+        };
+        if solid.tets.len() > options.max_tets {
+            return Err(TetraError::TetBudgetExceeded {
+                tets: solid.tets.len(),
+                budget: options.max_tets,
+                phase: first_phase,
+            });
+        }
         let boundary = boundary_faces(&solid);
         let mut locked_edges = HashSet::with_capacity(boundary.len() * 2);
         let mut locked_faces = HashSet::with_capacity(boundary.len());
@@ -230,7 +254,11 @@ impl Refiner {
             }
         }
         let core = Core::from_solid(solid.points.clone(), &solid.tets, &solid.neighbors)?;
-        let flipper = Flipper::new(core, locked_edges, locked_faces, Vec::new());
+        let mut flipper = Flipper::new(core, locked_edges, locked_faces, Vec::new());
+        flipper.ghosts = boundary.len();
+        if first_phase == RefinePhase::Sizing {
+            flipper.tet_limit = options.max_tets;
+        }
         let (layers, skins) = if options.layers_through_walls >= 2 {
             let run = layer_run(&solid.points, &boundary, &fixed);
             let skins = OppositeSkins::new(
@@ -243,11 +271,7 @@ impl Refiner {
         } else {
             (None, OppositeSkins::default())
         };
-        let phase = if layers.is_some() {
-            RefinePhase::Layers
-        } else {
-            RefinePhase::Sizing
-        };
+        let phase = first_phase;
         let round_end = flipper.core.tets.len();
         Ok(Self {
             flipper,
@@ -321,8 +345,7 @@ impl Refiner {
             return self.advance_split();
         }
         let Some(run) = self.layers.as_mut() else {
-            self.phase = RefinePhase::Sizing;
-            return Ok(());
+            return self.begin_sizing();
         };
         let Some(&vertex) = run.vertices.get(run.cursor) else {
             return self.advance_fill();
@@ -453,8 +476,7 @@ impl Refiner {
             let remaining = self.skins.through_edges(&self.flipper);
             let Some(&first) = remaining.first() else {
                 self.splits = None;
-                self.phase = RefinePhase::Sizing;
-                return Ok(());
+                return self.begin_sizing();
             };
             if split_this_pass == 0 {
                 self.report.through_edges_refused = remaining.len();
@@ -519,6 +541,22 @@ impl Refiner {
         self.flipper.insert_interior(&seeds, candidate, 0.0)
     }
 
+    /// Ends the layer stage: the layers are what the caller asked for, so a solid they took over
+    /// the budget is refused, and from here on no move may cross it.
+    fn begin_sizing(&mut self) -> Result<(), TetraError> {
+        let tets = self.flipper.real_tets();
+        if tets > self.options.max_tets {
+            return Err(TetraError::TetBudgetExceeded {
+                tets,
+                budget: self.options.max_tets,
+                phase: RefinePhase::Sizing,
+            });
+        }
+        self.flipper.tet_limit = self.options.max_tets;
+        self.phase = RefinePhase::Sizing;
+        Ok(())
+    }
+
     fn advance_size(&mut self) -> Result<(), TetraError> {
         let run = &mut self.size_run;
         if run.cursor >= run.round_end {
@@ -548,6 +586,7 @@ impl Refiner {
         let slot = slot as u32;
         let circumcentre = circumcentre_of(&self.flipper.core.points, &tet);
         let candidates = [circumcentre, Some(centroid)];
+        let refused_before = self.flipper.limit_refusals;
         for candidate in candidates.into_iter().flatten() {
             if !candidate.iter().all(|value| value.is_finite()) {
                 continue;
@@ -567,6 +606,12 @@ impl Refiner {
             }
         }
         self.report.size_points_refused += 1;
+        if self.flipper.limit_refusals > refused_before {
+            // The next point would cross the budget: stop here rather than fill the rest of the
+            // slots unevenly by whichever small cavities still fit.
+            self.report.size_stopped_at_budget = true;
+            self.begin_quality();
+        }
         Ok(())
     }
 
@@ -708,6 +753,7 @@ impl Refiner {
         self.report.flips_three_to_two = three_two;
         self.report.flips_four_to_four = four_four;
         self.report.flips_larger_ring = larger;
+        self.report.moves_refused_for_budget = self.flipper.limit_refusals;
         self.result = Some(extract(&self.flipper));
         self.phase = RefinePhase::Done;
     }
@@ -745,64 +791,5 @@ impl Refiner {
     /// The finished mesh.
     pub fn result(&self) -> Result<SolidMesh, TetraError> {
         self.result.clone().ok_or(TetraError::RefinementNotFinished)
-    }
-}
-
-/// Prepares the layer stage: the ray tree, the separation grid and each surface vertex's normal
-/// and mean incident edge length.
-fn layer_run(points: &[[f64; 3]], boundary: &[[u32; 3]], fixed: &[bool]) -> LayerRun {
-    let mut normals = vec![[0.0; 3]; points.len()];
-    let mut edge_total = vec![0.0; points.len()];
-    let mut edge_count = vec![0u32; points.len()];
-    let (mut total_edge, mut edges) = (0.0_f64, 0u32);
-    for face in boundary {
-        let p = face.map(|v| points[v as usize]);
-        let normal = normalized(cross(subtract(p[1], p[0]), subtract(p[2], p[0])));
-        for k in 0..3 {
-            let (v, from, to) = (face[k], p[(k + 1) % 3], p[(k + 2) % 3]);
-            let (e1, e2) = (subtract(from, p[k]), subtract(to, p[k]));
-            let angle = crate::quality::dot(normalized(e1), normalized(e2))
-                .clamp(-1.0, 1.0)
-                .acos();
-            let n = &mut normals[v as usize];
-            n[0] += normal[0] * angle;
-            n[1] += normal[1] * angle;
-            n[2] += normal[2] * angle;
-            let l = length(e1);
-            edge_total[v as usize] += l;
-            edge_count[v as usize] += 1;
-            total_edge += l;
-            edges += 1;
-        }
-    }
-    let mean_edge = total_edge / f64::from(edges.max(1));
-    let edge_mean: Vec<f64> = edge_total
-        .iter()
-        .zip(&edge_count)
-        .map(|(total, count)| total / f64::from((*count).max(1)))
-        .collect();
-    let normals: Vec<[f64; 3]> = normals.into_iter().map(normalized).collect();
-    let magnitude = points
-        .iter()
-        .flatten()
-        .fold(0.0_f64, |largest, value| largest.max(value.abs()));
-    let vertices: Vec<u32> = (0..points.len() as u32)
-        .filter(|&v| fixed[v as usize])
-        .collect();
-    let rays = SurfaceRays::new(points, boundary);
-    let mut separation = Separation::new(mean_edge);
-    for &v in &vertices {
-        separation.add_surface(points[v as usize]);
-    }
-    LayerRun {
-        rays,
-        separation,
-        normals,
-        edge_mean,
-        vertices,
-        cursor: 0,
-        boundary: boundary.to_vec(),
-        fill_cursor: 0,
-        magnitude,
     }
 }

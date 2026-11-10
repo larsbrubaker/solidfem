@@ -56,7 +56,10 @@ pub struct VolumeMesh {
 
 /// Meshes the closed `surface` into 10-node elements: surface recovery, refinement under `size`
 /// and `options`, then the upgrade checked against `quadrature`. `cancel` is asked between units
-/// of work; a stage it stops is [`VolumeFailure::Stopped`].
+/// of work; a stage it stops is [`VolumeFailure::Stopped`]. `options.max_tets` is kept: the mesh
+/// has at most that many tetrahedra, or the refiner's [`TetraError::TetBudgetExceeded`] comes back
+/// as [`VolumeFailure::Refiner`] (the surface alone is over) or [`VolumeFailure::Refinement`]
+/// (the layers took it over).
 ///
 /// # Errors
 /// The [`VolumeFailure`] naming the stage that refused and its error.

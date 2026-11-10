@@ -26,6 +26,10 @@
 //! (`wall_fill.rs`). `tests/refine/sweep.rs` measures the rule over shapes whose skins are known
 //! from how they were built, and pins how many runs still succeed with an edge across a wall.
 //!
+//! A refinement may be given a tetrahedron budget ([`RefineOptions::max_tets`]): the result has at
+//! most that many, or the run is refused by name with the count that broke it
+//! ([`TetraError::TetBudgetExceeded`]).
+//!
 //! The rules that span its files:
 //! - **Exact decisions.** Every geometric decision is an exact predicate (`predicates.rs`), so a
 //!   degenerate input (a grid, points on a sphere, a thin plate) needs no tolerance, and a
@@ -46,13 +50,14 @@
 //! insertion, `quality.rs` the improvement, `quality_points.rs` the points for slivers no flip can remove, `surface.rs` is the surface-recovery interface and
 //! classifies the solid, `surface_report.rs` what a recovery run reports, `patches.rs`
 //! finds the flat regions, `recover.rs` orders the recovery of each constraint, `plane_delaunay.rs`
-//! chooses each flat region's triangulation, `flips.rs` holds the flips, `steiner.rs` adds points inside the solid, `triangulator.rs` the
+//! chooses each flat region's triangulation, `flips.rs` holds the flips and the tetrahedron limit, `hull_fold.rs` the flips at a fold of the hull, `steiner.rs` adds points inside the solid, `triangulator.rs` the
 //! point-set interface and input checks, `order.rs` the insertion order, `core.rs` the tetrahedra,
 //! walk and cavity, `predicates.rs` the exact tests and the tie rule, `error.rs` the failures.
 
 mod core;
 mod error;
 mod flips;
+mod hull_fold;
 mod interior;
 mod layers;
 mod order;

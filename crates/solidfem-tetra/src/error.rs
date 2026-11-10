@@ -2,10 +2,13 @@
 //! [`crate::SurfaceMesher`]. Input problems (`TooFewPoints` .. `AllPointsCoplanar`,
 //! `DuplicatePoint`, the `Surface...` shape errors) say what the caller must fix;
 //! `SurfaceNotRecovered` says how much of a surface flips could not recover;
+//! `TetBudgetExceeded` says how many tetrahedra a solid already has past the caller's limit;
 //! `LocationFailed` and `CavityInconsistent` report a broken internal invariant and refuse to
 //! return a mesh rather than hand back a wrong one.
 
 use std::fmt;
+
+use crate::refine::RefinePhase;
 
 /// Why a triangulation could not be built or continued.
 #[derive(Debug, Clone, PartialEq)]
@@ -67,6 +70,15 @@ pub enum TetraError {
     /// Refinement stopped because it had added the budgeted number of points and still had work
     /// to do. A larger budget, or coarser requested sizes, lets it finish.
     RefinementBudgetExhausted { added: usize, limit: usize },
+    /// The solid already has `tets` tetrahedra, more than the caller's `budget`
+    /// ([`crate::RefineOptions::max_tets`]), before `phase` could run: the surface itself, or the
+    /// surface with the layers through its thin walls, needs more. A coarser surface, fewer
+    /// layers or a larger budget lets it finish.
+    TetBudgetExceeded {
+        tets: usize,
+        budget: usize,
+        phase: RefinePhase,
+    },
     /// The size function returned something that is not a positive finite length.
     InvalidSizeFunction { position: [f64; 3], value: f64 },
     /// The refined mesh was requested before refinement finished.
@@ -181,6 +193,15 @@ impl fmt::Display for TetraError {
                 f,
                 "refinement added {added} points, its budget of {limit}, with work remaining; \
                  raise the budget or request coarser sizes"
+            ),
+            Self::TetBudgetExceeded {
+                tets,
+                budget,
+                phase,
+            } => write!(
+                f,
+                "the solid already has {tets} tetrahedra before the {phase:?} stage, {} over its                  budget of {budget}; mesh a coarser surface, ask for fewer layers or raise the                  budget",
+                tets.saturating_sub(*budget)
             ),
             Self::InvalidSizeFunction { position, value } => write!(
                 f,

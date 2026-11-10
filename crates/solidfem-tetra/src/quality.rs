@@ -246,7 +246,7 @@ impl Flipper {
         let Some((new_worst, new)) = self.best_ring(p, q, &ring, skins) else {
             return Ok(false);
         };
-        if new_worst <= old {
+        if new_worst <= old || !self.fits(tets.len(), new.len()) {
             return Ok(false);
         }
         self.apply(&tets, &new)?;
@@ -379,7 +379,7 @@ impl Flipper {
             .iter()
             .map(|t| min_dihedral_degrees(&self.core.points, t))
             .fold(180.0, f64::min);
-        if worst <= old {
+        if worst <= old || !self.fits(2, new.len()) {
             return Ok(false);
         }
         self.apply(&[slot, n], &new)?;
