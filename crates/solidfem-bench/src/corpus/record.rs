@@ -11,7 +11,8 @@
 //! `solve_trial::solve_outcome_name`), or `child:<how>` when the child process was lost in that
 //! stage (`lost_child_records`). A solve record carries its mesh's worst dihedral angle so
 //! iterations can be read against it (`by_dihedral_bucket`), its `precision` (the multigrid's,
-//! `solve_trial::precision_name`), `floor` (whether the solve stopped at the rounding floor), and
+//! `solve_trial::precision_name`), `threads` (what it ran on; absent from older records, which
+//! still read), `floor` (whether the solve stopped at the rounding floor), and
 //! `below_1e6`, the iteration at which the relative residual first fell to 1e-6, omitted when it
 //! never did.
 
@@ -260,6 +261,7 @@ pub fn solve_fields(
             "precision".to_string(),
             precision_name(trial.precision).to_string(),
         ),
+        ("threads".to_string(), trial.threads.to_string()),
         ("mindih".to_string(), num(min_dihedral_degrees)),
         ("sec".to_string(), num(trial.seconds)),
     ];

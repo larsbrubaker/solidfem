@@ -38,6 +38,15 @@
 //! Each trial records the iteration at which the relative residual first fell to
 //! [`RESIDUAL_MARK`], so one run also says what a looser tolerance would cost. The solve runs one
 //! iteration per `step` to see that crossing; slicing never changes a solve's bits.
+//!
+//! **Diagnostics.** [`HISTORY_VARIABLE`] prints the study's report after setup and the residual
+//! every that many iterations, to stderr, and [`SOLVE_CAP_VARIABLE`] replaces the time cap, to see
+//! how a part that the cap stops would have gone on ([`SolveDiagnostics`]).
+//!
+//! **Threads.** [`THREADS_VARIABLE`] sets the threads of a solve, and each record says how many it
+//! ran on. Parts run side by side under `batch` share the machine: left unset, each child gets
+//! [`batch_threads`], so jobs times threads stays within the logical processors and the wall-clock
+//! cap does not come to depend on how many jobs were asked for.
 
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -81,6 +90,106 @@ pub const STEEL: Material = Material {
 
 /// The environment variable choosing the multigrid precision of the solve stage.
 pub const PRECISION_VARIABLE: &str = "CORPUS_PRECISION";
+
+/// The environment variable printing the residual every that many iterations, to stderr.
+pub const HISTORY_VARIABLE: &str = "CORPUS_HISTORY";
+
+/// The environment variable replacing [`SOLVE_TIME_CAP_SECONDS`], in seconds.
+pub const SOLVE_CAP_VARIABLE: &str = "CORPUS_SOLVE_CAP";
+
+/// The environment variable setting the threads of a solve; see the file header.
+pub const THREADS_VARIABLE: &str = "CORPUS_THREADS";
+
+/// The threads each of `jobs` side-by-side children takes when [`THREADS_VARIABLE`] is unset: an
+/// equal share of `logical` processors, at least one, and at most `library_default`, past which
+/// more threads buy little.
+pub fn batch_threads(jobs: usize, logical: usize, library_default: usize) -> usize {
+    (logical / jobs.max(1)).clamp(1, library_default.max(1))
+}
+
+/// What the solve stage's diagnostic variables ask for.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SolveDiagnostics {
+    /// Print the residual every this many iterations; `None` prints nothing.
+    pub history_every: Option<u64>,
+    /// The solve stage's time cap.
+    pub cap_seconds: f64,
+    /// The threads asked for; `None` leaves the multigrid options' count.
+    pub threads: Option<usize>,
+}
+
+impl Default for SolveDiagnostics {
+    fn default() -> Self {
+        SolveDiagnostics {
+            history_every: None,
+            cap_seconds: SOLVE_TIME_CAP_SECONDS,
+            threads: None,
+        }
+    }
+}
+
+impl SolveDiagnostics {
+    /// Reads the three variables' values, `None` meaning unset.
+    ///
+    /// # Errors
+    /// A message naming the variable and what it accepts: a whole number of iterations from one,
+    /// a positive number of seconds, or a whole number of threads from one.
+    pub fn parse(
+        history: Option<&str>,
+        cap: Option<&str>,
+        threads: Option<&str>,
+    ) -> Result<Self, String> {
+        let history_every = match history {
+            None => None,
+            Some(text) => match text.parse::<u64>() {
+                Ok(every) if every >= 1 => Some(every),
+                _ => {
+                    return Err(format!(
+                        "{HISTORY_VARIABLE}={text} is not a whole number of iterations from 1"
+                    ))
+                }
+            },
+        };
+        let cap_seconds = match cap {
+            None => SOLVE_TIME_CAP_SECONDS,
+            Some(text) => match text.parse::<f64>() {
+                Ok(seconds) if seconds.is_finite() && seconds > 0.0 => seconds,
+                _ => {
+                    return Err(format!(
+                        "{SOLVE_CAP_VARIABLE}={text} is not a positive number of seconds"
+                    ))
+                }
+            },
+        };
+        let threads = match threads {
+            None => None,
+            Some(text) => match text.parse::<usize>() {
+                Ok(count) if count >= 1 => Some(count),
+                _ => {
+                    return Err(format!(
+                        "{THREADS_VARIABLE}={text} is not a whole number of threads from 1"
+                    ))
+                }
+            },
+        };
+        Ok(SolveDiagnostics {
+            history_every,
+            cap_seconds,
+            threads,
+        })
+    }
+
+    /// [`SolveDiagnostics::parse`] of the environment.
+    ///
+    /// # Errors
+    /// As [`SolveDiagnostics::parse`].
+    pub fn from_env() -> Result<Self, String> {
+        let history = std::env::var(HISTORY_VARIABLE).ok();
+        let cap = std::env::var(SOLVE_CAP_VARIABLE).ok();
+        let threads = std::env::var(THREADS_VARIABLE).ok();
+        Self::parse(history.as_deref(), cap.as_deref(), threads.as_deref())
+    }
+}
 
 /// The relative residual whose first crossing each trial records: what a looser tolerance than
 /// the solver's 1e-9 would cost.
@@ -186,6 +295,8 @@ pub struct SolveTrial {
     pub seconds: f64,
     /// The precision the multigrid hierarchy was stored and applied in.
     pub precision: Precision,
+    /// The threads the solve ran on; what it asked for when no hierarchy was built.
+    pub threads: usize,
     /// The iteration at which the relative residual first fell to [`RESIDUAL_MARK`], if it did.
     /// It reads the solver's running residual estimate, so it is a lower bound on the iterations
     /// a real 1e-6 tolerance would take (that also checks the true residual).
@@ -283,6 +394,7 @@ pub fn solve_and_check_in(mesh: &QuadraticTetMesh, precision: Precision) -> Solv
                 report: None,
                 seconds: start.elapsed().as_secs_f64(),
                 precision,
+                threads: requested_threads(),
                 below_mark: None,
                 outcome: Err(SolveFailure::LoadCase(error)),
             }
@@ -295,14 +407,24 @@ pub fn solve_and_check_in(mesh: &QuadraticTetMesh, precision: Precision) -> Solv
         report: solved.report,
         seconds: start.elapsed().as_secs_f64(),
         precision,
+        threads: solved.threads,
         below_mark: solved.below_mark,
         outcome: solved.outcome,
     }
 }
 
+/// The threads a solve asks for: [`THREADS_VARIABLE`], or else the multigrid options' count.
+fn requested_threads() -> usize {
+    SolveDiagnostics::from_env()
+        .ok()
+        .and_then(|diagnostics| diagnostics.threads)
+        .unwrap_or_else(|| multigrid_options().threads)
+}
+
 /// What [`solve`] found.
 struct Solved {
     report: Option<Report>,
+    threads: usize,
     below_mark: Option<u64>,
     outcome: Result<SolvedPart, SolveFailure>,
 }
@@ -310,9 +432,12 @@ struct Solved {
 /// The study under the time cap, then the two checks.
 fn solve(mesh: &QuadraticTetMesh, case: &LoadCase, precision: Precision, start: Instant) -> Solved {
     let mut below_mark = None;
-    let (report, outcome) = study_and_checks(mesh, case, precision, start, &mut below_mark);
+    let mut threads = requested_threads();
+    let (report, outcome) =
+        study_and_checks(mesh, case, precision, start, &mut below_mark, &mut threads);
     Solved {
         report,
+        threads,
         below_mark,
         outcome,
     }
@@ -324,6 +449,7 @@ fn study_and_checks(
     precision: Precision,
     start: Instant,
     below_mark: &mut Option<u64>,
+    threads: &mut usize,
 ) -> (Option<Report>, Result<SolvedPart, SolveFailure>) {
     let quadrature = Quadrature::FourPoint;
     let mut model = Model::new(mesh.clone(), STEEL);
@@ -335,11 +461,17 @@ fn study_and_checks(
         model.add_traction(*face, *traction);
     }
     let clock: Clock = Box::new(move || start.elapsed().as_secs_f64());
-    let mut past_cap = || start.elapsed().as_secs_f64() >= SOLVE_TIME_CAP_SECONDS;
+    // The tool refuses a bad value before anything runs, so only a caller that skipped that check
+    // reaches the plain stage here.
+    let diagnostics = SolveDiagnostics::from_env().unwrap_or_default();
+    let cap = diagnostics.cap_seconds;
+    let history = diagnostics.history_every;
+    let mut past_cap = || start.elapsed().as_secs_f64() >= cap;
     let options = StudyOptions {
         clock: Some(clock),
         preconditioner: PreconditionerChoice::Multigrid(MultigridOptions {
             precision,
+            threads: *threads,
             ..multigrid_options()
         }),
         ..StudyOptions::default()
@@ -348,7 +480,23 @@ fn study_and_checks(
         Ok(study) => study,
         Err(error) => return (None, Err(model_failure(error))),
     };
+    if let Some(multigrid) = study.multigrid() {
+        *threads = multigrid.threads();
+    }
+    if history.is_some() {
+        eprintln!("history setup {:?}", study.report());
+    }
     let mut mark = |progress: Progress| {
+        if let Some(every) = history {
+            if progress.iteration.is_multiple_of(every) {
+                eprintln!(
+                    "history iteration={} residual={:.3e} seconds={:.1}",
+                    progress.iteration,
+                    progress.relative_residual,
+                    start.elapsed().as_secs_f64()
+                );
+            }
+        }
         if below_mark.is_none() && progress.relative_residual <= RESIDUAL_MARK {
             *below_mark = Some(progress.iteration);
         }

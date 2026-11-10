@@ -22,8 +22,9 @@ use solidfem_bench::corpus::record::{
 };
 use solidfem_bench::corpus::remesh_trial::remesh_and_measure;
 use solidfem_bench::corpus::solve_trial::{
-    bending_case, precision_name, solve_and_check, solve_and_check_in, solve_outcome_name,
-    LoadCase, LoadCaseError, SolveFailure, SolvedPart, LOAD_STRAIN, STEEL,
+    batch_threads, bending_case, precision_name, solve_and_check, solve_and_check_in,
+    solve_outcome_name, LoadCase, LoadCaseError, SolveDiagnostics, SolveFailure, SolvedPart,
+    LOAD_STRAIN, SOLVE_TIME_CAP_SECONDS, STEEL,
 };
 use solidfem_bench::corpus::volume_trial::volume_and_measure;
 
@@ -281,6 +282,8 @@ fn stage_solve(mesh: &QuadraticTetMesh, precision: Precision) -> (u64, f64, u64)
     assert!(crossing <= report.iterations, "{precision:?}: {crossing}");
     let record = parse_line(&to_line(&solve_fields("plate", &trial, 10.0)));
     assert_eq!(field(&record, "precision"), precision_name(precision));
+    assert_eq!(field(&record, "threads"), trial.threads.to_string());
+    assert!(trial.threads >= 1, "{precision:?}: {}", trial.threads);
     assert_eq!(field(&record, "below_1e6"), crossing.to_string());
     assert_eq!(
         field(&record, "floor"),
@@ -330,6 +333,61 @@ fn the_plate_crosses_1e6_where_a_solve_to_that_tolerance_stops() {
     // true residual there agrees, as it does on this plate.
     let (to_mark, _) = reference_solve(&mesh, &case, Precision::Double, 1e-6, 7);
     assert_eq!(crossing, to_mark);
+}
+
+#[test]
+fn the_solve_diagnostics_read_their_values_and_refuse_bad_ones() {
+    let plain = SolveDiagnostics::parse(None, None, None).expect("unset is the plain stage");
+    assert_eq!(plain, SolveDiagnostics::default());
+    assert_eq!(plain.history_every, None);
+    assert_eq!(plain.cap_seconds, SOLVE_TIME_CAP_SECONDS);
+    let asked = SolveDiagnostics::parse(Some("10"), Some("900.5"), Some("3")).expect("all valid");
+    assert_eq!(asked.history_every, Some(10));
+    assert_eq!(asked.cap_seconds, 900.5);
+    assert_eq!(asked.threads, Some(3));
+    // A value the stage cannot use is refused by name rather than silently ignored, because the
+    // run would otherwise spend its time under a cap nobody asked for.
+    for bad in ["0", "-1", "many", "1.5"] {
+        let error = SolveDiagnostics::parse(Some(bad), None, None).expect_err(bad);
+        assert!(error.contains("CORPUS_HISTORY"), "{error}");
+    }
+    for bad in ["0", "-3", "inf", "NaN", "soon"] {
+        let error = SolveDiagnostics::parse(None, Some(bad), None).expect_err(bad);
+        assert!(error.contains("CORPUS_SOLVE_CAP"), "{error}");
+    }
+    for bad in ["0", "-2", "1.5", "all"] {
+        let error = SolveDiagnostics::parse(None, None, Some(bad)).expect_err(bad);
+        assert!(error.contains("CORPUS_THREADS"), "{error}");
+    }
+}
+
+/// Side-by-side children must fit on the machine, or the wall-clock cap would depend on the job
+/// count; one job still stops at the library's own default.
+#[test]
+fn batch_children_share_the_logical_processors() {
+    // (jobs, logical, library default, each child's threads)
+    for (jobs, logical, library, expected) in [
+        (1, 20, 8, 8),
+        (2, 20, 8, 8),
+        (3, 20, 8, 6),
+        (5, 20, 8, 4),
+        (20, 20, 8, 1),
+        (40, 20, 8, 1),
+        (0, 20, 8, 8),
+        (4, 1, 1, 1),
+    ] {
+        let threads = batch_threads(jobs, logical, library);
+        assert_eq!(threads, expected, "{jobs} jobs on {logical} processors");
+        assert!(jobs.max(1) * threads <= logical.max(jobs), "{jobs} jobs");
+    }
+}
+
+/// Records written before the field existed still read: a missing field is the table's dash.
+#[test]
+fn a_solve_record_without_threads_still_reads() {
+    let record = parse_line("name=old.stl kind=solve status=ok unknowns=9 precision=double");
+    assert_eq!(field(&record, "status"), "ok");
+    assert_eq!(field(&record, "threads"), "-");
 }
 
 #[test]

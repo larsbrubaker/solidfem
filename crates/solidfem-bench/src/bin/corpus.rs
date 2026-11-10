@@ -23,7 +23,12 @@
 //! solves each meshed part in all three back to back and writes a solve record for each; any
 //! other value is refused before anything runs. A solve record carries its precision, whether it
 //! stopped at the rounding floor, and the iteration at which its relative residual first fell to
-//! 1e-6.
+//! 1e-6. `CORPUS_HISTORY=<iterations>` prints a solve's residual history to stderr, which shows
+//! nothing under `batch` because each child's stderr is discarded. `CORPUS_SOLVE_CAP=<seconds>`
+//! replaces a solve's time cap; a child under `batch` still has the parent's timeout, so a longer
+//! cap needs a longer `<timeout>`. `CORPUS_THREADS=<count>` sets a solve's threads; left unset
+//! under `batch`, each child gets a share that keeps jobs times threads within the logical
+//! processors. A bad value of any of the three is refused before anything runs.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
@@ -34,6 +39,7 @@ mod native {
     use std::process::{Child, Command, Stdio};
     use std::time::{Duration, Instant};
 
+    use solidfem::elastic::MultigridOptions;
     use solidfem_bench::corpus::diagnose::diagnose;
     use solidfem_bench::corpus::measure::{measure_input, sample_exclusion};
     use solidfem_bench::corpus::parts::all_parts;
@@ -44,7 +50,8 @@ mod native {
     };
     use solidfem_bench::corpus::remesh_trial::remesh_and_measure;
     use solidfem_bench::corpus::solve_trial::{
-        precision_name, precisions_from_env, solve_and_check_in,
+        batch_threads, precision_name, precisions_from_env, solve_and_check_in, SolveDiagnostics,
+        THREADS_VARIABLE,
     };
     use solidfem_bench::corpus::soup::TriSoup;
     use solidfem_bench::corpus::volume_trial::volume_and_measure;
@@ -122,6 +129,7 @@ mod native {
         ("status", "status"),
         ("unknowns", "unknowns"),
         ("precision", "precision"),
+        ("threads", "threads"),
         ("mindih", "min dih"),
         ("iters", "iters"),
         ("below_1e6", "it<1e-6"),
@@ -138,6 +146,7 @@ mod native {
     pub fn run() -> Result<(), Box<dyn Error>> {
         let args: Vec<String> = std::env::args().skip(1).collect();
         precisions_from_env()?;
+        SolveDiagnostics::from_env()?;
         match args.first().map(String::as_str) {
             Some("synthetic") => synthetic(),
             Some("sample") if args.len() == 4 => {
@@ -153,7 +162,7 @@ mod native {
                 diagnose_part(&args[1], &args[2], args[3].parse()?)
             }
             _ => {
-                Err("usage: synthetic | sample <root> <out> <count> | batch <jobs> <timeout> <path>... | stl <file> | diagnose <file-or-synthetic-name> <scale,scale,...> <cap-seconds>; CORPUS_PRECISION=double|single-storage|single|all chooses the solve's multigrid precision".into())
+                Err("usage: synthetic | sample <root> <out> <count> | batch <jobs> <timeout> <path>... | stl <file> | diagnose <file-or-synthetic-name> <scale,scale,...> <cap-seconds>; CORPUS_PRECISION=double|single-storage|single|all chooses the solve's multigrid precision; CORPUS_THREADS=<count> sets the solve's threads (unset under batch: a share that keeps jobs x threads within the logical processors); CORPUS_SOLVE_CAP=<seconds> replaces the solve's time cap; CORPUS_HISTORY=<iterations> prints the residual to stderr every that many iterations (nothing under batch, which discards each child's stderr)".into())
             }
         }
     }
@@ -337,15 +346,22 @@ mod native {
             .into_iter()
             .map(precision_name)
             .collect();
+        let logical = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+        let child_threads = batch_threads(jobs, logical, MultigridOptions::default().threads);
+        let threads_chosen = std::env::var_os(THREADS_VARIABLE).is_some();
         while !queue.is_empty() || !running.is_empty() {
             while running.len() < jobs.max(1) && !queue.is_empty() {
                 if let Some(path) = queue.pop_front() {
-                    let child = Command::new(&exe)
+                    let mut command = Command::new(&exe);
+                    command
                         .arg("stl")
                         .arg(&path)
                         .stdout(Stdio::piped())
-                        .stderr(Stdio::null())
-                        .spawn()?;
+                        .stderr(Stdio::null());
+                    if !threads_chosen {
+                        command.env(THREADS_VARIABLE, child_threads.to_string());
+                    }
+                    let child = command.spawn()?;
                     running.push(Running {
                         path,
                         child,
