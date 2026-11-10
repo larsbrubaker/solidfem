@@ -373,6 +373,8 @@ impl Refiner {
             &self.flipper.core.points,
             face,
             self.options.thin_wall_ratio,
+            self.options.layers_through_walls,
+            run.magnitude,
         );
         for seed in seeds {
             let placed = self.place_layer_points(face[0], Some(face), seed)?;

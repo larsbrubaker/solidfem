@@ -36,7 +36,7 @@ fn tet_holds(mesh: &SolidMesh, tet: &[u32; 4], sample: [f64; 3]) -> bool {
 
 /// The samples that fall in a tetrahedron with a surface vertex on each skin, by a skin rule
 /// taking a vertex of the input surface.
-fn samples_in_tets_joining_skins(
+pub fn samples_in_tets_joining_skins(
     mesh: &SolidMesh,
     surface_points: usize,
     skin: &dyn Fn(usize) -> Option<u8>,
@@ -135,7 +135,7 @@ fn rotated_plates_have_every_through_edge_split_and_no_element_joining_their_ski
 }
 
 /// `count` evenly spread values strictly between `low` and `high`.
-fn grid(low: f64, high: f64, count: usize) -> Vec<f64> {
+pub fn grid(low: f64, high: f64, count: usize) -> Vec<f64> {
     (0..count)
         .map(|i| low + (high - low) * (i as f64 + 0.5) / count as f64)
         .collect()

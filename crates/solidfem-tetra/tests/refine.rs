@@ -28,3 +28,5 @@ mod sweep;
 mod through;
 #[path = "refine/wall_skins.rs"]
 mod wall_skins;
+#[path = "refine/wedge.rs"]
+mod wedge;

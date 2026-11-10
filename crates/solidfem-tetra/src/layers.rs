@@ -109,6 +109,11 @@ impl SurfaceRays {
         self.nearest_where(origin, direction, |t| t.vertices == face)
     }
 
+    /// The nearest triangle crossed from `origin`, a point off the surface, along unit `direction`.
+    pub(crate) fn nearest_any(&self, origin: [f64; 3], direction: [f64; 3]) -> Option<Hit> {
+        self.nearest_where(origin, direction, |_| false)
+    }
+
     fn nearest_where(
         &self,
         origin: [f64; 3],
