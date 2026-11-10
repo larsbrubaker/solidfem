@@ -14,9 +14,7 @@ use solidfem_bench::corpus::record::{
     counts_by, field, field_f64, parse_line, to_line, volume_fields, volume_lost_fields,
 };
 use solidfem_bench::corpus::remesh_trial::remesh_and_measure;
-use solidfem_bench::corpus::volume_trial::{
-    choose_volume_edge, outcome_name, volume_and_measure, VolumeEdgeSource, VolumePart, TET_BUDGET,
-};
+use solidfem_bench::corpus::volume_trial::{outcome_name, volume_and_measure, VolumePart};
 
 use crate::metrics::cuboid;
 
@@ -151,18 +149,5 @@ fn outcomes_count_most_frequent_first_with_ties_by_name() {
         counts,
         expected.map(|(s, n)| (s.to_string(), n)).to_vec(),
         "count descending, then name ascending"
-    );
-}
-
-#[test]
-fn a_large_part_at_a_fine_remesh_edge_is_held_to_the_tet_budget() {
-    let (edge, source) = choose_volume_edge(1.0, 1.0e9);
-    assert_eq!(source, VolumeEdgeSource::TetBudget);
-    // A fill of regular tetrahedra of this edge is the budget, to the cube root's rounding.
-    let tets = 6.0 * 2.0_f64.sqrt() * 1.0e9 / (edge * edge * edge);
-    assert!((tets / TET_BUDGET - 1.0).abs() < 1e-12, "{tets}");
-    assert_eq!(
-        choose_volume_edge(1.0, 1000.0),
-        (1.0, VolumeEdgeSource::Remesh)
     );
 }

@@ -1,12 +1,13 @@
 //! One volume mesh of a remeshed part and what came of it: the remeshed surface through the same
 //! volume stage the benchmarks run (`benchmarks/volume.rs`: surface recovery, refinement with
-//! layers through thin walls, the 10-node upgrade), at an edge length taken from the remesh, and
-//! the outcome as a stable short name so a corpus can be counted by failure class. A finished
-//! mesh is kept on the result for the solve stage (`solve_trial.rs`).
+//! layers through thin walls, the 10-node upgrade), at the remesh's own edge length, and the
+//! outcome as a stable short name so a corpus can be counted by failure class. A finished mesh is
+//! kept on the result for the solve stage (`solve_trial.rs`).
 //!
-//! The work is capped two ways so one part costs at most about a minute: the edge length is
-//! raised when the remesh's would fill the part with more tetrahedra than [`TET_BUDGET`], and the
-//! run is cancelled at [`TIME_CAP_SECONDS`], which is its own named outcome.
+//! The work is capped two ways so one part costs at most about a minute: the edge length, chosen
+//! once for the remesh and the volume alike (`remesh_trial::choose_target`), is sized for the
+//! corpus's unknowns budget, and the run is cancelled at [`TIME_CAP_SECONDS`], which is its own
+//! named outcome.
 
 use std::time::Instant;
 
@@ -18,14 +19,6 @@ use super::soup::TriSoup;
 use crate::benchmarks::cases::min_dihedral_degrees;
 use crate::benchmarks::volume::{volume_mesh, VolumeFailure, VolumeStage};
 
-/// The number of tetrahedra a uniform fill of the part may be expected to reach: past this the
-/// mesher's run time, not the part, would decide what the corpus can measure.
-pub const TET_BUDGET: f64 = 400_000.0;
-
-/// Tetrahedra per unit volume in a fill of regular tetrahedra of edge 1: a regular tetrahedron
-/// of edge `h` has volume `h^3 / (6 sqrt 2)`.
-const TETS_PER_CUBE_EDGE: f64 = 8.485_281_374_238_57;
-
 /// The volume stage is cancelled after this long, so a part costs its own row, not the batch's
 /// whole timeout.
 pub const TIME_CAP_SECONDS: f64 = 60.0;
@@ -33,20 +26,10 @@ pub const TIME_CAP_SECONDS: f64 = 60.0;
 /// Elements requested through each thin wall, as every benchmark case requests.
 const LAYERS_THROUGH_WALLS: u32 = 2;
 
-/// Which limit chose the volume edge length.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum VolumeEdgeSource {
-    /// The remesh's own target edge length.
-    Remesh,
-    /// The remesh's edge would fill the part past [`TET_BUDGET`].
-    TetBudget,
-}
-
 /// What the volume stage did to one remeshed part.
 #[derive(Clone, Debug)]
 pub struct VolumeTrial {
     pub edge_length: f64,
-    pub edge_source: VolumeEdgeSource,
     pub seconds: f64,
     pub outcome: Result<VolumePart, VolumeFailure>,
 }
@@ -67,19 +50,9 @@ pub struct VolumePart {
     pub mesh: QuadraticTetMesh,
 }
 
-/// The volume edge length for a part of `volume` remeshed at `remesh_edge`.
-pub fn choose_volume_edge(remesh_edge: f64, volume: f64) -> (f64, VolumeEdgeSource) {
-    let budget_edge = (TETS_PER_CUBE_EDGE * volume.abs() / TET_BUDGET).cbrt();
-    if budget_edge > remesh_edge {
-        (budget_edge, VolumeEdgeSource::TetBudget)
-    } else {
-        (remesh_edge, VolumeEdgeSource::Remesh)
-    }
-}
-
-/// Volume-meshes the closed `surface`, remeshed at `remesh_edge`, and measures the result.
-pub fn volume_and_measure(surface: &TriSoup, remesh_edge: f64) -> VolumeTrial {
-    let (edge, source) = choose_volume_edge(remesh_edge, surface.signed_volume());
+/// Volume-meshes the closed `surface`, remeshed at `edge`, at that same edge length, and
+/// measures the result.
+pub fn volume_and_measure(surface: &TriSoup, edge: f64) -> VolumeTrial {
     let start = Instant::now();
     let size: SizeFn = Box::new(move |_| edge);
     let options = RefineOptions {
@@ -115,7 +88,6 @@ pub fn volume_and_measure(surface: &TriSoup, remesh_edge: f64) -> VolumeTrial {
     });
     VolumeTrial {
         edge_length: edge,
-        edge_source: source,
         seconds: start.elapsed().as_secs_f64(),
         outcome,
     }

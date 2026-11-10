@@ -4,11 +4,12 @@
 //! 10-node elements with multigrid at two or three densities, and compared with a closed form or a
 //! published reference where one exists, with limits derived in the case before it first ran. A
 //! case with no accuracy reference, or one that measures only a nominal quantity, says so on its
-//! verdict: a PASS claims only what its limits tested. `pipeline.rs` does the work, with the volume meshing in `volume.rs` (the corpus runs the same); `verdict.rs` holds the verdicts, the convergence and singularity reading and the
+//! verdict: a PASS claims only what its limits tested. `pipeline.rs` does the work, with the volume meshing in `volume.rs` (the corpus runs the same) and the size a mesh will reach before it is made in `sizing.rs`; `verdict.rs` holds the verdicts, the convergence and singularity reading and the
 //! load-balance check, free of solving so they can be tested alone. `bin/benchmarks.rs` prints the
 //! results. The surfaces come from outside this repository: a run names the directory holding them.
 
 pub mod cases;
 pub mod pipeline;
+pub mod sizing;
 pub mod verdict;
 pub mod volume;

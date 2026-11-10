@@ -3,7 +3,10 @@
 //! so a child process can hand it to the parent that runs the corpus and a crashed child costs
 //! only its own row. The input record's `sample` says whether the part was remeshed (`in`) or
 //! left out of the sample and why (`input:<reason>`, `measure::sample_exclusion`); the remesh
-//! record's `status` is `ok` or the remesher's refusal as `remesh:<variant>`; the volume and
+//! record's `status` is `ok` or the remesher's refusal as `remesh:<variant>`, and its `walls`
+//! whether two layers fit through the 5th-percentile wall at the edge chosen (`resolved`,
+//! `under-resolved` with `wall_ratio` over 1 when the budget forced a coarser edge, or `unread`),
+//! beside `pred_tets`, the element count predicted for that edge; the volume and
 //! solve records' `status` is their stage's outcome name (`volume_trial::outcome_name`,
 //! `solve_trial::solve_outcome_name`), or `child:<how>` when the child process was lost in that
 //! stage. A solve record carries its mesh's worst dihedral angle so iterations can be read
@@ -14,7 +17,7 @@ use std::collections::BTreeMap;
 use super::measure::{sample_exclusion, InputMetrics};
 use super::remesh_trial::{refusal_name, RemeshTrial, RemeshedPart, TargetSource};
 use super::solve_trial::{solve_outcome_name, SolveFailure, SolveTrial};
-use super::volume_trial::{outcome_name, VolumeEdgeSource, VolumeTrial};
+use super::volume_trial::{outcome_name, VolumeTrial};
 
 /// A parsed record: field name to text.
 pub type Record = BTreeMap<String, String>;
@@ -74,7 +77,7 @@ pub fn input_fields(name: &str, m: &InputMetrics) -> Vec<(String, String)> {
 pub fn remesh_fields(name: &str, trial: &RemeshTrial) -> Vec<(String, String)> {
     let source = match trial.target_source {
         TargetSource::ThinnestWall => "wall/2",
-        TargetSource::TriangleBudget => "budget",
+        TargetSource::Budget => "budget",
         TargetSource::CoarsestAllowed => "coarsest",
         TargetSource::NoWall => "no-wall",
     };
@@ -83,6 +86,18 @@ pub fn remesh_fields(name: &str, trial: &RemeshTrial) -> Vec<(String, String)> {
         ("kind".to_string(), "remesh".to_string()),
         ("h".to_string(), num(trial.target_edge_length)),
         ("hsrc".to_string(), source.to_string()),
+        (
+            "pred_tets".to_string(),
+            num(trial.predicted_tets.round_ties_even()),
+        ),
+        (
+            "walls".to_string(),
+            walls_name(trial.wall_ratio).to_string(),
+        ),
+        (
+            "wall_ratio".to_string(),
+            trial.wall_ratio.map_or_else(|| "-".to_string(), num),
+        ),
         ("dev".to_string(), num(trial.deviation_bound)),
         ("sec".to_string(), num(trial.seconds)),
     ];
@@ -99,6 +114,19 @@ pub fn remesh_fields(name: &str, trial: &RemeshTrial) -> Vec<(String, String)> {
         }
     }
     fields
+}
+
+/// Whether two layers fit through the part's thin walls at the target: `resolved`,
+/// `under-resolved` (the budget forced a coarser edge, a result on it is suspect), or `unread`
+/// when no wall could be measured.
+fn walls_name(ratio: Option<f64>) -> &'static str {
+    match ratio {
+        None => "unread",
+        // A ratio of exactly 1 is the wall-chosen edge itself; the tolerance only absorbs the
+        // rounding of halving the wall and doubling it back.
+        Some(r) if r <= 1.0 + 1e-12 => "resolved",
+        Some(_) => "under-resolved",
+    }
 }
 
 fn append_remeshed(fields: &mut Vec<(String, String)>, part: &RemeshedPart) {
@@ -130,15 +158,10 @@ fn append_remeshed(fields: &mut Vec<(String, String)>, part: &RemeshedPart) {
 
 /// The `key=value` fields of a volume trial.
 pub fn volume_fields(name: &str, trial: &VolumeTrial) -> Vec<(String, String)> {
-    let source = match trial.edge_source {
-        VolumeEdgeSource::Remesh => "remesh",
-        VolumeEdgeSource::TetBudget => "budget",
-    };
     let mut fields = vec![
         ("name".to_string(), name.replace(' ', "_")),
         ("kind".to_string(), "volume".to_string()),
         ("vh".to_string(), num(trial.edge_length)),
-        ("vhsrc".to_string(), source.to_string()),
         ("status".to_string(), outcome_name(&trial.outcome)),
         ("sec".to_string(), num(trial.seconds)),
     ];

@@ -11,3 +11,6 @@ mod volume;
 
 #[path = "corpus/solve.rs"]
 mod solve;
+
+#[path = "corpus/sizing.rs"]
+mod sizing;

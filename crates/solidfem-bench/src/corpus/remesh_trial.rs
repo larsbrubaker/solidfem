@@ -5,9 +5,12 @@
 //! user's part goes through. Every reading of the result here is the corpus's own, made on the
 //! returned coordinates, independent of the check the remesher runs on itself.
 //!
-//! The target edge length is tied to the part's thinnest wall, clamped so a tiny wall on a big
-//! part cannot ask for more triangles than the corpus can afford; the deviation bound follows
-//! the target ([`deviation_bound`]). The remesh is cancelled after [`REMESH_TIME_CAP_SECONDS`],
+//! The target edge length is the one edge the part is meshed at, surface and volume alike: what
+//! the part's thinnest wall asks for, raised to what keeps the finished 10-node mesh near
+//! [`UNKNOWNS_BUDGET`] by the prediction in `benchmarks/sizing.rs`. When the budget's edge is too
+//! coarse for two layers through the 5th-percentile wall, the part is still meshed at it and the
+//! trial says so ([`RemeshTrial::wall_ratio`]): a result on that mesh is one a later error
+//! estimate must flag. The deviation bound follows the target ([`deviation_bound`]). The remesh is cancelled after [`REMESH_TIME_CAP_SECONDS`],
 //! which the record names `remesh:Cancelled`: nothing else cancels it. A refusal is named by its
 //! variant ([`refusal_name`]), so a corpus counts refusals by kind.
 
@@ -21,11 +24,14 @@ use super::bvh::Bvh;
 use super::measure::{quality, topology, InputMetrics, Quality};
 use super::self_intersect::{count_folds, count_penetrating_pairs, PairCount};
 use super::soup::{dot, length, sub, TriSoup, P3};
+use crate::benchmarks::sizing::{edge_for_unknowns, predicted_tets, wall_resolution, PartSize};
 use crate::surfaces::analysis_options;
 
-/// The most triangles a target edge length is allowed to ask for: past this the remesher's run
-/// time, not the part, decides what the corpus can measure.
-const TRIANGLE_BUDGET: f64 = 300_000.0;
+/// The unknowns a part's finished 10-node mesh is sized for: past this the solve's memory (about
+/// 0.94 GB of multigrid at `sizing::MULTIGRID_BYTES_PER_UNKNOWN`) and time, not the part, would
+/// decide what the corpus can measure. At `sizing::UNKNOWNS_PER_TET` it is about 224,000
+/// elements.
+pub const UNKNOWNS_BUDGET: f64 = 1_000_000.0;
 
 /// The largest cell the target may be relative to the part, so a part with no readable wall still
 /// gets a usable density.
@@ -61,8 +67,8 @@ const DEVIATION_SAMPLE_LIMIT: usize = 50_000;
 pub enum TargetSource {
     /// Half the part's 5th-percentile wall.
     ThinnestWall,
-    /// The part's wall would ask for more triangles than the budget.
-    TriangleBudget,
+    /// The part's wall would ask for more unknowns than [`UNKNOWNS_BUDGET`].
+    Budget,
     /// The wall was large; the target is the coarsest allowed.
     CoarsestAllowed,
     /// No wall could be read.
@@ -74,6 +80,11 @@ pub enum TargetSource {
 pub struct RemeshTrial {
     pub target_edge_length: f64,
     pub target_source: TargetSource,
+    /// The finished 10-node mesh's element count predicted at the target (`benchmarks/sizing.rs`).
+    pub predicted_tets: f64,
+    /// The target over half the 5th-percentile wall: above 1, two layers do not fit through the
+    /// thin walls and they are under-resolved. `None` when no wall could be read.
+    pub wall_ratio: Option<f64>,
     /// The `max_deviation` the remesh was given.
     pub deviation_bound: f64,
     pub seconds: f64,
@@ -106,20 +117,40 @@ pub struct RemeshedPart {
     pub surface: TriSoup,
 }
 
-/// Chooses the target edge length for a part.
-pub fn choose_target(metrics: &InputMetrics) -> (f64, TargetSource) {
-    let area_limit = (metrics.area / (0.43 * TRIANGLE_BUDGET)).sqrt();
-    let coarsest = metrics.diagonal * COARSEST_FRACTION_OF_DIAGONAL;
-    if !metrics.wall.p5.is_finite() || metrics.wall.p5 <= 0.0 {
-        return (coarsest.max(area_limit), TargetSource::NoWall);
+/// What the size prediction reads from a part's input metrics.
+pub fn part_size(metrics: &InputMetrics) -> PartSize {
+    PartSize {
+        volume: metrics.volume.abs(),
+        area: metrics.area,
+        wall_p5: metrics.wall.p5,
     }
-    let from_wall = metrics.wall.p5 * 0.5;
-    if from_wall < area_limit {
-        (area_limit, TargetSource::TriangleBudget)
-    } else if from_wall > coarsest {
+}
+
+/// Chooses the target edge length for a part, sized for [`UNKNOWNS_BUDGET`].
+pub fn choose_target(metrics: &InputMetrics) -> (f64, TargetSource) {
+    choose_target_within(metrics, UNKNOWNS_BUDGET)
+}
+
+/// Chooses the target edge length for a part whose finished mesh is to stay near `budget`
+/// unknowns: the edge its features ask for (half the 5th-percentile wall, no coarser than a 40th
+/// of the diagonal), raised to the budget's edge when that is larger.
+pub fn choose_target_within(metrics: &InputMetrics, budget: f64) -> (f64, TargetSource) {
+    // A part whose volume or area is not a finite number has no budget edge; the NaN target
+    // reaches the remesher, which refuses it by name (`remesh:InvalidTargetSize`), so the row
+    // records it rather than meshing at a made-up size.
+    let budget_edge = edge_for_unknowns(&part_size(metrics), budget).unwrap_or(f64::NAN);
+    let coarsest = metrics.diagonal * COARSEST_FRACTION_OF_DIAGONAL;
+    let (feature, source) = if !metrics.wall.p5.is_finite() || metrics.wall.p5 <= 0.0 {
+        (coarsest, TargetSource::NoWall)
+    } else if metrics.wall.p5 * 0.5 > coarsest {
         (coarsest, TargetSource::CoarsestAllowed)
     } else {
-        (from_wall, TargetSource::ThinnestWall)
+        (metrics.wall.p5 * 0.5, TargetSource::ThinnestWall)
+    };
+    if budget_edge.is_nan() || budget_edge > feature {
+        (budget_edge, TargetSource::Budget)
+    } else {
+        (feature, source)
     }
 }
 
@@ -187,6 +218,7 @@ pub fn refusal_name(error: &AnalysisRemeshError) -> &'static str {
 /// Runs the remesher on `soup` and measures the result against it.
 pub fn remesh_and_measure(soup: &TriSoup, metrics: &InputMetrics) -> RemeshTrial {
     let (target, source) = choose_target(metrics);
+    let size = part_size(metrics);
     let start = Instant::now();
     let result = remesh_capped(
         soup,
@@ -226,6 +258,8 @@ pub fn remesh_and_measure(soup: &TriSoup, metrics: &InputMetrics) -> RemeshTrial
     RemeshTrial {
         target_edge_length: target,
         target_source: source,
+        predicted_tets: predicted_tets(&size, target),
+        wall_ratio: wall_resolution(&size, target),
         deviation_bound: deviation_bound(target, metrics),
         seconds,
         outcome,

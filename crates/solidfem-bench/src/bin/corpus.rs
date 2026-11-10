@@ -72,6 +72,9 @@ mod native {
         ("status", "status"),
         ("hsrc", "h from"),
         ("h", "h"),
+        ("pred_tets", "pred tets"),
+        ("walls", "walls"),
+        ("wall_ratio", "h/(wall/2)"),
         ("tris_after", "tris"),
         ("closed_after", "closed"),
         ("oriented_after", "oriented"),
@@ -93,7 +96,6 @@ mod native {
     const VOLUME_COLUMNS: &[(&str, &str)] = &[
         ("name", "part"),
         ("status", "status"),
-        ("vhsrc", "h from"),
         ("vh", "h"),
         ("tets", "tets"),
         ("nodes", "nodes"),
