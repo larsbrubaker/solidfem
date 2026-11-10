@@ -18,11 +18,12 @@
 //! corpus target edge length and prints, a key=value line per multiple, what surface recovery
 //! made of it and where anything it left missing sits (`corpus/diagnose.rs`).
 //!
-//! `CORPUS_PRECISION` chooses the multigrid precision of the solve stage in every mode: `double`
-//! (the default), `single-storage`, `single`, or `all`, which solves each meshed part in all three
-//! back to back and writes a solve record for each; any other value is refused before anything
-//! runs. A solve record carries its precision, whether it stopped at the rounding floor, and the
-//! iteration at which its relative residual first fell to 1e-6.
+//! `CORPUS_PRECISION` chooses the multigrid precision of the solve stage in every mode: unset is
+//! the library default (`single-storage`); `double`, `single-storage`, `single`, or `all`, which
+//! solves each meshed part in all three back to back and writes a solve record for each; any
+//! other value is refused before anything runs. A solve record carries its precision, whether it
+//! stopped at the rounding floor, and the iteration at which its relative residual first fell to
+//! 1e-6.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {

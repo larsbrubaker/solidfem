@@ -63,6 +63,12 @@
 //! cases measured; doing the cycle's vector arithmetic in `f32` costs some (66 to 86 on a stocky
 //! cantilever, 84 to 90 on a plate).
 //!
+//! `SingleStorage` is the default. On 51 real parts that solved in every precision it took exactly
+//! `Double`'s iteration count on 50 and 11 fewer on the last, in 19% less total solve time, with
+//! about half the hierarchy's memory: the stored operators' rounding sits far below what a
+//! preconditioner needs to be accurate to, and a cycle mostly waits on reading them. `Double`
+//! remains for a caller that wants the cycle's bits free of any `f32` rounding.
+//!
 //! The files: `scalar.rs` holds the value type the cycle is generic over, `block.rs` the block
 //! sparse storage and the small dense kernels,
 //! `aggregate.rs` the strength graph and the aggregation passes, `transfer.rs` the tentative
@@ -90,11 +96,12 @@ pub const NEAR_NULL_MODES: usize = 6;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Precision {
     /// Stored and applied in `f64` throughout.
-    #[default]
     Double,
     /// Matrices, prolongators and block-diagonal inverses stored in `f32`, each value widened to
     /// `f64` as it is read; vectors and sums stay `f64`. Half the stored values' memory and the
-    /// bandwidth a cycle reads them with, and the rounding of the stored operators alone.
+    /// bandwidth a cycle reads them with, and the rounding of the stored operators alone. The
+    /// default: on real parts it takes `Double`'s iteration counts in less time.
+    #[default]
     SingleStorage,
     /// Stored in `f32` and the V-cycle's vectors and sums in `f32` too: the residual is rounded
     /// on the way in and the correction widened on the way out. The form a device without `f64`
@@ -119,6 +126,7 @@ pub struct MultigridOptions {
     /// handle everything below that.
     pub smoother_range: f64,
     /// The precision of the finished hierarchy and its cycle; setup always computes in `f64`.
+    /// `SingleStorage` unless chosen otherwise.
     pub precision: Precision,
 }
 
@@ -130,7 +138,7 @@ impl Default for MultigridOptions {
             max_levels: 12,
             smoother_degree: 3,
             smoother_range: 30.0,
-            precision: Precision::Double,
+            precision: Precision::SingleStorage,
         }
     }
 }

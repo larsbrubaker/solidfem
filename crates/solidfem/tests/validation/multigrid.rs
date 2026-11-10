@@ -51,9 +51,17 @@ fn shifted_stiffness() -> (CsrMatrix, Vec<f64>, Vec<[f64; 3]>) {
     (matrix, modes, mesh.nodes().to_vec())
 }
 
-fn built_multigrid(matrix: &CsrMatrix, modes: &[f64], positions: &[[f64; 3]]) -> Multigrid {
-    let mut setup = MultigridSetup::new(matrix, modes, positions, MultigridOptions::default())
-        .expect("valid setup");
+fn built_multigrid(
+    matrix: &CsrMatrix,
+    modes: &[f64],
+    positions: &[[f64; 3]],
+    precision: Precision,
+) -> Multigrid {
+    let options = MultigridOptions {
+        precision,
+        ..MultigridOptions::default()
+    };
+    let mut setup = MultigridSetup::new(matrix, modes, positions, options).expect("valid setup");
     assert_eq!(
         setup.step(usize::MAX, &mut || false),
         Ok(SetupStatus::Finished)
@@ -75,10 +83,20 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
     a.iter().zip(b).map(|(x, y)| x * y).sum()
 }
 
+/// Both precisions whose cycle arithmetic is `f64`. `SingleStorage` rounds the stored operators
+/// entry by entry, so two equal mirrored entries stay equal; its cycle runs the same `f64`
+/// arithmetic, so the same derived bound applies to both.
 #[test]
 fn the_preconditioner_is_symmetric_and_positive_definite() {
+    for precision in [Precision::Double, Precision::SingleStorage] {
+        symmetric_and_positive_definite(precision);
+    }
+}
+
+fn symmetric_and_positive_definite(precision: Precision) {
     let (matrix, modes, positions) = shifted_stiffness();
-    let multigrid = built_multigrid(&matrix, &modes, &positions);
+    let multigrid = built_multigrid(&matrix, &modes, &positions, precision);
+    assert_eq!(multigrid.precision(), precision);
     let n = matrix.size();
     // Tolerance: the cycle performs at most about 20 products over the matrix's scalar entries,
     // each entry contributing at most one rounding unit relative to the magnitudes combined, so
@@ -101,11 +119,11 @@ fn the_preconditioner_is_symmetric_and_positive_definite() {
         let (xpy, ypx) = (dot(&x, &py), dot(&y, &px));
         assert!(
             (xpy - ypx).abs() <= bound(&x, &py, &y, &px),
-            "seed {seed}: x.Py = {xpy}, y.Px = {ypx}"
+            "{precision:?} seed {seed}: x.Py = {xpy}, y.Px = {ypx}"
         );
         // Positive definiteness: x.Px is the energy of the preconditioner on a non-zero vector.
         let energy = dot(&x, &px);
-        assert!(energy > 0.0, "seed {seed}: x.Px = {energy}");
+        assert!(energy > 0.0, "{precision:?} seed {seed}: x.Px = {energy}");
     }
 }
 

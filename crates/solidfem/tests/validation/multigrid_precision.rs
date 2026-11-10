@@ -2,8 +2,8 @@
 // f32 (Single), under the f64 conjugate gradient solve: on a stocky cantilever and on a thin plate
 // each reaches 1e-9 or its own rounding floor, in iteration counts pinned to measured values,
 // gives the same answer to within what that residual allows, and gives identical bits however the
-// build and the solve are sliced. The default f64 path's
-// iterations and displacement bits are pinned by a fingerprint.
+// build and the solve are sliced. The f64 (`Double`) path's iterations and displacement bits are
+// pinned by a fingerprint.
 
 use solidfem::elastic::{
     Material, Model, MultigridOptions, PcgOptions, Precision, PreconditionerChoice, Solution,
@@ -225,8 +225,9 @@ fn fingerprint(solution: &Solution) -> (u64, u64) {
     (solution.report.iterations, hash)
 }
 
-/// Pinned because the f64 cycle promises the same bits whatever precision options exist beside
-/// it: a change that moves these must say so and why, never pass by accident.
+/// The f64 (`Double`) path, pinned because the f64 cycle promises the same bits whatever
+/// precision options exist beside it: a change that moves these must say so and why, never pass
+/// by accident.
 #[test]
 fn the_default_f64_cycle_keeps_its_bits() {
     let cantilever = solve(

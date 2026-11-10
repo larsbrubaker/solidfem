@@ -32,8 +32,9 @@
 //! stress recovery together), which is its own named outcome.
 //!
 //! **Precision.** The multigrid hierarchy is stored and applied in the [`Precision`] chosen by
-//! [`PRECISION_VARIABLE`] (`double`, the default; `single-storage`; `single`; or `all`, which
-//! solves each meshed part once in each, back to back, so the remesh and volume stages run once).
+//! [`PRECISION_VARIABLE`] (unset is the library default, `single-storage`; `double`; `single`; or
+//! `all`, which solves each meshed part once in each, back to back, so the remesh and volume
+//! stages run once).
 //! Each trial records the iteration at which the relative residual first fell to
 //! [`RESIDUAL_MARK`], so one run also says what a looser tolerance would cost. The solve runs one
 //! iteration per `step` to see that crossing; slicing never changes a solve's bits.
@@ -85,14 +86,15 @@ pub const PRECISION_VARIABLE: &str = "CORPUS_PRECISION";
 /// the solver's 1e-9 would cost.
 pub const RESIDUAL_MARK: f64 = 1e-6;
 
-/// The precisions [`PRECISION_VARIABLE`] names: unset or `double` is the default alone,
-/// `single-storage` or `single` one other, `all` the three in that order.
+/// The precisions [`PRECISION_VARIABLE`] names: unset is the library default alone
+/// (`MultigridOptions::default().precision`), `double`, `single-storage` or `single` that one,
+/// `all` the three in the order double, single storage, single.
 ///
 /// # Errors
 /// A message naming the accepted values when the variable holds anything else.
 pub fn precisions_from_env() -> Result<Vec<Precision>, String> {
     match std::env::var(PRECISION_VARIABLE) {
-        Err(_) => Ok(vec![Precision::Double]),
+        Err(_) => Ok(vec![MultigridOptions::default().precision]),
         Ok(text) => match text.as_str() {
             "double" => Ok(vec![Precision::Double]),
             "single-storage" => Ok(vec![Precision::SingleStorage]),

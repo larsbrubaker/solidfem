@@ -290,21 +290,35 @@ fn stage_solve(mesh: &QuadraticTetMesh, precision: Precision) -> (u64, f64, u64)
 }
 
 #[test]
-fn a_plate_solves_in_double_as_a_coarser_sliced_solve_does() {
+fn a_plate_solves_in_the_default_precision_as_a_coarser_sliced_solve_does() {
+    // The stage runs the library's default, an f32-stored hierarchy with f64 arithmetic.
+    let precision = multigrid_options().precision;
     assert_eq!(
-        multigrid_options().precision,
-        Precision::Double,
+        precision,
+        Precision::SingleStorage,
         "the stage's default precision"
     );
+    sliced_solve_matches(precision);
+}
+
+#[test]
+fn a_plate_solves_in_double_as_a_coarser_sliced_solve_does() {
+    sliced_solve_matches(Precision::Double);
+}
+
+/// The stage steps one iteration at a time to see the 1e-6 crossing; a solve's bits do not depend
+/// on slicing, so seven at a time stops at the same iteration and residual.
+fn sliced_solve_matches(precision: Precision) {
     let mesh = meshed_plate();
     let case = bending_case(&mesh).expect("a plate has both ends");
-    let (iterations, residual, _) = stage_solve(&mesh, Precision::Double);
-    // The stage steps one iteration at a time to see the 1e-6 crossing; a solve's bits do not
-    // depend on slicing, so seven at a time stops at the same iteration and residual.
-    let (sliced_iterations, sliced_residual) =
-        reference_solve(&mesh, &case, Precision::Double, 1e-9, 7);
-    assert_eq!(iterations, sliced_iterations);
-    assert_eq!(residual.to_bits(), sliced_residual.to_bits());
+    let (iterations, residual, _) = stage_solve(&mesh, precision);
+    let (sliced_iterations, sliced_residual) = reference_solve(&mesh, &case, precision, 1e-9, 7);
+    assert_eq!(iterations, sliced_iterations, "{precision:?}");
+    assert_eq!(
+        residual.to_bits(),
+        sliced_residual.to_bits(),
+        "{precision:?}"
+    );
 }
 
 #[test]
