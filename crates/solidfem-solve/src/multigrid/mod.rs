@@ -35,7 +35,12 @@
 //! 1.27, while a 158,760-unknown stocky cantilever goes from 36 to 42 iterations in the same
 //! solve time. A wider reach still costs compact parts more than it gains on plates (4.0: 530
 //! iterations on the strip, 57 on the cantilever). These figures were measured before the
-//! coarse-level smoothing filter described below.
+//! coarse-level smoothing filter described below. With the filter, what holds on every wall is the
+//! hierarchy, not the iteration count: on unaligned two-layer plates 6 to 32 cells long the
+//! narrow reach 2.0 leaves 11% to 20% of aggregates under three nodes and operator complexity
+//! 1.77 to 1.92, the default 4.1% at most and 1.32 to 1.61, while which of 2.0, 3.0 and 4.5
+//! converges in the fewest iterations changes with the plate. The default is never more than 1.3
+//! times the fewest; 2.0 reaches 1.65 times and 4.5 1.8 times.
 //!
 //! **Prolongator smoothing is filtered.** Weak couplings are lumped into the diagonal instead of
 //! widening the prolongator, which is what bounds the coarse stencil: without it the 20,000-unknown

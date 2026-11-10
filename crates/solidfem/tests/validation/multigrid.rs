@@ -1,7 +1,8 @@
 // The multigrid preconditioner against Jacobi on real 10-node stiffness: symmetry and positive
 // definiteness, the rigid-body modes at every node, the closed-form cases reaching the same
-// answers, identical bits across repeated runs and however setup and solve are sliced, and
-// cancellation during setup and during the solve. Iteration counts staying flat under refinement
+// answers, identical bits across repeated runs and however setup and solve are sliced,
+// cancellation during setup and during the solve, and what the default neighbour reach builds on
+// unaligned two-layer walls of several sizes. Iteration counts staying flat under refinement
 // is the one ignored test (the meshes are too large for a debug run):
 // `cargo test --release -p solidfem --test validation multigrid::iterations -- --ignored --nocapture`
 
@@ -549,12 +550,14 @@ fn cancelling_during_setup_and_during_the_solve_stops_each_promptly() {
     let _ = mean_displacement;
 }
 
-/// A 2.5 mm-celled 40 x 20 x 0.8 plate whose interior skin vertices are moved within their cells
-/// differently on the two skins, so no column lines up: the wall a remeshed surface really has.
-fn unaligned_thin_plate() -> QuadraticTetMesh {
-    let (cells, rows) = (16usize, 8usize);
-    let (length, width, thick) = (40.0, 20.0, 0.8);
-    let (hx, hy) = (length / cells as f64, width / rows as f64);
+/// The cell size of [`unaligned_thin_plate`], in mm.
+const PLATE_CELL: f64 = 2.5;
+
+/// A `cells` x `rows` plate of [`PLATE_CELL`] cells, 0.8 mm thick, whose interior skin vertices
+/// are moved within their cells differently on the two skins, so no column lines up: the wall a
+/// remeshed surface really has.
+fn unaligned_thin_plate(cells: usize, rows: usize) -> QuadraticTetMesh {
+    let (hx, hy, thick) = (PLATE_CELL, PLATE_CELL, 0.8);
     let at = |i: usize, j: usize, layer: usize| ((layer * (cells + 1) + i) * (rows + 1) + j) as u32;
     let mut points = Vec::new();
     for layer in 0..2 {
@@ -631,16 +634,25 @@ fn unaligned_thin_plate() -> QuadraticTetMesh {
     quadratic_from_solid(&refined, Quadrature::FourPoint).expect("upgrades")
 }
 
-/// The iteration count and the finest aggregates' count and undersized count for `reach`.
-fn unaligned_plate_iterations(reach: f64) -> (u64, usize, usize) {
-    let mesh = unaligned_thin_plate();
+/// What the hierarchy for `reach` on a `cells`-long unaligned plate looks like: its finest
+/// aggregates' count and how many are under three nodes, its operator complexity, and, when
+/// `solve` asks, the iterations the solve converges in.
+struct PlateHierarchy {
+    aggregates: usize,
+    undersized: usize,
+    operator_complexity: f64,
+    iterations: Option<u64>,
+}
+
+fn unaligned_plate_hierarchy(cells: usize, reach: f64, solve: bool) -> PlateHierarchy {
+    let mesh = unaligned_thin_plate(cells, cells / 2);
     let material = Material {
         youngs_modulus: 200_000.0,
         poisson_ratio: 0.0,
     };
     let mut model = Model::new(mesh.clone(), material);
     fix_root(&mut model);
-    for face in faces_at(&mesh, 40.0) {
+    for face in faces_at(&mesh, cells as f64 * PLATE_CELL) {
         model.add_traction(face, [0.0, 0.0, -1.0]);
     }
     let choice = PreconditionerChoice::Multigrid(MultigridOptions {
@@ -656,41 +668,72 @@ fn unaligned_plate_iterations(reach: f64) -> (u64, usize, usize) {
         &mut || false,
     )
     .expect("valid");
-    let aggregates = study.multigrid().expect("multigrid").aggregates(0).to_vec();
-    let count = 1 + aggregates.iter().copied().max().unwrap_or(0) as usize;
-    let mut size = vec![0usize; count];
-    for a in &aggregates {
+    let multigrid = study.multigrid().expect("multigrid");
+    let finest = multigrid.aggregates(0);
+    let aggregates = 1 + finest.iter().copied().max().unwrap_or(0) as usize;
+    let mut size = vec![0usize; aggregates];
+    for a in finest {
         size[*a as usize] += 1;
     }
     let undersized = size.iter().filter(|s| **s < 3).count();
-    loop {
-        match study.step(500, &mut || false).expect("solves") {
-            StepOutcome::Converged(_) => break,
-            StepOutcome::Running(_) => {}
-            StepOutcome::Cancelled(_) => panic!("nothing cancelled"),
+    let operator_complexity = multigrid.stats().operator_complexity;
+    let iterations = solve.then(|| {
+        loop {
+            match study.step(500, &mut || false).expect("solves") {
+                StepOutcome::Converged(_) => break,
+                StepOutcome::Running(_) => {}
+                StepOutcome::Cancelled(_) => panic!("nothing cancelled"),
+            }
         }
+        study.report().iterations
+    });
+    PlateHierarchy {
+        aggregates,
+        undersized,
+        operator_complexity,
+        iterations,
     }
-    (study.report().iterations, count, undersized)
 }
 
+/// The default reach is for walls: its aggregates follow the wall rather than the row-by-row
+/// irregularity of unaligned skins. That is checked on plates from 6 to 20 cells long, because
+/// what the reach buys is a property of the hierarchy on every wall, not of one mesh's iteration
+/// count: whether the narrow or the default reach converges in fewer iterations changes with the
+/// plate (the narrow reach is ahead on some small plates and behind on larger ones).
 #[test]
-fn the_default_multigrid_handles_unaligned_two_layer_walls_better_than_the_narrow_reach() {
+fn the_default_multigrid_reach_builds_wall_aggregates_that_carry_the_rigid_body_modes() {
     let narrow = 2.0;
     let default = MultigridOptions::default().neighbour_reach;
-    let (narrow_iterations, narrow_count, narrow_small) = unaligned_plate_iterations(narrow);
-    let (iterations, count, small) = unaligned_plate_iterations(default);
-    eprintln!(
-        "reach {narrow}: {narrow_iterations} iterations, {narrow_small} of {narrow_count} aggregates under three nodes; reach {default}: {iterations} iterations, {small} of {count}"
-    );
-    // An aggregate of fewer than three nodes cannot carry the six rigid-body modes, so it leaves
-    // coarse values dead; a solver user's wall should have almost none. The share is a budget: one
-    // in twenty still leaves nineteen of twenty aggregates able to carry the wall's bending.
-    assert!(
-        small * 20 <= count,
-        "{small} of {count} aggregates are under three nodes"
-    );
-    assert!(
-        iterations < narrow_iterations,
-        "the default took {iterations} iterations, the narrow reach {narrow_iterations}"
-    );
+    for cells in [6, 12, 20] {
+        let tight = unaligned_plate_hierarchy(cells, narrow, false);
+        let wall = unaligned_plate_hierarchy(cells, default, true);
+        eprintln!(
+            "{cells} cells: reach {narrow}: {} of {} aggregates under three nodes, operator complexity {}; reach {default}: {} of {}, {}, {:?} iterations",
+            tight.undersized,
+            tight.aggregates,
+            tight.operator_complexity,
+            wall.undersized,
+            wall.aggregates,
+            wall.operator_complexity,
+            wall.iterations
+        );
+        // An aggregate of fewer than three nodes cannot carry the six rigid-body modes, so it
+        // leaves coarse values dead; a solver user's wall should have almost none. The share is a
+        // budget: one in twenty still leaves nineteen of twenty aggregates able to carry the
+        // wall's bending.
+        assert!(
+            wall.undersized * 20 <= wall.aggregates,
+            "{cells} cells: {} of {} aggregates are under three nodes",
+            wall.undersized,
+            wall.aggregates
+        );
+        // Following the wall instead of each row's closest neighbours makes fewer, larger
+        // aggregates, so every coarse level is smaller and a cycle reads fewer stored values.
+        assert!(
+            wall.operator_complexity < tight.operator_complexity,
+            "{cells} cells: operator complexity {} at the default reach, {} at the narrow one",
+            wall.operator_complexity,
+            tight.operator_complexity
+        );
+    }
 }
