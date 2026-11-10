@@ -102,6 +102,8 @@ mod native {
         ("mindih", "min dih"),
         ("lt1", "<1 deg"),
         ("lt5", "<5 deg"),
+        ("size_stopped", "capped"),
+        ("refused_moves", "refused"),
         ("sec", "sec"),
     ];
 
@@ -564,6 +566,18 @@ mod native {
         println!("tets under 1 deg: {}", distribution(&ok, "lt1"));
         println!("tets under 5 deg: {}", distribution(&ok, "lt5"));
         println!("tets: {}", distribution(&ok, "tets"));
+        let capped = ok
+            .iter()
+            .filter(|r| field(r, "size_stopped") == "yes")
+            .count();
+        println!(
+            "size stage stopped at the element cap: {capped}/{}",
+            ok.len()
+        );
+        println!(
+            "with moves refused for the cap: {}",
+            share_nonzero(&ok, "refused_moves")
+        );
         println!("seconds: {}", distribution(&ok, "sec"));
         print_solve(records);
     }

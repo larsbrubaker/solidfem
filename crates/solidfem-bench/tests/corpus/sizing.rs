@@ -9,7 +9,8 @@
 //! (0.885) to its 90th percentile (1.128) for boxes whose walls get their two layers. The upper
 //! tail beyond that came from surfaces whose curved detail or creases forced the remesher to
 //! several times the ideal triangle count; flat boxes have none, so they belong inside the bulk
-//! of the fit. A shell whose walls the budget leaves short is held to the whole spread (to 2.251).
+//! of the fit. A shell whose walls the budget leaves short is held to its own measured bound
+//! (`UNDER_RESOLVED_SHELL_UPPER`).
 
 use std::time::Duration;
 
@@ -92,8 +93,16 @@ fn box_shell(outer: [f64; 3], wall: f64) -> TriSoup {
     shell
 }
 
+/// The most a shell whose walls the budget leaves short may come in over the budget's element
+/// count. Box shells were measured at 1.158 (20 x 15 x 8 with 0.6 walls) and 0.98 (the synthetic
+/// 60 x 40 x 20 shell at the corpus budget); 1.25 holds both with a little room for the
+/// mesher's own variation.
+/// The fit's whole-spread maximum (2.251) comes from curved detail, a different cause, and would
+/// let a prediction 2.2 times low pass.
+const UNDER_RESOLVED_SHELL_UPPER: f64 = 1.25;
+
 #[test]
-fn the_corpus_edge_for_a_thin_shell_lands_its_mesh_near_the_budget() {
+fn the_corpus_edge_for_a_thin_shell_lands_its_mesh_within_a_quarter_over_the_budget() {
     let soup = box_shell([20.0, 15.0, 8.0], 0.6);
     let metrics = measure_input(&soup);
     // A budget the debug build meshes in seconds that leaves this shell's walls as far short of
@@ -107,14 +116,13 @@ fn the_corpus_edge_for_a_thin_shell_lands_its_mesh_near_the_budget() {
         "the budget's edge leaves the walls short as the corpus's does: {ratio}"
     );
     // Walls this far short are past the layer shortfalls the fit saw (up to 0.95 of a layer), so
-    // only the fit's whole spread, to its maximum, is claimed: the mesh must not come in under
-    // the fit's least or far over the budget.
+    // the bound is the shells' own, not the fit's p90.
     let tets = meshed_tets(&soup, edge) as f64;
     assert_within(
         "thin shell at the budget",
         tets,
         budget / UNKNOWNS_PER_TET,
-        PREDICTION_BAND.max,
+        UNDER_RESOLVED_SHELL_UPPER,
     );
 }
 
@@ -183,4 +191,46 @@ fn the_budget_edge_predicts_the_budget_and_bad_inputs_are_refused() {
         wall_p5: f64::NAN,
     };
     assert_eq!(edge_for_unknowns(&empty, 1.0e6), Ok(0.0));
+}
+
+#[test]
+fn a_budget_no_finite_edge_can_meet_is_refused_rather_than_searched_forever() {
+    // The largest finite area over the smallest positive budget: the starting edge itself is
+    // past what an f64 holds.
+    let huge = PartSize {
+        volume: f64::MAX,
+        area: f64::MAX,
+        wall_p5: 1.0,
+    };
+    assert_eq!(
+        edge_for_unknowns(&huge, f64::MIN_POSITIVE),
+        Err(SizingError::NoFiniteEdge {
+            budget: f64::MIN_POSITIVE
+        })
+    );
+    // A tiny budget on an ordinary part still has a finite edge, and it meets the budget.
+    let part = PartSize {
+        volume: 1.0e3,
+        area: 6.0e2,
+        wall_p5: 1.0,
+    };
+    let edge = edge_for_unknowns(&part, 1.0e-6).expect("a finite edge exists");
+    assert!(edge.is_finite() && predicted_unknowns(&part, edge) <= 1.0e-6);
+}
+
+#[test]
+fn a_ratio_that_is_not_a_number_reads_as_walls_unread() {
+    // A part whose volume is not a number gets a NaN edge, so its wall ratio is NaN too: that
+    // says nothing about its walls and must not read as under-resolved.
+    let trial = RemeshTrial {
+        target_edge_length: f64::NAN,
+        target_source: TargetSource::Budget,
+        predicted_tets: f64::NAN,
+        wall_ratio: Some(f64::NAN),
+        deviation_bound: f64::NAN,
+        seconds: 0.0,
+        outcome: Err(AnalysisRemeshError::Cancelled),
+    };
+    let record = parse_line(&to_line(&remesh_fields("nan part", &trial)));
+    assert_eq!(field(&record, "walls"), "unread");
 }

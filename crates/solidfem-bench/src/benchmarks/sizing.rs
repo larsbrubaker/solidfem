@@ -24,8 +24,9 @@
 //! Where it is known to be off, measured on boxes: a plate thin throughout (2.0 thick at edge 1.5,
 //! wall ratio 1.5) came in at 0.86, the layer term counting layers the fill already made; and a
 //! thin shell far past its walls (0.62 walls at edge 1.56, wall ratio 5) came in at 2.46, the
-//! layers then costing elements the clamped term does not see. The same shell at the corpus's
-//! budget (wall ratio 2.4) came in at 0.98. Past a wall ratio of about 2.4 the estimate is
+//! layers then costing elements the clamped term does not see. Nearer the walls, two different
+//! shells came in at 0.98 (the synthetic 60 x 40 x 20 shell at the corpus budget, wall ratio
+//! 2.4) and 1.158 (a 20 x 15 x 8 box shell with 0.6 walls, at a wall ratio between 1.5 and 2.5). Past a wall ratio of about 2.4 the estimate is
 //! unmeasured and can be several times low.
 
 /// Unknowns per element of a finished 10-node mesh: three per node, nodes a little over a third
@@ -55,6 +56,11 @@ pub const PREDICTION_BAND: PredictionBand = PredictionBand {
     max: 2.251,
 };
 
+/// How far above the budget's element count the mesher's hard cap sits: clear of the fit's p90
+/// (1.128), so a part predicted well is never cut, while one whose estimate ran low is held near
+/// the memory the budget promises.
+pub const TET_CAP_HEADROOM: f64 = 1.15;
+
 /// Elements requested through each thin wall, as every benchmark case and the corpus request.
 pub const LAYERS_THROUGH_WALLS: f64 = 2.0;
 
@@ -67,6 +73,10 @@ const TETS_PER_CUBE_EDGE: f64 = 8.485_281_374_238_57;
 /// Bisection steps for [`edge_for_unknowns`]: enough to pin the edge to the last bit of a
 /// bracket a factor of two wide, and a fixed count so two runs give the same bits.
 const BISECTION_STEPS: usize = 64;
+
+/// Doublings or halvings allowed while bracketing the edge: the starting guess is within a small
+/// factor of the answer, and 2^64 is far past any the prediction's terms could put between them.
+const BRACKET_STEPS: usize = 64;
 
 /// The spread of measured over predicted elements.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -97,6 +107,9 @@ pub enum SizingError {
     InvalidPart { volume: f64, area: f64 },
     /// The budget is not a positive finite number of unknowns.
     InvalidBudget(f64),
+    /// The edge the budget asks for is past what an `f64` can bracket: a part this large for
+    /// this small a budget.
+    NoFiniteEdge { budget: f64 },
 }
 
 /// The finished element count predicted for `part` meshed at edge `h`.
@@ -123,7 +136,8 @@ pub fn predicted_unknowns(part: &PartSize, h: f64) -> f64 {
 ///
 /// # Errors
 /// [`SizingError::InvalidPart`] for a negative or non-finite volume or area,
-/// [`SizingError::InvalidBudget`] for a budget that is not positive and finite.
+/// [`SizingError::InvalidBudget`] for a budget that is not positive and finite,
+/// [`SizingError::NoFiniteEdge`] when the edge would be past what an `f64` holds.
 pub fn edge_for_unknowns(part: &PartSize, budget: f64) -> Result<f64, SizingError> {
     let valid = |x: f64| x.is_finite() && x >= 0.0;
     if !valid(part.volume) || !valid(part.area) {
@@ -142,15 +156,28 @@ pub fn edge_for_unknowns(part: &PartSize, budget: f64) -> Result<f64, SizingErro
     // the triangles fall with its square), so one bracket and a bisection find the edge. Start
     // from the edge either term alone would need, then widen until the budget is straddled.
     let over = |h: f64| predicted_unknowns(part, h) > budget;
+    let no_edge = SizingError::NoFiniteEdge { budget };
     let mut high = (part.area / (TRIANGLE_AREA_PER_EDGE_SQUARED * budget))
         .sqrt()
         .max((TETS_PER_CUBE_EDGE * part.volume / budget).cbrt());
-    while over(high) {
+    for _ in 0..BRACKET_STEPS {
+        if !high.is_finite() || !over(high) {
+            break;
+        }
         high *= 2.0;
     }
+    if !high.is_finite() || over(high) {
+        return Err(no_edge);
+    }
     let mut low = high * 0.5;
-    while !over(low) && low > 0.0 {
+    for _ in 0..BRACKET_STEPS {
+        if over(low) || low <= 0.0 {
+            break;
+        }
         low *= 0.5;
+    }
+    if !over(low) {
+        return Err(no_edge);
     }
     for _ in 0..BISECTION_STEPS {
         let middle = (low + high) * 0.5;

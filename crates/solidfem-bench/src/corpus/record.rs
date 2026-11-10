@@ -118,12 +118,14 @@ pub fn remesh_fields(name: &str, trial: &RemeshTrial) -> Vec<(String, String)> {
 
 /// Whether two layers fit through the part's thin walls at the target: `resolved`,
 /// `under-resolved` (the budget forced a coarser edge, a result on it is suspect), or `unread`
-/// when no wall could be measured.
+/// when no wall could be measured or the ratio is not a finite number.
 fn walls_name(ratio: Option<f64>) -> &'static str {
     match ratio {
         None => "unread",
         // A ratio of exactly 1 is the wall-chosen edge itself; the tolerance only absorbs the
         // rounding of halving the wall and doubling it back.
+        // A ratio that is not a number (the edge itself was not) says nothing about the walls.
+        Some(r) if !r.is_finite() => "unread",
         Some(r) if r <= 1.0 + 1e-12 => "resolved",
         Some(_) => "under-resolved",
     }
@@ -173,6 +175,11 @@ pub fn volume_fields(name: &str, trial: &VolumeTrial) -> Vec<(String, String)> {
                 ("mindih", num(part.min_dihedral_degrees)),
                 ("lt1", part.under_one_degree.to_string()),
                 ("lt5", part.under_five_degrees.to_string()),
+                (
+                    "size_stopped",
+                    if part.size_stopped { "yes" } else { "no" }.to_string(),
+                ),
+                ("refused_moves", part.refused_moves.to_string()),
             ]
             .into_iter()
             .map(|(k, v)| (k.to_string(), v)),

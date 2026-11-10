@@ -4,10 +4,13 @@
 //! outcome as a stable short name so a corpus can be counted by failure class. A finished mesh is
 //! kept on the result for the solve stage (`solve_trial.rs`).
 //!
-//! The work is capped two ways so one part costs at most about a minute: the edge length, chosen
-//! once for the remesh and the volume alike (`remesh_trial::choose_target`), is sized for the
-//! corpus's unknowns budget, and the run is cancelled at [`TIME_CAP_SECONDS`], which is its own
-//! named outcome.
+//! The work is capped three ways so one part costs at most about a minute and stays inside the
+//! memory the budget promises: the edge length, chosen once for the remesh and the volume alike
+//! (`remesh_trial::choose_target`), is sized for the corpus's unknowns budget; the mesher is held
+//! to a hard element cap a little above that budget ([`tet_cap`]), whose size stage stops at the
+//! cap and still finishes (recorded as `size_stopped`), refusing only a part whose surface and
+//! wall layers alone exceed it (`tetra:TetBudgetExceeded`); and the run is cancelled at
+//! [`TIME_CAP_SECONDS`], which is its own named outcome.
 
 use std::time::Instant;
 
@@ -15,8 +18,10 @@ use solidfem::elastic::Quadrature;
 use solidfem::mesh::QuadraticTetMesh;
 use solidfem::tetra::{RefineOptions, SizeFn};
 
+use super::remesh_trial::UNKNOWNS_BUDGET;
 use super::soup::TriSoup;
 use crate::benchmarks::cases::min_dihedral_degrees;
+use crate::benchmarks::sizing::{TET_CAP_HEADROOM, UNKNOWNS_PER_TET};
 use crate::benchmarks::volume::{volume_mesh, VolumeFailure, VolumeStage};
 
 /// The volume stage is cancelled after this long, so a part costs its own row, not the batch's
@@ -25,6 +30,15 @@ pub const TIME_CAP_SECONDS: f64 = 60.0;
 
 /// Elements requested through each thin wall, as every benchmark case requests.
 const LAYERS_THROUGH_WALLS: u32 = 2;
+
+/// The mesher's hard element cap: the corpus's unknowns budget in elements, with
+/// [`TET_CAP_HEADROOM`] above it. A part whose estimate ran low then gets a coarser interior and
+/// stays inside the memory the budget promises, rather than being refused.
+pub fn tet_cap() -> usize {
+    // The value is finite and about 2.6e5, far below `usize::MAX` on any target, so the cast
+    // cannot saturate.
+    (UNKNOWNS_BUDGET / UNKNOWNS_PER_TET * TET_CAP_HEADROOM).ceil() as usize
+}
 
 /// What the volume stage did to one remeshed part.
 #[derive(Clone, Debug)]
@@ -46,6 +60,10 @@ pub struct VolumePart {
     pub under_one_degree: usize,
     /// Elements whose smallest dihedral angle is under 5 degrees.
     pub under_five_degrees: usize,
+    /// The size stage stopped at [`tet_cap`], so the interior is coarser than the edge asks.
+    pub size_stopped: bool,
+    /// Size points, quality flips and quality points the cap refused.
+    pub refused_moves: usize,
     /// The 10-node mesh itself, which the solve stage (`solve_trial.rs`) solves.
     pub mesh: QuadraticTetMesh,
 }
@@ -57,9 +75,8 @@ pub fn volume_and_measure(surface: &TriSoup, edge: f64) -> VolumeTrial {
     let size: SizeFn = Box::new(move |_| edge);
     let options = RefineOptions {
         layers_through_walls: LAYERS_THROUGH_WALLS,
-        // The mesher keeps the budget as a promise, refusing a surface that alone exceeds it.
-        // `TET_BUDGET` is a whole number far below `usize::MAX`, so the cast is exact.
-        max_tets: TET_BUDGET as usize,
+        // The mesher keeps the cap as a promise, refusing a surface that alone exceeds it.
+        max_tets: tet_cap(),
         ..RefineOptions::default()
     };
     let mut past_cap = || start.elapsed().as_secs_f64() >= TIME_CAP_SECONDS;
@@ -83,6 +100,8 @@ pub fn volume_and_measure(surface: &TriSoup, edge: f64) -> VolumeTrial {
             min_dihedral_degrees: angles.iter().copied().fold(f64::INFINITY, f64::min),
             under_one_degree: angles.iter().filter(|a| **a < 1.0).count(),
             under_five_degrees: angles.iter().filter(|a| **a < 5.0).count(),
+            size_stopped: volume.report.size_stopped_at_budget,
+            refused_moves: volume.report.moves_refused_for_budget,
             mesh: volume.mesh,
         }
     });

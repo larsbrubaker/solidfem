@@ -54,6 +54,9 @@ fn a_remeshed_plate_volume_meshes_and_its_record_reads_back() {
     let record = parse_line(&to_line(&fields));
     assert_eq!(field(&record, "kind"), "volume");
     assert_eq!(field(&record, "status"), "ok");
+    // A small plate is far under the element cap: nothing stopped or refused for it.
+    assert_eq!(field(&record, "size_stopped"), "no");
+    assert_eq!(field(&record, "refused_moves"), "0");
     // Shortest round-trip text: the number read back is the number measured, bit for bit.
     assert_eq!(
         field_f64(&record, "mindih"),
