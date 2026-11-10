@@ -9,14 +9,17 @@
 //! beside `pred_tets`, the element count predicted for that edge; the volume and
 //! solve records' `status` is their stage's outcome name (`volume_trial::outcome_name`,
 //! `solve_trial::solve_outcome_name`), or `child:<how>` when the child process was lost in that
-//! stage. A solve record carries its mesh's worst dihedral angle so iterations can be read
-//! against it (`by_dihedral_bucket`).
+//! stage (`lost_child_records`). A solve record carries its mesh's worst dihedral angle so
+//! iterations can be read against it (`by_dihedral_bucket`), its `precision` (the multigrid's,
+//! `solve_trial::precision_name`), `floor` (whether the solve stopped at the rounding floor), and
+//! `below_1e6`, the iteration at which the relative residual first fell to 1e-6, omitted when it
+//! never did.
 
 use std::collections::BTreeMap;
 
 use super::measure::{sample_exclusion, InputMetrics};
 use super::remesh_trial::{refusal_name, RemeshTrial, RemeshedPart, TargetSource};
-use super::solve_trial::{solve_outcome_name, SolveFailure, SolveTrial};
+use super::solve_trial::{precision_name, solve_outcome_name, SolveFailure, SolveTrial};
 use super::volume_trial::{outcome_name, VolumeTrial};
 
 /// A parsed record: field name to text.
@@ -204,6 +207,43 @@ pub fn stage_lost_fields(name: &str, kind: &str, how: &str) -> Vec<(String, Stri
     ]
 }
 
+/// The records to add for a child process lost after writing `partial`: `None` when it was not
+/// lost inside the volume or solve stage (it had not reached them, or every expected record is
+/// there). Lost after a finished volume mesh, it is one `child:<how>` solve record for each name
+/// in `precisions` with no solve record of its own; lost after a remesh with a surface and before
+/// any volume record, one `child:<how>` volume record.
+pub fn lost_child_records(
+    partial: &[Record],
+    precisions: &[&str],
+    how: &str,
+) -> Option<Vec<Vec<(String, String)>>> {
+    let finished = |kind: &str| {
+        partial
+            .iter()
+            .find(|r| field(r, "kind") == kind && field(r, "status") == "ok")
+            .map(|r| field(r, "name").to_string())
+    };
+    if let Some(name) = finished("volume") {
+        let missing: Vec<Vec<(String, String)>> = precisions
+            .iter()
+            .filter(|precision| {
+                !partial
+                    .iter()
+                    .any(|r| field(r, "kind") == "solve" && field(r, "precision") == **precision)
+            })
+            .map(|precision| {
+                let mut fields = stage_lost_fields(&name, "solve", how);
+                fields.push(("precision".to_string(), precision.to_string()));
+                fields
+            })
+            .collect();
+        return (!missing.is_empty()).then_some(missing);
+    }
+    let name = finished("remesh")?;
+    let has_volume = partial.iter().any(|r| field(r, "kind") == "volume");
+    (!has_volume).then(|| vec![stage_lost_fields(&name, "volume", how)])
+}
+
 /// The `key=value` fields of a solve trial on a mesh whose worst dihedral angle is
 /// `min_dihedral_degrees`.
 pub fn solve_fields(
@@ -216,6 +256,10 @@ pub fn solve_fields(
         ("kind".to_string(), "solve".to_string()),
         ("status".to_string(), solve_outcome_name(&trial.outcome)),
         ("unknowns".to_string(), trial.unknowns.to_string()),
+        (
+            "precision".to_string(),
+            precision_name(trial.precision).to_string(),
+        ),
         ("mindih".to_string(), num(min_dihedral_degrees)),
         ("sec".to_string(), num(trial.seconds)),
     ];
@@ -228,7 +272,11 @@ pub fn solve_fields(
                 num(report.assembly_seconds + report.preconditioner_seconds),
             ),
             ("solve_sec".to_string(), num(report.solve_seconds)),
+            ("floor".to_string(), report.at_rounding_floor.to_string()),
         ]);
+        if let Some(iteration) = trial.below_mark {
+            fields.push(("below_1e6".to_string(), iteration.to_string()));
+        }
         if let Some(multigrid) = &report.multigrid {
             fields.push(("mg_bytes".to_string(), multigrid.memory_bytes.to_string()));
         }

@@ -2,23 +2,32 @@
 //! under the corpus's bending load case with its reactions balancing the load and a deflection
 //! inside the beam-theory bracket, a part with too few nodes to hold or no face to load is a named
 //! outcome rather than a guess, the study's errors and the time cap are named apart, and solve
-//! records sort into the worst-dihedral buckets the summary reads iterations by. A solve that
+//! records sort into the worst-dihedral buckets the summary reads iterations by. A plate solves in
+//! each multigrid precision, the stage's one-iteration stepping giving the same solve as coarser
+//! slices, and a child lost partway through a three-precision solve keeps the records it wrote and
+//! gets one lost record per precision it did not reach. A solve that
 //! "converged" to a wrong answer would read as a mesh that works, so the checks are physical.
 
-use solidfem::elastic::ModelError;
+use solidfem::elastic::{
+    Model, ModelError, PcgOptions, Precision, PreconditionerChoice, Quadrature, StaticStudy,
+    StepOutcome, StudyOptions,
+};
 use solidfem::mesh::{QuadraticTetMesh, TetMesh};
 use solidfem::solve::PcgError;
 use solidfem_bench::benchmarks::verdict::LOAD_BALANCE_LIMIT;
 use solidfem_bench::corpus::measure::measure_input;
 use solidfem_bench::corpus::record::{
-    by_dihedral_bucket, field, field_f64, parse_line, solve_fields, to_line,
+    by_dihedral_bucket, field, field_f64, lost_child_records, parse_line, solve_fields, to_line,
+    Record,
 };
 use solidfem_bench::corpus::remesh_trial::remesh_and_measure;
 use solidfem_bench::corpus::solve_trial::{
-    bending_case, solve_and_check, solve_outcome_name, LoadCaseError, SolveFailure, SolvedPart,
-    LOAD_STRAIN, STEEL,
+    bending_case, precision_name, solve_and_check, solve_and_check_in, solve_outcome_name,
+    LoadCase, LoadCaseError, SolveFailure, SolvedPart, LOAD_STRAIN, STEEL,
 };
 use solidfem_bench::corpus::volume_trial::volume_and_measure;
+
+use solidfem_bench::gate_diagnostics::multigrid_options;
 
 use crate::metrics::cuboid;
 
@@ -195,5 +204,164 @@ fn solve_records_sort_into_dihedral_buckets_at_their_lower_edges() {
             (">= 5 deg", 2),
         ],
         "each bucket holds its lower edge; an unreadable angle is in none"
+    );
+}
+
+/// The 40 x 20 x 4 plate of the first test, remeshed and volume-meshed as the corpus does.
+fn meshed_plate() -> QuadraticTetMesh {
+    let soup = cuboid([40.0, 20.0, 4.0], [0.0, 0.0, 0.0]);
+    let metrics = measure_input(&soup);
+    let remesh = remesh_and_measure(&soup, &metrics);
+    let surface = remesh.outcome.expect("a plate remeshes").surface;
+    volume_and_measure(&surface, remesh.target_edge_length)
+        .outcome
+        .expect("a plate volume-meshes")
+        .mesh
+}
+
+/// The stage's study of `mesh` built here, to `tolerance`, stepped `slice` iterations at a time:
+/// (iterations, final relative residual).
+fn reference_solve(
+    mesh: &QuadraticTetMesh,
+    case: &LoadCase,
+    precision: Precision,
+    tolerance: f64,
+    slice: usize,
+) -> (u64, f64) {
+    let mut model = Model::new(mesh.clone(), STEEL);
+    model.set_quadrature(Quadrature::FourPoint);
+    for node in &case.supports.fixed {
+        model.fix_node(*node);
+    }
+    for (face, traction) in &case.supports.tractions {
+        model.add_traction(*face, *traction);
+    }
+    let options = StudyOptions {
+        pcg: PcgOptions {
+            tolerance,
+            ..PcgOptions::default()
+        },
+        preconditioner: PreconditionerChoice::Multigrid(solidfem::elastic::MultigridOptions {
+            precision,
+            ..multigrid_options()
+        }),
+        ..StudyOptions::default()
+    };
+    let mut study = StaticStudy::new(model, options, &mut || false).expect("valid");
+    loop {
+        match study.step(slice, &mut || false).expect("solves") {
+            StepOutcome::Converged(_) => break,
+            StepOutcome::Running(_) => {}
+            StepOutcome::Cancelled(_) => panic!("nothing cancelled"),
+        }
+    }
+    let report = study.report();
+    (report.iterations, report.relative_residual)
+}
+
+/// Solves the plate in `precision` as the stage does and checks the record; returns the trial's
+/// iterations, final residual and 1e-6 crossing.
+fn stage_solve(mesh: &QuadraticTetMesh, precision: Precision) -> (u64, f64, u64) {
+    let trial = solve_and_check_in(mesh, precision);
+    assert_eq!(trial.precision, precision);
+    assert_eq!(
+        solve_outcome_name(&trial.outcome),
+        "ok",
+        "{precision:?}: {:?}",
+        trial.outcome
+    );
+    let report = trial.report.as_ref().expect("a solved study has a report");
+    assert!(
+        report.relative_residual <= 1e-9 || report.at_rounding_floor,
+        "{precision:?}: stopped at {} short of its floor",
+        report.relative_residual
+    );
+    // `below_1e6` reads the running residual estimate, so it comes no later than the end.
+    let crossing = trial.below_mark.expect("the residual passed 1e-6");
+    assert!(crossing <= report.iterations, "{precision:?}: {crossing}");
+    let record = parse_line(&to_line(&solve_fields("plate", &trial, 10.0)));
+    assert_eq!(field(&record, "precision"), precision_name(precision));
+    assert_eq!(field(&record, "below_1e6"), crossing.to_string());
+    assert_eq!(
+        field(&record, "floor"),
+        report.at_rounding_floor.to_string()
+    );
+    (report.iterations, report.relative_residual, crossing)
+}
+
+#[test]
+fn a_plate_solves_in_double_as_a_coarser_sliced_solve_does() {
+    assert_eq!(
+        multigrid_options().precision,
+        Precision::Double,
+        "the stage's default precision"
+    );
+    let mesh = meshed_plate();
+    let case = bending_case(&mesh).expect("a plate has both ends");
+    let (iterations, residual, _) = stage_solve(&mesh, Precision::Double);
+    // The stage steps one iteration at a time to see the 1e-6 crossing; a solve's bits do not
+    // depend on slicing, so seven at a time stops at the same iteration and residual.
+    let (sliced_iterations, sliced_residual) =
+        reference_solve(&mesh, &case, Precision::Double, 1e-9, 7);
+    assert_eq!(iterations, sliced_iterations);
+    assert_eq!(residual.to_bits(), sliced_residual.to_bits());
+}
+
+#[test]
+fn the_plate_crosses_1e6_where_a_solve_to_that_tolerance_stops() {
+    let mesh = meshed_plate();
+    let case = bending_case(&mesh).expect("a plate has both ends");
+    let (_, _, crossing) = stage_solve(&mesh, Precision::Double);
+    // A solve to a 1e-6 tolerance stops where the running estimate first crossed 1e-6 when the
+    // true residual there agrees, as it does on this plate.
+    let (to_mark, _) = reference_solve(&mesh, &case, Precision::Double, 1e-6, 7);
+    assert_eq!(crossing, to_mark);
+}
+
+#[test]
+fn a_plate_solves_with_an_f32_stored_hierarchy() {
+    stage_solve(&meshed_plate(), Precision::SingleStorage);
+}
+
+#[test]
+fn a_plate_solves_with_an_f32_cycle() {
+    stage_solve(&meshed_plate(), Precision::Single);
+}
+
+#[test]
+fn a_child_lost_partway_through_three_precisions_keeps_its_records_and_names_the_rest() {
+    let lines = [
+        "name=p.stl kind=remesh status=ok",
+        "name=p.stl kind=volume status=ok",
+        "name=p.stl kind=solve status=ok precision=double iters=40",
+    ];
+    let partial: Vec<Record> = lines.iter().map(|line| parse_line(line)).collect();
+    let all = ["double", "single-storage", "single"];
+    let lost = lost_child_records(&partial, &all, "timeout").expect("two solves were lost");
+    let lost: Vec<Record> = lost
+        .iter()
+        .map(|fields| parse_line(&to_line(fields)))
+        .collect();
+    let named: Vec<(&str, &str, &str)> = lost
+        .iter()
+        .map(|r| (field(r, "kind"), field(r, "status"), field(r, "precision")))
+        .collect();
+    assert_eq!(
+        named,
+        vec![
+            ("solve", "child:timeout", "single-storage"),
+            ("solve", "child:timeout", "single"),
+        ]
+    );
+    assert!(lost.iter().all(|r| field(r, "name") == "p.stl"));
+    // With every expected solve present nothing is lost in a stage, and a child lost after a
+    // remesh with no volume record loses the volume stage.
+    assert_eq!(lost_child_records(&partial, &["double"], "timeout"), None);
+    let before_volume: Vec<Record> = partial[..1].to_vec();
+    let lost = lost_child_records(&before_volume, &all, "crashed").expect("the volume was lost");
+    let lost = parse_line(&to_line(&lost[0]));
+    assert_eq!(
+        (field(&lost, "kind"), field(&lost, "status")),
+        ("volume", "child:crashed")
     );
 }

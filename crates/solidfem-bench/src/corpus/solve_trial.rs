@@ -30,14 +30,22 @@
 //!
 //! The stage is cancelled at [`SOLVE_TIME_CAP_SECONDS`] (assembly, multigrid setup, iterations and
 //! stress recovery together), which is its own named outcome.
+//!
+//! **Precision.** The multigrid hierarchy is stored and applied in the [`Precision`] chosen by
+//! [`PRECISION_VARIABLE`] (`double`, the default; `single-storage`; `single`; or `all`, which
+//! solves each meshed part once in each, back to back, so the remesh and volume stages run once).
+//! Each trial records the iteration at which the relative residual first fell to
+//! [`RESIDUAL_MARK`], so one run also says what a looser tolerance would cost. The solve runs one
+//! iteration per `step` to see that crossing; slicing never changes a solve's bits.
 
 use std::collections::BTreeSet;
 use std::time::Instant;
 
 use solidfem::elastic::{
-    Clock, Material, Model, ModelError, PreconditionerChoice, Quadrature, Report, StaticStudy,
-    StepOutcome, StudyOptions,
+    Clock, Material, Model, ModelError, Precision, PreconditionerChoice, Quadrature, Report,
+    StaticStudy, StepOutcome, StudyOptions,
 };
+use solidfem::elastic::{MultigridOptions, Progress};
 use solidfem::mesh::QuadraticTetMesh;
 use solidfem::solve::PcgError;
 
@@ -70,8 +78,46 @@ pub const STEEL: Material = Material {
     poisson_ratio: 0.3,
 };
 
-/// Solver iterations between looks at the clock.
-const SOLVE_SLICE: usize = 5;
+/// The environment variable choosing the multigrid precision of the solve stage.
+pub const PRECISION_VARIABLE: &str = "CORPUS_PRECISION";
+
+/// The relative residual whose first crossing each trial records: what a looser tolerance than
+/// the solver's 1e-9 would cost.
+pub const RESIDUAL_MARK: f64 = 1e-6;
+
+/// The precisions [`PRECISION_VARIABLE`] names: unset or `double` is the default alone,
+/// `single-storage` or `single` one other, `all` the three in that order.
+///
+/// # Errors
+/// A message naming the accepted values when the variable holds anything else.
+pub fn precisions_from_env() -> Result<Vec<Precision>, String> {
+    match std::env::var(PRECISION_VARIABLE) {
+        Err(_) => Ok(vec![Precision::Double]),
+        Ok(text) => match text.as_str() {
+            "double" => Ok(vec![Precision::Double]),
+            "single-storage" => Ok(vec![Precision::SingleStorage]),
+            "single" => Ok(vec![Precision::Single]),
+            "all" => Ok(vec![
+                Precision::Double,
+                Precision::SingleStorage,
+                Precision::Single,
+            ]),
+            other => Err(format!(
+                "{PRECISION_VARIABLE}={other} is not a precision: use double, single-storage, \
+                 single or all"
+            )),
+        },
+    }
+}
+
+/// The record's name for a precision.
+pub fn precision_name(precision: Precision) -> &'static str {
+    match precision {
+        Precision::Double => "double",
+        Precision::SingleStorage => "single-storage",
+        Precision::Single => "single",
+    }
+}
 
 /// Why a part has no load case.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -136,6 +182,12 @@ pub struct SolveTrial {
     pub report: Option<Report>,
     /// Wall seconds in the whole stage.
     pub seconds: f64,
+    /// The precision the multigrid hierarchy was stored and applied in.
+    pub precision: Precision,
+    /// The iteration at which the relative residual first fell to [`RESIDUAL_MARK`], if it did.
+    /// It reads the solver's running residual estimate, so it is a lower bound on the iterations
+    /// a real 1e-6 tolerance would take (that also checks the true residual).
+    pub below_mark: Option<u64>,
     pub outcome: Result<SolvedPart, SolveFailure>,
 }
 
@@ -212,8 +264,14 @@ pub fn bending_case(mesh: &QuadraticTetMesh) -> Result<LoadCase, LoadCaseError> 
     })
 }
 
-/// Solves `mesh` under its bending load case and checks the answer.
+/// Solves `mesh` under its bending load case with the default multigrid and checks the answer.
 pub fn solve_and_check(mesh: &QuadraticTetMesh) -> SolveTrial {
+    solve_and_check_in(mesh, multigrid_options().precision)
+}
+
+/// Solves `mesh` under its bending load case with the multigrid in `precision` and checks the
+/// answer.
+pub fn solve_and_check_in(mesh: &QuadraticTetMesh, precision: Precision) -> SolveTrial {
     let start = Instant::now();
     let case = match bending_case(mesh) {
         Ok(case) => case,
@@ -222,25 +280,48 @@ pub fn solve_and_check(mesh: &QuadraticTetMesh) -> SolveTrial {
                 unknowns: 3 * mesh.nodes().len(),
                 report: None,
                 seconds: start.elapsed().as_secs_f64(),
+                precision,
+                below_mark: None,
                 outcome: Err(SolveFailure::LoadCase(error)),
             }
         }
     };
     let unknowns = 3 * (mesh.nodes().len() - case.supports.fixed.len());
-    let (report, outcome) = solve(mesh, &case, start);
+    let solved = solve(mesh, &case, precision, start);
     SolveTrial {
         unknowns,
-        report,
+        report: solved.report,
         seconds: start.elapsed().as_secs_f64(),
+        precision,
+        below_mark: solved.below_mark,
+        outcome: solved.outcome,
+    }
+}
+
+/// What [`solve`] found.
+struct Solved {
+    report: Option<Report>,
+    below_mark: Option<u64>,
+    outcome: Result<SolvedPart, SolveFailure>,
+}
+
+/// The study under the time cap, then the two checks.
+fn solve(mesh: &QuadraticTetMesh, case: &LoadCase, precision: Precision, start: Instant) -> Solved {
+    let mut below_mark = None;
+    let (report, outcome) = study_and_checks(mesh, case, precision, start, &mut below_mark);
+    Solved {
+        report,
+        below_mark,
         outcome,
     }
 }
 
-/// The study under the time cap, then the two checks.
-fn solve(
+fn study_and_checks(
     mesh: &QuadraticTetMesh,
     case: &LoadCase,
+    precision: Precision,
     start: Instant,
+    below_mark: &mut Option<u64>,
 ) -> (Option<Report>, Result<SolvedPart, SolveFailure>) {
     let quadrature = Quadrature::FourPoint;
     let mut model = Model::new(mesh.clone(), STEEL);
@@ -255,17 +336,28 @@ fn solve(
     let mut past_cap = || start.elapsed().as_secs_f64() >= SOLVE_TIME_CAP_SECONDS;
     let options = StudyOptions {
         clock: Some(clock),
-        preconditioner: PreconditionerChoice::Multigrid(multigrid_options()),
+        preconditioner: PreconditionerChoice::Multigrid(MultigridOptions {
+            precision,
+            ..multigrid_options()
+        }),
         ..StudyOptions::default()
     };
     let mut study = match StaticStudy::new(model, options, &mut past_cap) {
         Ok(study) => study,
         Err(error) => return (None, Err(model_failure(error))),
     };
+    let mut mark = |progress: Progress| {
+        if below_mark.is_none() && progress.relative_residual <= RESIDUAL_MARK {
+            *below_mark = Some(progress.iteration);
+        }
+    };
     loop {
-        match study.step(SOLVE_SLICE, &mut past_cap) {
-            Ok(StepOutcome::Converged(_)) => break,
-            Ok(StepOutcome::Running(_)) => {}
+        match study.step(1, &mut past_cap) {
+            Ok(StepOutcome::Converged(progress)) => {
+                mark(progress);
+                break;
+            }
+            Ok(StepOutcome::Running(progress)) => mark(progress),
             Ok(StepOutcome::Cancelled(_)) => {
                 return (Some(study.report()), Err(SolveFailure::TimeCap))
             }

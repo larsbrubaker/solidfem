@@ -12,10 +12,17 @@
 //! remesh, volume and solve outcomes counted by name. A child writes and flushes each record as
 //! soon as it is known, so a child that times out or crashes in the volume or solve stage still
 //! has its earlier ones, and the parent writes that stage's record as `child:timeout` or
-//! `child:crashed`; the timeout must cover remesh, volume (60 s cap) and solve (120 s cap). `solidfem-corpus diagnose
+//! `child:crashed`, one solve record per precision still missing; the timeout must cover remesh,
+//! volume (60 s cap) and solve (120 s cap), and under `CORPUS_PRECISION=all` up to three solves. `solidfem-corpus diagnose
 //! <file-or-synthetic-name> <scale,...> <cap-seconds>` remeshes one part at each multiple of its
 //! corpus target edge length and prints, a key=value line per multiple, what surface recovery
 //! made of it and where anything it left missing sits (`corpus/diagnose.rs`).
+//!
+//! `CORPUS_PRECISION` chooses the multigrid precision of the solve stage in every mode: `double`
+//! (the default), `single-storage`, `single`, or `all`, which solves each meshed part in all three
+//! back to back and writes a solve record for each; any other value is refused before anything
+//! runs. A solve record carries its precision, whether it stopped at the rounding floor, and the
+//! iteration at which its relative residual first fell to 1e-6.
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
@@ -31,11 +38,13 @@ mod native {
     use solidfem_bench::corpus::parts::all_parts;
     use solidfem_bench::corpus::record::{
         by_dihedral_bucket, counts_by, distribution, distribution_sci, field, input_fields,
-        parse_line, remesh_fields, share_nonzero, share_true, solve_fields, spread,
-        stage_lost_fields, table, to_line, volume_fields, Record,
+        lost_child_records, parse_line, remesh_fields, share_nonzero, share_true, solve_fields,
+        spread, table, to_line, volume_fields, Record,
     };
     use solidfem_bench::corpus::remesh_trial::remesh_and_measure;
-    use solidfem_bench::corpus::solve_trial::solve_and_check;
+    use solidfem_bench::corpus::solve_trial::{
+        precision_name, precisions_from_env, solve_and_check_in,
+    };
     use solidfem_bench::corpus::soup::TriSoup;
     use solidfem_bench::corpus::volume_trial::volume_and_measure;
     use solidmesh_mesh::processors::stl_processing::parse_file_contents;
@@ -111,8 +120,11 @@ mod native {
         ("name", "part"),
         ("status", "status"),
         ("unknowns", "unknowns"),
+        ("precision", "precision"),
         ("mindih", "min dih"),
         ("iters", "iters"),
+        ("below_1e6", "it<1e-6"),
+        ("floor", "floor"),
         ("resid", "residual"),
         ("imbalance", "imbalance"),
         ("umax_diag", "umax/diag"),
@@ -124,6 +136,7 @@ mod native {
 
     pub fn run() -> Result<(), Box<dyn Error>> {
         let args: Vec<String> = std::env::args().skip(1).collect();
+        precisions_from_env()?;
         match args.first().map(String::as_str) {
             Some("synthetic") => synthetic(),
             Some("sample") if args.len() == 4 => {
@@ -139,7 +152,7 @@ mod native {
                 diagnose_part(&args[1], &args[2], args[3].parse()?)
             }
             _ => {
-                Err("usage: synthetic | sample <root> <out> <count> | batch <jobs> <timeout> <path>... | stl <file> | diagnose <file-or-synthetic-name> <scale,scale,...> <cap-seconds>".into())
+                Err("usage: synthetic | sample <root> <out> <count> | batch <jobs> <timeout> <path>... | stl <file> | diagnose <file-or-synthetic-name> <scale,scale,...> <cap-seconds>; CORPUS_PRECISION=double|single-storage|single|all chooses the solve's multigrid precision".into())
             }
         }
     }
@@ -189,12 +202,14 @@ mod native {
             let volume = volume_and_measure(&part.surface, trial.target_edge_length);
             emit(to_line(&volume_fields(name, &volume)))?;
             if let Ok(meshed) = &volume.outcome {
-                let solved = solve_and_check(&meshed.mesh);
-                emit(to_line(&solve_fields(
-                    name,
-                    &solved,
-                    meshed.min_dihedral_degrees,
-                )))?;
+                for precision in precisions_from_env()? {
+                    let solved = solve_and_check_in(&meshed.mesh, precision);
+                    emit(to_line(&solve_fields(
+                        name,
+                        &solved,
+                        meshed.min_dihedral_degrees,
+                    )))?;
+                }
             }
         }
         Ok(())
@@ -317,6 +332,10 @@ mod native {
         let mut running: Vec<Running> = Vec::new();
         let mut records: Vec<Record> = Vec::new();
         let mut failures: Vec<String> = Vec::new();
+        let expected: Vec<&str> = precisions_from_env()?
+            .into_iter()
+            .map(precision_name)
+            .collect();
         while !queue.is_empty() || !running.is_empty() {
             while running.len() < jobs.max(1) && !queue.is_empty() {
                 if let Some(path) = queue.pop_front() {
@@ -344,11 +363,12 @@ mod native {
                     }
                     Poll::Failed { reason, how, lines } => {
                         let partial: Vec<Record> = lines.iter().map(|l| parse_line(l)).collect();
-                        match lost_in_stage(&partial) {
-                            Some((name, kind)) => {
+                        match lost_child_records(&partial, &expected, how) {
+                            Some(lost) => {
                                 records.extend(partial);
-                                let lost = stage_lost_fields(&name, kind, how);
-                                records.push(parse_line(&to_line(&lost)));
+                                for fields in lost {
+                                    records.push(parse_line(&to_line(&fields)));
+                                }
                             }
                             None => {
                                 failures.push(format!("{}: {reason}", running[i].path.display()));
@@ -381,24 +401,6 @@ mod native {
             how: &'static str,
             lines: Vec<String>,
         },
-    }
-
-    /// The part's name and the stage the child was lost in: `volume` when its records hold a
-    /// remesh that produced a surface and no volume record, `solve` when they hold a finished
-    /// volume mesh and no solve record.
-    fn lost_in_stage(partial: &[Record]) -> Option<(String, &'static str)> {
-        let has = |kind: &str| partial.iter().any(|r| field(r, "kind") == kind);
-        let finished = |kind: &str| {
-            partial
-                .iter()
-                .find(|r| field(r, "kind") == kind && field(r, "status") == "ok")
-                .map(|r| field(r, "name").to_string())
-        };
-        if let Some(name) = finished("volume") {
-            return (!has("solve")).then_some((name, "solve"));
-        }
-        let name = finished("remesh")?;
-        (!has("volume")).then_some((name, "volume"))
     }
 
     /// The child's whole standard output, once it has exited.
@@ -582,20 +584,42 @@ mod native {
         print_solve(records);
     }
 
+    /// The solve table, then one summary per precision present (one summary, titled as it
+    /// always was, when the records hold a single precision).
     fn print_solve(records: &[Record]) {
         let solves: Vec<Record> = records
             .iter()
             .filter(|r| field(r, "kind") == "solve")
             .cloned()
             .collect();
-        println!(
-            "\n== SOLVE ({} volume-meshed parts attempted)",
-            solves.len()
-        );
+        let mut parts: Vec<&str> = solves.iter().map(|r| field(r, "name")).collect();
+        parts.dedup();
+        println!("\n== SOLVE ({} volume-meshed parts attempted)", parts.len());
         print!("{}", table(&solves, SOLVE_COLUMNS));
-        println!("\n== SOLVE SUMMARY");
+        // In the order the precisions first appear, which for `all` is the order they ran.
+        let mut groups: Vec<(String, Vec<Record>)> = Vec::new();
+        for record in &solves {
+            let precision = field(record, "precision");
+            match groups.iter_mut().find(|(name, _)| name == precision) {
+                Some((_, inside)) => inside.push(record.clone()),
+                None => groups.push((precision.to_string(), vec![record.clone()])),
+            }
+        }
+        if groups.len() <= 1 {
+            println!("\n== SOLVE SUMMARY");
+            print_solve_summary(&solves);
+        } else {
+            for (precision, inside) in &groups {
+                println!("\n== SOLVE SUMMARY ({precision})");
+                print_solve_summary(inside);
+            }
+        }
+    }
+
+    /// Outcomes and statistics of solve records of one precision.
+    fn print_solve_summary(solves: &[Record]) {
         println!("outcomes, most frequent first:");
-        for (status, count) in counts_by(&solves, "status") {
+        for (status, count) in counts_by(solves, "status") {
             println!("  {count:>5}  {status}");
         }
         let ok: Vec<Record> = solves
@@ -609,20 +633,14 @@ mod native {
             solves.len()
         );
         println!("iterations (ok): {}", distribution(&ok, "iters"));
-        println!("iterations (any): {}", distribution(&solves, "iters"));
-        println!("unknowns (any): {}", distribution(&solves, "unknowns"));
-        println!(
-            "setup seconds (any): {}",
-            distribution(&solves, "setup_sec")
-        );
-        println!(
-            "solve seconds (any): {}",
-            distribution(&solves, "solve_sec")
-        );
-        println!("stage seconds (any): {}", distribution(&solves, "sec"));
+        println!("iterations (any): {}", distribution(solves, "iters"));
+        println!("unknowns (any): {}", distribution(solves, "unknowns"));
+        println!("setup seconds (any): {}", distribution(solves, "setup_sec"));
+        println!("solve seconds (any): {}", distribution(solves, "solve_sec"));
+        println!("stage seconds (any): {}", distribution(solves, "sec"));
         println!(
             "multigrid bytes (any): {}",
-            distribution(&solves, "mg_bytes")
+            distribution(solves, "mg_bytes")
         );
         println!(
             "final relative residual (ok): {}",
@@ -630,14 +648,14 @@ mod native {
         );
         println!(
             "reaction imbalance (solved): {}",
-            distribution_sci(&solves, "imbalance")
+            distribution_sci(solves, "imbalance")
         );
         println!(
             "max displacement / diagonal (solved): {}",
-            distribution_sci(&solves, "umax_diag")
+            distribution_sci(solves, "umax_diag")
         );
         println!("iterations by the mesh's worst dihedral (every record with iterations):");
-        for (bucket, inside) in by_dihedral_bucket(&solves) {
+        for (bucket, inside) in by_dihedral_bucket(solves) {
             let ok_count = inside.iter().filter(|r| field(r, "status") == "ok").count();
             println!(
                 "  {bucket:<13} parts {:>4}  ok {:>4}  iterations {}",
