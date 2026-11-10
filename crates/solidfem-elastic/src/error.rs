@@ -77,6 +77,20 @@ pub enum ModelError {
         /// The rigid motions the held components do remove, out of six.
         rank: usize,
     },
+    /// An error estimate met a vertex whose elements hold more than one material, where stress
+    /// jumps and no smoothed stress is fitted; estimates are made for parts of one material.
+    MixedMaterialPatch { vertex: u32 },
+    /// An error estimate met a vertex whose elements' integration points all lie in one plane, so
+    /// no smoothed stress could be fitted: the elements there are flat.
+    CoplanarPatch { vertex: u32 },
+    /// An error estimate was asked of a solution with no strain energy, which has no scale for a
+    /// relative error.
+    ZeroStrainEnergy,
+    /// An error estimate summed to NaN or infinity: the displacements are not finite numbers.
+    NonFiniteEnergy,
+    /// An error estimate was given a recovery begun for a mesh with other node, vertex or element
+    /// counts than the study's.
+    RecoveryMeshMismatch,
 }
 
 impl fmt::Display for ModelError {
@@ -133,6 +147,32 @@ impl fmt::Display for ModelError {
                 f,
                 "the piece containing tetrahedron {first_tet} is held against only {rank} of its \
                  six rigid motions: prescribe or fix more components so it cannot move freely"
+            ),
+            ModelError::MixedMaterialPatch { vertex } => write!(
+                f,
+                "the error cannot be estimated: the elements at vertex {vertex} are of more than \
+                 one material, and estimates are made only for parts of a single material; solve \
+                 the part with one material to see how converged it is"
+            ),
+            ModelError::CoplanarPatch { vertex } => write!(
+                f,
+                "the error cannot be estimated: the elements at vertex {vertex} are flat, so no \
+                 smoothed stress can be fitted there; remesh the part to remove the flat elements"
+            ),
+            ModelError::NonFiniteEnergy => write!(
+                f,
+                "the error cannot be estimated: the solution's energy is not a finite number, so \
+                 its displacements are not a usable result; check the model's loads and material"
+            ),
+            ModelError::RecoveryMeshMismatch => write!(
+                f,
+                "the error estimate was given a recovery of a different mesh: begin the recovery \
+                 from this study"
+            ),
+            ModelError::ZeroStrainEnergy => write!(
+                f,
+                "the solution stores no strain energy, so its relative error has no scale: check \
+                 that the loads or prescribed displacements deform the part"
             ),
         }
     }

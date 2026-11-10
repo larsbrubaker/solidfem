@@ -3,10 +3,12 @@
 //! recovers results. A host with no threads uses the resumable forms of the other two phases:
 //! [`StudyBuilder`] assembles in bounded slices of elements, and
 //! [`StaticStudy::begin_recovery`] with [`StaticStudy::continue_recovery`] recovers in bounded
-//! slices, on the converged solution or on a live estimate. Each gives exactly the bits of the
-//! uninterrupted call, which runs the same code. The caller's clock (no `std::time` here, it
-//! panics on wasm32) times each phase so a preconditioner's or a slicing decision's effect can be
-//! measured.
+//! slices, on the converged solution or on a live estimate, and
+//! [`StaticStudy::begin_error_estimate`] measures the discretization error of a finished recovery
+//! of the converged solution (never a preview's) in the same kind of slices. Each gives exactly
+//! the bits of the uninterrupted call, which runs the same code. The caller's clock (no
+//! `std::time` here, it panics on wasm32) times each phase so a preconditioner's or a slicing
+//! decision's effect can be measured.
 //!
 //! [`StudyOptions::preconditioner`] chooses the preconditioner. Jacobi needs no setup; multigrid
 //! is built after assembly from the assembled matrix and rigid-body modes taken from the node
@@ -30,6 +32,7 @@ use solidfem_solve::{
 use crate::assembly::{add_element_stiffness, free_stiffness_pattern, FIXED};
 use crate::constraints::{check_constraints, check_held_dofs};
 use crate::error::ModelError;
+use crate::error_estimate::{ErrorEstimate, ErrorEstimation};
 use crate::loads::add_traction;
 use crate::material::MaterialField;
 use crate::quadrature::Quadrature;
@@ -265,6 +268,7 @@ impl<M: MaterialField> StaticStudy<M> {
             self.model.mesh.vertex_count(),
             self.model.mesh.tets().len(),
             self.model.quadrature.points().len(),
+            self.pcg.is_converged(),
         )
     }
 
@@ -295,6 +299,63 @@ impl<M: MaterialField> StaticStudy<M> {
             return Err(ModelError::NotFinished);
         }
         Ok(recovery.into_field(&self.model.mesh))
+    }
+
+    /// Recovers stresses and estimates how converged they are, in one call; refuses until the
+    /// solve has converged. `cancel` is read per element and per patch fit.
+    pub fn solution_with_error_estimate(
+        &mut self,
+        cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<(Solution, ErrorEstimate), ModelError> {
+        if !self.pcg.is_converged() {
+            return Err(ModelError::NotFinished);
+        }
+        let mut recovery = self.begin_recovery();
+        self.continue_recovery(&mut recovery, usize::MAX, cancel)?;
+        let mut estimation = self.begin_error_estimate(recovery);
+        self.continue_error_estimate(&mut estimation, usize::MAX, cancel)?;
+        let estimate = self.finish_error_estimate(&estimation)?;
+        let field = self.finish_recovery(estimation.into_recovery())?;
+        let solution = Solution {
+            displacements: field.displacements,
+            point_stresses: field.point_stresses,
+            nodal_stress: field.nodal_stress,
+            nodal_von_mises: field.nodal_von_mises,
+            report: self.report,
+        };
+        Ok((solution, estimate))
+    }
+
+    /// Starts a resumable error estimate (`error_estimate.rs`) of a finished recovery, which the
+    /// estimation holds until [`ErrorEstimation::into_recovery`] gives it back.
+    pub fn begin_error_estimate(&self, recovery: Recovery) -> ErrorEstimation {
+        ErrorEstimation::new(recovery, self.model.mesh.tets().len())
+    }
+
+    /// Does up to `max_elements` more elements of an error estimate; `Ok(true)` once all are done.
+    /// Refuses with [`ModelError::NotFinished`] an estimation whose recovery is unfinished or was
+    /// begun before the solve converged, since a preview's displacements are not an answer to
+    /// measure. `cancel` is read per element; the time counts as recovery time.
+    pub fn continue_error_estimate(
+        &mut self,
+        estimation: &mut ErrorEstimation,
+        max_elements: usize,
+        cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<bool, ModelError> {
+        let start = now(&mut self.clock);
+        let result =
+            estimation.advance(&self.model.mesh, &self.model.material, max_elements, cancel);
+        self.report.recovery_seconds += elapsed(&mut self.clock, start);
+        result
+    }
+
+    /// The estimate of a finished estimation; refuses one with elements left, or a solution with
+    /// no strain energy.
+    pub fn finish_error_estimate(
+        &self,
+        estimation: &ErrorEstimation,
+    ) -> Result<ErrorEstimate, ModelError> {
+        estimation.estimate(self.model.mesh.tets().len())
     }
 
     /// The mesh being solved.

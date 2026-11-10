@@ -11,6 +11,10 @@
 //! gives the local rotation of any nodal displacement field, for drawing it. A host with no
 //! threads uses the resumable forms: [`StudyBuilder`] assembles in slices and
 //! [`StaticStudy::begin_recovery`] recovers in slices, each giving the bits of the one-call form.
+//! [`StaticStudy::solution_with_error_estimate`] (or, in slices,
+//! [`StaticStudy::begin_error_estimate`]) also says how converged the result is: an
+//! [`ErrorEstimate`] holds each element's energy-norm error indicator and the model's estimated
+//! relative error, from the difference between the recovered and the element stress.
 //! [`StudyOptions::preconditioner`] picks Jacobi (the default) or multigrid, whose rigid-body
 //! near-null space [`rigid_body_modes`] builds from the node coordinates.
 //!
@@ -23,6 +27,7 @@ mod assembly;
 mod constraints;
 mod element;
 mod error;
+mod error_estimate;
 mod loads;
 mod material;
 mod patch;
@@ -38,6 +43,7 @@ pub use element::{
     element_stiffness, point_geometry, strain_at, stress_at, von_mises, PointGeometry,
 };
 pub use error::{ElementFault, ModelError};
+pub use error_estimate::{ErrorEstimate, ErrorEstimation};
 pub use material::{Material, MaterialField};
 pub use quadrature::{Quadrature, QuadraturePoint, TRIANGLE_POINTS};
 pub use results::{

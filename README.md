@@ -33,6 +33,15 @@ it stands.
 - Models that cannot be solved are refused with a specific error, before solving where that is
   possible.
 - Solves are resumable and cancellable, and slicing a solve differently does not change its answer.
+- An estimate of how converged a single-material result is: a per-element error indicator and the
+  estimated relative error in the energy norm, from the difference between the smoothed and the
+  element stress. It is an energy-norm measure of the whole part, not the accuracy of a peak
+  stress: a hole's peak can read 14% low while the estimate says under 3%. Measured against the
+  true energy error, it over-read by 1.5 to 1.75 times on a smooth field held at every boundary
+  node, and under-read on clamped parts under load, to about 0.7 times, most of its error sitting
+  in the clamp's elements. It falls as the mesh refines, except under a point load, whose exact
+  energy is infinite. Nothing drives refinement from it yet, and a part of more than one material
+  is refused.
 - Solid bars and thick-walled tubes, as the demo offers them, compared with the textbook on the
   page, and the real-part benchmark shapes offered as example parts, each with the benchmark's
   verdict shown on the page.

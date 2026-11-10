@@ -45,7 +45,8 @@
 //! patch whose points are all coplanar falls back the same way.
 //!
 //! [`Recovery`] is the resumable form: a host with no threads runs the elements and then the patch
-//! fits in bounded slices, in a fixed order, so slicing never changes a value.
+//! fits in bounded slices, in a fixed order, so slicing never changes a value. A finished one can
+//! also be measured for how converged it is (`error_estimate.rs`) before it becomes a field.
 //! [`nodal_rotations`] gives the local rotation of a displacement field, for drawing a deformed
 //! shape that keeps its rotations rigid.
 
@@ -108,6 +109,13 @@ pub struct Recovery {
     next: usize,
     /// One entry per mesh vertex: its fit, or `None` where a patch cannot be fitted.
     fits: Vec<Option<PatchFit>>,
+    /// Per mesh vertex, whether its patch was left unfitted for holding more than one material
+    /// (otherwise an unfitted patch's points were coplanar).
+    mixed_material: Vec<bool>,
+    /// Elements in the mesh this recovery was begun for.
+    element_count: usize,
+    /// Whether the displacements are a converged solve's, not a preview of one in progress.
+    converged: bool,
     next_vertex: usize,
     /// Vertex patches: `incident[offsets[v]..offsets[v + 1]]` are the elements touching vertex `v`.
     offsets: Vec<usize>,
@@ -230,13 +238,15 @@ pub fn nodal_rotations(
 }
 
 impl Recovery {
-    /// A recovery of `displacements` over a mesh of `element_count` elements, none done yet.
+    /// A recovery of `displacements` over a mesh of `element_count` elements, none done yet;
+    /// `converged` says whether they are a converged solve's.
     pub(crate) fn new(
         displacements: Vec<[f64; 3]>,
         node_count: usize,
         vertex_count: usize,
         element_count: usize,
         points_per_element: usize,
+        converged: bool,
     ) -> Self {
         Recovery {
             displacements,
@@ -246,6 +256,9 @@ impl Recovery {
             worst_at_node: vec![([0.0; 6], f64::MIN); node_count],
             next: 0,
             fits: vec![None; vertex_count],
+            mixed_material: vec![false; vertex_count],
+            element_count,
+            converged,
             next_vertex: 0,
             offsets: Vec::new(),
             incident: Vec::new(),
@@ -260,6 +273,30 @@ impl Recovery {
     /// The displacements being recovered.
     pub fn displacements(&self) -> &[[f64; 3]] {
         &self.displacements
+    }
+
+    /// Each mesh vertex's patch fit, `None` where its patch was not fitted.
+    pub(crate) fn fits(&self) -> &[Option<PatchFit>] {
+        &self.fits
+    }
+
+    /// Whether `vertex`'s patch was left unfitted for holding more than one material.
+    pub(crate) fn is_mixed_material(&self, vertex: usize) -> bool {
+        self.mixed_material[vertex]
+    }
+
+    /// The node, vertex and element counts of the mesh this recovery was begun for.
+    pub(crate) fn mesh_counts(&self) -> (usize, usize, usize) {
+        (
+            self.displacements.len(),
+            self.fits.len(),
+            self.element_count,
+        )
+    }
+
+    /// Whether the displacements are a converged solve's rather than a preview's.
+    pub fn is_converged(&self) -> bool {
+        self.converged
     }
 
     /// Whether every element and every patch fit is done, so the field can be read.
@@ -291,14 +328,7 @@ impl Recovery {
                 midside_done[midside - vertices] = true;
                 let ends = (&self.fits[tet[*a] as usize], &self.fits[tet[*b] as usize]);
                 nodal_stress[midside] = match ends {
-                    (Some(first), Some(second)) => {
-                        let (p, q) = (first.at(nodes[midside]), second.at(nodes[midside]));
-                        let mut mean = [0.0; 6];
-                        for k in 0..6 {
-                            mean[k] = 0.5 * (p[k] + q[k]);
-                        }
-                        mean
-                    }
+                    (Some(first), Some(second)) => midside_mean(first, second, nodes[midside]),
                     _ => self.worst_at_node[midside].0,
                 };
             }
@@ -364,6 +394,7 @@ impl Recovery {
         } else {
             None
         };
+        self.mixed_material[vertex] = !uniform;
         self.next_vertex += 1;
     }
 
@@ -439,6 +470,17 @@ impl Recovery {
         }
         Ok(())
     }
+}
+
+/// A midside node's recovered stress: the mean of its edge's two vertex fits at its own position.
+/// The sum is commutative in f64, so either end order gives the same bits.
+pub(crate) fn midside_mean(first: &PatchFit, second: &PatchFit, at: [f64; 3]) -> [f64; 6] {
+    let (p, q) = (first.at(at), second.at(at));
+    let mut mean = [0.0; 6];
+    for k in 0..6 {
+        mean[k] = 0.5 * (p[k] + q[k]);
+    }
+    mean
 }
 
 /// The integration point of a rule nearest a node in natural coordinates; a tie takes the earlier
