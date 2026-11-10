@@ -78,6 +78,7 @@ mod transfer;
 
 use std::fmt;
 
+pub(crate) use block::invert_spd_block;
 pub use cycle::Multigrid;
 pub use setup::{MultigridSetup, SetupStatus};
 

@@ -8,10 +8,14 @@
 //! smoothed aggregation algebraic multigrid over the six rigid-body modes, built in resumable
 //! slices by [`MultigridSetup`] because a large setup must not freeze a browser.
 //!
+//! [`gpu`] holds the smoother's kernels for a GPU: the packed single-precision block layout, the
+//! WGSL compute shaders, and a CPU reference of the same arithmetic, with no GPU dependency.
+//!
 //! Slicing never changes results: a solve's floating-point operations depend only on its input
 //! and iteration count, so one long run and many short `step` calls give identical bits.
 
 mod csr;
+pub mod gpu;
 mod multigrid;
 mod pcg;
 mod preconditioner;

@@ -142,6 +142,12 @@ impl<S: Scalar, V: Scalar> Hierarchy<S, V> {
             .map_or(&[], |level| level.aggregates.as_slice())
     }
 
+    fn smoother_spectrum(&self, level: usize) -> Option<(f64, f64)> {
+        self.levels
+            .get(level)
+            .map(|level| (level.lambda_min, level.lambda_max))
+    }
+
     /// Rounds `residual` into `V`, runs the cycle and widens the correction into `output`.
     fn apply_converted(&self, degree: usize, residual: &[f64], output: &mut [f64]) {
         let mut work = self.work.borrow_mut();
@@ -219,6 +225,18 @@ impl Multigrid {
             Stored::Double(hierarchy) => hierarchy.level_sizes(),
             Stored::SingleStorage(hierarchy) => hierarchy.level_sizes(),
             Stored::Single(hierarchy) => hierarchy.level_sizes(),
+        }
+    }
+
+    /// The interval `(lambda_min, lambda_max)` of the block-Jacobi operator the Chebyshev
+    /// smoother of `level` targets, so the same smoother can be rebuilt elsewhere (on a GPU);
+    /// `None` past the coarsest level.
+    /// The bounds are the setup's `f64` values in every precision.
+    pub fn smoother_spectrum(&self, level: usize) -> Option<(f64, f64)> {
+        match &self.stored {
+            Stored::Double(hierarchy) => hierarchy.smoother_spectrum(level),
+            Stored::SingleStorage(hierarchy) => hierarchy.smoother_spectrum(level),
+            Stored::Single(hierarchy) => hierarchy.smoother_spectrum(level),
         }
     }
 

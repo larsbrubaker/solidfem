@@ -13,3 +13,12 @@ readme.workspace = true
 
 [lints]
 workspace = true
+
+# The GPU kernels' tests: naga parses and validates the WGSL on every target; wgpu runs it on the
+# machine's GPU in a native-only test (the library itself has no GPU dependency).
+[dev-dependencies]
+naga = { version = "29", default-features = false, features = ["wgsl-in"] }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+wgpu = { version = "29", default-features = false, features = ["std", "wgsl", "dx12", "metal", "vulkan"] }
+pollster = "0.4"

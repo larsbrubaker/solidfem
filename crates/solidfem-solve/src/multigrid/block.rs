@@ -176,7 +176,7 @@ impl<T: Scalar> BlockCsr<T> {
 /// `output`, both row-major. The inverse is the product of the inverted Cholesky factor with its
 /// own transpose, so the two sides of the diagonal come from the same products in the same order
 /// and agree to the bit. Returns the failing pivot otherwise.
-pub(super) fn invert_spd_block(input: &[f64], n: usize, output: &mut [f64]) -> Result<(), f64> {
+pub(crate) fn invert_spd_block(input: &[f64], n: usize, output: &mut [f64]) -> Result<(), f64> {
     let mut lower = [0.0f64; 36];
     for i in 0..n {
         for j in 0..=i {
