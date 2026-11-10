@@ -43,7 +43,7 @@
 //!   a decision about the caller's surface, so a repeated point is
 //!   [`TetraError::DuplicatePoint`] rather than a silent merge.
 //!
-//! Layout: `refine.rs` is the refinement interface, `refine_mesh.rs` reads a solid in and writes
+//! Layout: `refine.rs` is the refinement run, `refine_options.rs` its options and report, `refine_mesh.rs` reads a solid in and writes
 //! the refined one out, `layers.rs` the through-wall points from
 //! surface vertices, `wall_fill.rs` those from the middle of large wall faces, `skins.rs`
 //! the opposite skins of a wall and the splitting of the edges joining them, `interior.rs` the
@@ -69,6 +69,7 @@ mod quality_points;
 mod recover;
 mod refine;
 mod refine_mesh;
+mod refine_options;
 mod skins;
 mod steiner;
 mod surface;

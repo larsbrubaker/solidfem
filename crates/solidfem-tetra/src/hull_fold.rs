@@ -55,7 +55,7 @@ impl Flipper {
             if self.locked_edges.contains(&edge_key(a, b)) {
                 return false;
             }
-            let Some((mut ring, _)) = self.ring(a, b) else {
+            let Some((mut ring, _)) = self.ring_public(a, b) else {
                 return false;
             };
             let Some(position) = ring.iter().position(|&w| w == GHOST) else {
@@ -81,7 +81,7 @@ impl Flipper {
         if self.locked_edges.contains(&edge_key(a, b)) {
             return Ok(false);
         }
-        let Some((mut ring, mut tets)) = self.ring(a, b) else {
+        let Some((mut ring, mut tets)) = self.ring_public(a, b) else {
             return Ok(false);
         };
         let Some(position) = ring.iter().position(|&w| w == GHOST) else {

@@ -72,7 +72,8 @@ pub enum TetraError {
     RefinementBudgetExhausted { added: usize, limit: usize },
     /// The solid already has `tets` tetrahedra, more than the caller's `budget`
     /// ([`crate::RefineOptions::max_tets`]), before `phase` could run: the surface itself, or the
-    /// surface with the layers through its thin walls, needs more. A coarser surface, fewer
+    /// surface with the layers through its thin walls, needs more. `Done` is the final count
+    /// checked before the result is handed out, which no gated move can reach. A coarser surface, fewer
     /// layers or a larger budget lets it finish.
     TetBudgetExceeded {
         tets: usize,
@@ -200,7 +201,9 @@ impl fmt::Display for TetraError {
                 phase,
             } => write!(
                 f,
-                "the solid already has {tets} tetrahedra before the {phase:?} stage, {} over its                  budget of {budget}; mesh a coarser surface, ask for fewer layers or raise the                  budget",
+                "the solid already has {tets} tetrahedra before the {phase:?} stage, {} over its \
+                 budget of {budget}; mesh a coarser surface, ask for fewer layers or raise the \
+                 budget",
                 tets.saturating_sub(*budget)
             ),
             Self::InvalidSizeFunction { position, value } => write!(

@@ -37,9 +37,12 @@
 //! asked for, so a solid over the budget as given (checked in [`Refiner::new`]) or once its
 //! layers are in is [`TetraError::TetBudgetExceeded`], with its count. After that every move that
 //! adds tetrahedra asks the flipper whether it fits (`flips.rs`): the size stage ends at the first
-//! point that would cross ([`RefineReport::size_stopped_at_budget`]), and the quality pass skips
-//! flips and points that would. The stop leaves the interior coarser than the size function where
-//! the stage had not reached yet; nothing about the surface changes.
+//! point that would cross, with no smaller fallback for that slot
+//! ([`RefineReport::size_stopped_at_budget`]), and the quality pass skips flips and points that
+//! would. The stop leaves the interior coarser than the size function where the stage had not
+//! reached yet; nothing about the surface changes. The count is checked once more before the
+//! result is handed out (`phase: Done`), so a move added later without its gate cannot return
+//! `Ok` over the budget.
 //!
 //! **Order and determinism.** Work runs in slot and index order, every choice is made by the exact
 //! predicates or by floating-point values computed the same way each run, and the only hash maps
@@ -53,6 +56,7 @@ use crate::flips::{edge_key, face_key, FlipCounts, Flipper};
 use crate::layers::{layer_run, min_layer_thickness, LayerRun};
 use crate::quality::{histogram, min_dihedral_degrees, subtract, DihedralHistogram};
 use crate::refine_mesh::{boundary_faces, centroid_of, checked_size, circumcentre_of, extract};
+pub use crate::refine_options::{RefineOptions, RefinePhase, RefineProgress, RefineReport};
 use crate::skins::{incident_faces, OppositeSkins};
 use crate::surface::SolidMesh;
 use crate::triangulator::StepStatus;
@@ -77,104 +81,6 @@ const QUALITY_POINT_TARGET_DEGREES: f64 = 5.0;
 
 /// A caller's size function: the wanted edge length at a position.
 pub type SizeFn = Box<dyn Fn([f64; 3]) -> f64>;
-
-/// What a [`Refiner`] should do.
-#[derive(Clone, Copy, Debug)]
-pub struct RefineOptions {
-    /// Elements requested through each thin wall; less than 2 adds no layers.
-    pub layers_through_walls: u32,
-    /// A wall is thin when its thickness is at most this many local surface edge lengths.
-    pub thin_wall_ratio: f64,
-    /// Full passes of the quality improvement.
-    pub quality_passes: usize,
-    /// The most points refinement may add. Reaching it with layer or size work left is a named
-    /// error; a quality point is an optional improvement, so the quality pass just stops adding
-    /// them at the limit and still finishes.
-    pub max_added_points: usize,
-    /// The most tetrahedra the refined solid may have, a promise: a run that returns `Ok` has at
-    /// most this many. A solid already over it, as given or once its layers are in, is
-    /// [`TetraError::TetBudgetExceeded`]; past that the size stage stops adding points where the
-    /// next would cross it ([`RefineReport::size_stopped_at_budget`]) and the quality pass makes
-    /// no flip or point that would.
-    pub max_tets: usize,
-}
-
-impl Default for RefineOptions {
-    fn default() -> Self {
-        Self {
-            layers_through_walls: 0,
-            thin_wall_ratio: 2.0,
-            quality_passes: 8,
-            max_added_points: 50_000_000,
-            max_tets: usize::MAX,
-        }
-    }
-}
-
-/// Which stage a [`Refiner`] is in, in the order they run.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RefinePhase {
-    Layers,
-    Sizing,
-    Quality,
-    Done,
-}
-
-/// Where a run has got to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct RefineProgress {
-    pub phase: RefinePhase,
-    /// Units finished in this phase: surface vertices, slots looked at, or tetrahedra improved.
-    pub done: usize,
-    /// Units this phase has in its current pass.
-    pub total: usize,
-}
-
-/// What refinement did, with the quality before and after.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct RefineReport {
-    /// Points added inside thin walls, from surface vertices and from wall faces too wide for
-    /// their vertices to reach the middle of ([`Self::wall_fill_points`]).
-    pub layer_points: usize,
-    /// The layer points that came from the interior of a wall's large faces (`wall_fill.rs`).
-    pub wall_fill_points: usize,
-    /// Points a thin wall proposed that the separation rule or exact placement dropped.
-    pub layer_points_dropped: usize,
-    /// Surface vertices that found a thin wall.
-    pub thin_wall_vertices: usize,
-    /// Interior edges joining opposite skins of a thin wall that were split.
-    pub through_edges_split: usize,
-    /// Such edges left when a whole pass could split no more of them. A success always has none,
-    /// because the run then ends in [`TetraError::ThroughEdgeNotSplit`]; read this from the
-    /// report of the failed run.
-    pub through_edges_refused: usize,
-    /// Surface vertices across a wall too thin to divide above rounding, so no points were added.
-    pub walls_too_thin_for_rounding: usize,
-    /// Points added by the size function.
-    pub size_points: usize,
-    /// Size candidates that were refused: too close to a neighbour, with no legal cavity, or
-    /// over the tetrahedron budget.
-    pub size_points_refused: usize,
-    /// The size stage ended because its next point would have crossed
-    /// [`RefineOptions::max_tets`], so the interior may be coarser than the size function asks.
-    pub size_stopped_at_budget: bool,
-    /// Size points, quality flips and quality points refused because they would have crossed
-    /// [`RefineOptions::max_tets`].
-    pub moves_refused_for_budget: usize,
-    /// Flips made by the quality pass, by kind.
-    pub flips_two_to_three: usize,
-    pub flips_three_to_two: usize,
-    pub flips_four_to_four: usize,
-    pub flips_larger_ring: usize,
-    /// Tetrahedra the quality pass improved.
-    pub quality_improvements: usize,
-    /// Points the quality pass added for slivers no flip or smoothing could remove.
-    pub quality_points: usize,
-    /// Minimum dihedral angles before the quality pass.
-    pub before: DihedralHistogram,
-    /// Minimum dihedral angles after the quality pass.
-    pub after: DihedralHistogram,
-}
 
 struct SplitRun {
     edges: Vec<(u32, u32)>,
@@ -604,14 +510,16 @@ impl Refiner {
                 self.size_run.added_this_round += 1;
                 return Ok(());
             }
+            if self.flipper.limit_refusals > refused_before {
+                // This point would cross the budget: the stage ends here, with no smaller fallback,
+                // rather than fill the rest of the slots unevenly by whichever cavities still fit.
+                self.report.size_points_refused += 1;
+                self.report.size_stopped_at_budget = true;
+                self.begin_quality();
+                return Ok(());
+            }
         }
         self.report.size_points_refused += 1;
-        if self.flipper.limit_refusals > refused_before {
-            // The next point would cross the budget: stop here rather than fill the rest of the
-            // slots unevenly by whichever small cavities still fit.
-            self.report.size_stopped_at_budget = true;
-            self.begin_quality();
-        }
         Ok(())
     }
 
@@ -660,13 +568,11 @@ impl Refiner {
 
     fn advance_quality(&mut self) -> Result<(), TetraError> {
         let Some(mut run) = self.quality.take() else {
-            self.finish();
-            return Ok(());
+            return self.finish();
         };
         if run.cursor >= run.list.len() {
             if !run.improved || run.pass >= self.options.quality_passes {
-                self.finish();
-                return Ok(());
+                return self.finish();
             }
             run.pass += 1;
             run.improved = false;
@@ -740,7 +646,17 @@ impl Refiner {
         scored.into_iter().map(|(_, slot)| slot).collect()
     }
 
-    fn finish(&mut self) {
+    /// Hands out the result, after a last check of the count against the budget: every move past
+    /// the layers is gated, so this refuses only a move added later without its gate.
+    fn finish(&mut self) -> Result<(), TetraError> {
+        let tets = self.flipper.real_tets();
+        if tets > self.options.max_tets {
+            return Err(TetraError::TetBudgetExceeded {
+                tets,
+                budget: self.options.max_tets,
+                phase: RefinePhase::Done,
+            });
+        }
         self.report.after = self.histogram_now();
         let FlipCounts {
             two_three,
@@ -756,6 +672,7 @@ impl Refiner {
         self.report.moves_refused_for_budget = self.flipper.limit_refusals;
         self.result = Some(extract(&self.flipper));
         self.phase = RefinePhase::Done;
+        Ok(())
     }
 
     /// Where the run is now, for reporting.

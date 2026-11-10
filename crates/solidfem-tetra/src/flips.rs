@@ -253,7 +253,7 @@ impl Flipper {
         self.ring(p, q)
     }
 
-    pub(crate) fn ring(&mut self, p: u32, q: u32) -> Option<(Vec<u32>, Vec<u32>)> {
+    fn ring(&mut self, p: u32, q: u32) -> Option<(Vec<u32>, Vec<u32>)> {
         let start = self.find_edge(p, q)?;
         let mut ring = Vec::new();
         let mut tets = Vec::new();
