@@ -53,8 +53,9 @@ it stands.
   sections and tubes checks that rule against each shape's own construction. Surface edges are
   never changed, so at a rim an element can still bridge the wall, and the path from an arbitrary
   triangle mesh to a trustworthy stress result is still unproven beyond these cases.
-- Multigrid is optional and off by default. Thin plates still need around a thousand or more
-  iterations.
+- Multigrid is optional and off by default. Thin plates take several hundred iterations: 353 on
+  a 97,200-unknown structured two-layer plate and 372 on the 606,483-unknown structured gate plate,
+  where a stocky part takes tens.
 - **Real-part benchmarks pass, on these shapes only.** The `solidfem-benchmarks` runner builds each
   part, meshes it and judges it against a limit set in advance. Passing: a thin strip, a plate with a
   hole, a thick ring, NAFEMS LE1 and LE10, a hook, a nominal snap-fit strain, a 1 mm hollow box

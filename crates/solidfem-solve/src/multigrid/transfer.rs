@@ -98,8 +98,10 @@ pub(super) fn accumulate_product_row(
 /// filtered matrix: couplings outside the strong neighbours `neighbours` (sorted) are added to the
 /// diagonal instead of spreading the coarse function along them. The filtering keeps the
 /// prolongator as narrow as the strong stencil, which is what keeps the coarse operator small
-/// when weak couplings would otherwise fill it in. Lumping onto the diagonal keeps the row's
-/// action on a translation. Only the prolongator sees this matrix: the coarse operator is the
+/// when weak couplings would otherwise fill it in. On the finest level lumping onto the diagonal
+/// keeps the row's action on a translation, because a translation has the same value on every
+/// row; on a coarse level a near-null block is its aggregate's QR factor, different on every row,
+/// so it does not (`mod.rs`). Only the prolongator sees this matrix: the coarse operator is the
 /// Galerkin product with the true matrix and the smoother uses the true matrix, so the
 /// preconditioner stays symmetric positive definite.
 #[allow(clippy::too_many_arguments)] // One row of one product; a struct would only rename these.

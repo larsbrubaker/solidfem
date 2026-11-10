@@ -1,8 +1,9 @@
 //! The aggregation phases of the resumable setup (`setup.rs` holds the state machine and the rest
 //! of the per-level sequence): the strength graph, the three aggregation passes and the grouping of
-//! each aggregate's members, including the retry with a wider neighbour reach when a level stalls.
+//! each aggregate's members, including the retry with a wider neighbour reach when a level stalls,
+//! and the list of neighbours a coarse level's prolongator smoothing keeps.
 
-use super::super::aggregate::{strong_row, Aggregation};
+use super::super::aggregate::{smoothing_row, strong_row, Aggregation};
 use super::super::NEAR_NULL_MODES;
 use super::MultigridError;
 use super::{Flow, MultigridSetup, Phase, MAX_COARSE_FRACTION, MAX_RETRIES, RETRY_WIDENING};
@@ -13,6 +14,9 @@ impl MultigridSetup {
         budget: &mut usize,
         cancel: &mut dyn FnMut() -> bool,
     ) -> Result<Flow, MultigridError> {
+        if self.cursor == 0 {
+            self.closest.clear();
+        }
         while self.cursor < self.current.rows {
             if *budget == 0 {
                 return Ok(Flow::Paused);
@@ -20,13 +24,14 @@ impl MultigridSetup {
             if cancel() {
                 return Ok(Flow::Cancelled);
             }
-            strong_row(
+            let closest = strong_row(
                 &self.current,
                 &self.positions,
                 self.reach,
                 self.cursor,
                 &mut self.strong_columns,
             );
+            self.closest.push(closest);
             self.strong_starts.push(self.strong_columns.len());
             self.cursor += 1;
             *budget -= 1;
@@ -34,6 +39,47 @@ impl MultigridSetup {
         self.cursor = 0;
         self.aggregation = Some(Aggregation::new(self.current.rows));
         self.phase = Phase::SeedPass;
+        Ok(Flow::Advanced)
+    }
+
+    /// Before a coarse level's prolongator smoothing, lists the neighbours each row keeps
+    /// ([`smoothing_row`]). The finest level's smoothing keeps its strong neighbours, whose
+    /// through-wall stacks are what the strength test is for, and skips this phase.
+    pub(super) fn run_filter(
+        &mut self,
+        budget: &mut usize,
+        cancel: &mut dyn FnMut() -> bool,
+    ) -> Result<Flow, MultigridError> {
+        if self.level_index() == 0 {
+            self.phase = Phase::Smooth;
+            return Ok(Flow::Advanced);
+        }
+        if self.cursor == 0 {
+            self.filter_starts.clear();
+            self.filter_starts.push(0);
+            self.filter_columns.clear();
+        }
+        while self.cursor < self.current.rows {
+            if *budget == 0 {
+                return Ok(Flow::Paused);
+            }
+            if cancel() {
+                return Ok(Flow::Cancelled);
+            }
+            smoothing_row(
+                &self.current,
+                &self.positions,
+                self.reach,
+                &self.closest,
+                self.cursor,
+                &mut self.filter_columns,
+            );
+            self.filter_starts.push(self.filter_columns.len());
+            self.cursor += 1;
+            *budget -= 1;
+        }
+        self.cursor = 0;
+        self.phase = Phase::Smooth;
         Ok(Flow::Advanced)
     }
 

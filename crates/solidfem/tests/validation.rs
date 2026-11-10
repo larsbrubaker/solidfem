@@ -12,6 +12,8 @@ mod determinism;
 mod multigrid;
 #[path = "validation/multigrid_precision.rs"]
 mod multigrid_precision;
+#[path = "validation/multigrid_thin_wall.rs"]
+mod multigrid_thin_wall;
 #[path = "validation/multigrid_threads.rs"]
 mod multigrid_threads;
 #[path = "validation/peak.rs"]

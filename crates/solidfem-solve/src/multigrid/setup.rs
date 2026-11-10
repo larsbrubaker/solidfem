@@ -1,6 +1,7 @@
 //! The resumable construction of the multigrid hierarchy. [`MultigridSetup`] walks a fixed
 //! sequence of phases per level (diagonal, strength, three aggregation passes, grouping, tentative
-//! prolongator, spectral estimate, smoothing, the two halves of the Galerkin product) keeping a
+//! prolongator, spectral estimate, a coarse level's smoothing neighbours, smoothing, the two
+//! halves of the Galerkin product) keeping a
 //! row cursor, so `step(budget, cancel)` can stop after any row and continue later with exactly
 //! the same operations as an uninterrupted run. The coarsest level ends in a dense factorization
 //! taken one column at a time. The aggregation phases are in `setup_aggregation.rs`.
@@ -62,6 +63,7 @@ enum Phase {
     Group,
     Tentative,
     Spectral,
+    Filter,
     Smooth,
     Product,
     Galerkin,
@@ -88,6 +90,12 @@ pub struct MultigridSetup {
     inverse_diagonal: Vec<f64>,
     strong_starts: Vec<usize>,
     strong_columns: Vec<u32>,
+    /// Each row's squared closest-neighbour distance, from the strength phase.
+    closest: Vec<f64>,
+    /// The neighbours a coarse level's prolongator smoothing keeps; empty on the finest level,
+    /// whose smoothing keeps the strong neighbours.
+    filter_starts: Vec<usize>,
+    filter_columns: Vec<u32>,
     aggregation: Option<Aggregation>,
     member_starts: Vec<usize>,
     members: Vec<u32>,
@@ -150,6 +158,9 @@ impl MultigridSetup {
             inverse_diagonal: Vec::new(),
             strong_starts: Vec::new(),
             strong_columns: Vec::new(),
+            closest: Vec::new(),
+            filter_starts: Vec::new(),
+            filter_columns: Vec::new(),
             aggregation: None,
             member_starts: Vec::new(),
             members: Vec::new(),
@@ -242,6 +253,7 @@ impl MultigridSetup {
             Phase::Group => Ok(self.run_group()),
             Phase::Tentative => self.run_tentative(budget, cancel),
             Phase::Spectral => self.run_spectral(budget, cancel),
+            Phase::Filter => self.run_filter(budget, cancel),
             Phase::Smooth => self.run_smooth(budget, cancel),
             Phase::Product => self.run_product(budget, cancel),
             Phase::Galerkin => self.run_galerkin(budget, cancel),
@@ -432,7 +444,7 @@ impl MultigridSetup {
         ));
         self.prolongator =
             BlockCsr::with_shape(self.current.rows, self.current.row_block, NEAR_NULL_MODES);
-        self.phase = Phase::Smooth;
+        self.phase = Phase::Filter;
         Ok(Flow::Advanced)
     }
 
@@ -530,8 +542,13 @@ impl MultigridSetup {
             if cancel() {
                 return Ok(Flow::Cancelled);
             }
-            let neighbours = &self.strong_columns
-                [self.strong_starts[self.cursor]..self.strong_starts[self.cursor + 1]];
+            let neighbours = if self.filter_starts.is_empty() {
+                &self.strong_columns
+                    [self.strong_starts[self.cursor]..self.strong_starts[self.cursor + 1]]
+            } else {
+                &self.filter_columns
+                    [self.filter_starts[self.cursor]..self.filter_starts[self.cursor + 1]]
+            };
             smooth_row(
                 &self.current,
                 &self.tentative,
@@ -547,6 +564,8 @@ impl MultigridSetup {
         }
         self.cursor = 0;
         self.tentative = BlockCsr::default();
+        self.filter_starts = Vec::new();
+        self.filter_columns = Vec::new();
         self.a_times_p =
             BlockCsr::with_shape(self.current.rows, self.current.row_block, NEAR_NULL_MODES);
         self.phase = Phase::Product;

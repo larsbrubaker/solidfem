@@ -137,7 +137,7 @@ fn an_f32_cycle_reaches_the_f64_tolerance_on_a_stocky_cantilever() {
         "stocky cantilever",
         || loaded([10.0, 1.0, 1.0], [12, 3, 3]),
         Precision::Single,
-        (66, 86),
+        (61, 65),
         false,
     );
 }
@@ -148,7 +148,7 @@ fn an_f32_cycle_reaches_the_f64_tolerance_on_a_thin_plate() {
         "thin plate",
         || loaded([20.0, 20.0, 1.0], [8, 8, 2]),
         Precision::Single,
-        (84, 90),
+        (85, 90),
         true,
     );
 }
@@ -165,7 +165,7 @@ fn an_f32_stored_hierarchy_keeps_the_f64_iterations_on_a_stocky_cantilever() {
         "stocky cantilever",
         || loaded([10.0, 1.0, 1.0], [12, 3, 3]),
         Precision::SingleStorage,
-        (66, 66),
+        (61, 61),
         false,
     );
 }
@@ -176,7 +176,7 @@ fn an_f32_stored_hierarchy_keeps_the_f64_iterations_on_a_thin_plate() {
         "thin plate",
         || loaded([20.0, 20.0, 1.0], [8, 8, 2]),
         Precision::SingleStorage,
-        (84, 84),
+        (85, 85),
         true,
     );
 }
@@ -245,6 +245,6 @@ fn the_default_f64_cycle_keeps_its_bits() {
         fingerprint(&cantilever),
         fingerprint(&plate)
     );
-    assert_eq!(fingerprint(&cantilever), (66, 14157103597919219128));
-    assert_eq!(fingerprint(&plate), (84, 9110598921777769261));
+    assert_eq!(fingerprint(&cantilever), (61, 4639424340864456019));
+    assert_eq!(fingerprint(&plate), (85, 5373319653865270473));
 }

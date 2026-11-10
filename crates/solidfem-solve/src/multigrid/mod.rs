@@ -34,7 +34,8 @@
 //! 1,127 iterations; at 3.0 the same strip needs 662 and operator complexity falls from 1.66 to
 //! 1.27, while a 158,760-unknown stocky cantilever goes from 36 to 42 iterations in the same
 //! solve time. A wider reach still costs compact parts more than it gains on plates (4.0: 530
-//! iterations on the strip, 57 on the cantilever).
+//! iterations on the strip, 57 on the cantilever). These figures were measured before the
+//! coarse-level smoothing filter described below.
 //!
 //! **Prolongator smoothing is filtered.** Weak couplings are lumped into the diagonal instead of
 //! widening the prolongator, which is what bounds the coarse stencil: without it the 20,000-unknown
@@ -42,6 +43,21 @@
 //! the prolongator sees the filtered matrix; the coarse operators are Galerkin products of the true
 //! matrix and the smoother uses the true matrix, so the preconditioner stays symmetric positive
 //! definite.
+//!
+//! Lumping keeps a row's action on a translation only on the finest level, where a translation
+//! has the same value on every row. On a coarse level a near-null block is its aggregate's QR
+//! factor, so translation and rotation columns differ between rows and every lumped coupling is an
+//! error in the smoothed prolongator's action on the rigid-body modes. The filter on those levels
+//! therefore keeps the stencil neighbours within the reach of the widest closest-neighbour spacing
+//! among the row and its stencil neighbours, while aggregation still uses each row's own closest
+//! neighbour, whose distance can be half a wall (the blocks are stacks of nodes of unequal size).
+//! On the first coarse level of a 97,200-unknown plate two element layers thick this rule keeps
+//! every stencil neighbour and the lump defect relative to the diagonal's action is zero, where a
+//! filter set by the row's own spacing leaves 2.6e-2 on translations and 2.5e-2 on rotations; on
+//! the 100-cell unaligned gate plate the defect is 8.5e-5 where that filter leaves 1.2e-2. The
+//! plate takes 353 iterations where the row's own spacing takes 861, a real 0.89M-unknown
+//! under-resolved part 198 iterations to 1e-6 where the other takes 280, and compact parts measured
+//! are no worse.
 //!
 //! **Smoother.** Chebyshev polynomials in the block-Jacobi preconditioned operator, the same
 //! polynomial before and after the coarse correction. It needs only an upper bound on the spectrum
@@ -60,8 +76,8 @@
 //! conjugate gradient iteration and the stiffness product its convergence is measured with stay
 //! `f64` in every case, so a solve still reaches an `f64` tolerance and only the preconditioner's
 //! quality depends on the rounding. Rounding the stored operators costs no iterations on the
-//! cases measured; doing the cycle's vector arithmetic in `f32` costs some (66 to 86 on a stocky
-//! cantilever, 84 to 90 on a plate).
+//! cases measured; doing the cycle's vector arithmetic in `f32` costs some (61 to 65 on a stocky
+//! cantilever, 85 to 90 on a plate).
 //!
 //! `SingleStorage` is the default. On 51 real parts that solved in every precision it took exactly
 //! `Double`'s iteration count on 50 and 11 fewer on the last, in 19% less total solve time, with
@@ -124,7 +140,8 @@ pub enum Precision {
 pub struct MultigridOptions {
     /// How far, as a multiple of a block row's closest stencil neighbour, a neighbour may be and
     /// still count as strongly connected. A row whose nearest neighbours are through a thin wall
-    /// keeps only neighbours through the wall.
+    /// keeps only neighbours through the wall. The same multiple, of the widest closest-neighbour
+    /// spacing around a coarse row, sets how far that row's prolongator smoothing reaches.
     pub neighbour_reach: f64,
     /// Coarsening stops once a level has at most this many values; it is then factored directly.
     pub coarse_dofs: usize,
