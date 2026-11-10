@@ -1,8 +1,9 @@
 // The V-cycle transfer kernels without a GPU: the transfer WGSL validates with its entry points and
 // shares the smoother's uniform record; the stored transpose is a true transpose; a matrix too big
 // for one binding is refused by name with how many nodes fit; and the CPU reference of one
-// two-level cycle, built from a real hierarchy's stored levels, is the multigrid's own cycle bit
-// for bit, in f32 against `Precision::Single` and in f64 against `Precision::Double`.
+// cycle, built from a real hierarchy's stored levels at two, three and four levels, is the
+// multigrid's own cycle bit for bit, in f32 against `Precision::Single` (and at two levels in f64
+// against `Precision::Double`).
 
 use naga::valid::{Capabilities, ValidationFlags, Validator};
 use naga::{Module, ShaderStage, TypeInner};
@@ -274,4 +275,43 @@ fn the_f64_reference_cycle_is_the_double_precision_multigrid_bit_for_bit() {
     let mut expected = vec![0.0; csr.size()];
     multigrid.apply(&rhs, &mut expected);
     assert_eq!(found, expected);
+}
+
+/// Asserts the f32 reference cycle over every smoothed level equals the single-precision cycle to
+/// the bit, on a hierarchy of `expect_levels` levels built from the `n^3` lattice.
+fn assert_f32_reference_matches(n: usize, coarse_dofs: usize, expect_levels: usize) {
+    let options = MultigridOptions {
+        coarse_dofs,
+        max_levels: expect_levels,
+        precision: Precision::Single,
+        ..MultigridOptions::default()
+    };
+    let (csr, multigrid) = built_hierarchy(n, options);
+    assert_eq!(multigrid.stats().levels, expect_levels);
+    let levels: Vec<CycleLevel<f32>> = (0..expect_levels - 1)
+        .map(|index| cycle_level::<f32>(&multigrid, index))
+        .collect();
+    let rhs: Vec<f32> = varied_vector(csr.size())
+        .iter()
+        .map(|&v| v as f32)
+        .collect();
+    let found = reference::v_cycle(&levels, &rhs, &mut |b, x| coarse_solve(&multigrid, b, x));
+    let wide: Vec<f64> = rhs.iter().map(|&v| f64::from(v)).collect();
+    let mut expected = vec![0.0; csr.size()];
+    multigrid.apply(&wide, &mut expected);
+    let found: Vec<f64> = found.iter().map(|&v| f64::from(v)).collect();
+    assert_eq!(
+        found, expected,
+        "{expect_levels} levels on the {n}^3 lattice"
+    );
+}
+
+#[test]
+fn the_f32_reference_cycle_is_the_single_precision_multigrid_bit_for_bit_at_three_levels() {
+    assert_f32_reference_matches(12, 30, 3);
+}
+
+#[test]
+fn the_f32_reference_cycle_is_the_single_precision_multigrid_bit_for_bit_at_four_levels() {
+    assert_f32_reference_matches(24, 30, 4);
 }

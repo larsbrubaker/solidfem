@@ -30,8 +30,9 @@
 //! [`crate::Multigrid::level_prolongator`] and [`crate::Multigrid::level_inverse_diagonal`]
 //! ([`BlockMatrix::from_level`]); prolongators are 3x6 blocks from the finest level and 6x6 below
 //! it, coarse matrices 6x6. The coarse solve stays on the CPU
-//! ([`crate::Multigrid::solve_coarsest`]). [`reference::two_level_cycle`] is the dispatch sequence
-//! on the CPU, and in `f32` it is the [`crate::Precision::Single`] cycle to the bit.
+//! ([`crate::Multigrid::solve_coarsest`]). [`reference::v_cycle`] is the dispatch sequence on the
+//! CPU over any number of levels, and in `f32` it is the [`crate::Precision::Single`] cycle to the
+//! bit.
 //!
 //! **Order.** Every sum runs in a fixed order: a scalar row sums its blocks in stored order and
 //! each block's columns in order, starting from zero, exactly as the CPU block product does. One

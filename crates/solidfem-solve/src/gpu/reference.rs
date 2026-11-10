@@ -1,12 +1,12 @@
 //! The CPU reference of the kernels in [`super::SMOOTHER_WGSL`] and [`super::TRANSFER_WGSL`]: the
-//! same operations in the same order, in either precision, and [`two_level_cycle`], the device's
-//! dispatch sequence for one V-cycle over two levels. In `f32` it is what a device computes, up
-//! to the fused multiply-adds and the 2.5 ULP division WGSL allows, and it is the
-//! [`crate::Precision::Single`] cycle bit for bit; in `f64` it is the multigrid's own smoother, bit
-//! for bit (the solver tests compare both with real hierarchies). [`multiply_rounding_bound`] and
-//! [`smoother_rounding_bound`] bound how far an `f32` evaluation may sit from the exact result on
-//! the same `f32` inputs, so two `f32` evaluations (device and reference) differ by at most twice
-//! the bound.
+//! same operations in the same order, in either precision, and [`v_cycle`], the device's dispatch
+//! sequence for one V-cycle over any number of levels, [`two_level_cycle`] its two-level case. In
+//! `f32` it is what a device computes, up to the fused multiply-adds and the 2.5 ULP division
+//! WGSL allows, and it is the [`crate::Precision::Single`] cycle bit for bit; in `f64` it is the
+//! multigrid's own smoother, bit for bit (the solver tests compare both with real hierarchies of
+//! two and more levels). [`multiply_rounding_bound`] and [`smoother_rounding_bound`] bound how far
+//! an `f32` evaluation may sit from the exact result on the same `f32` inputs, so two `f32`
+//! evaluations (device and reference) differ by at most twice the bound.
 
 use super::layout::{BlockMatrix, ChebyshevCoefficients, Real};
 use super::GpuError;
@@ -85,8 +85,8 @@ pub fn add<T: Real>(x: &mut [T], y: &[T]) {
     }
 }
 
-/// What one level of a two-level V-cycle reads: the level's matrix, its block-Jacobi inverse,
-/// the smoother's coefficients, the prolongator to the coarse level and its stored transpose.
+/// What one level of a V-cycle reads: the level's matrix, its block-Jacobi inverse, the smoother's
+/// coefficients, the prolongator to the next coarser level and its stored transpose.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CycleLevel<T> {
     /// The level's matrix.
@@ -101,15 +101,31 @@ pub struct CycleLevel<T> {
     pub restriction: BlockMatrix<T>,
 }
 
-/// One two-level V-cycle from a zero guess in the device's dispatch order, returning the
-/// correction for `rhs`: pre-smooth, residual, restrict, `coarse_solve` (given the coarse
-/// right-hand side, it writes the coarse correction into its second argument), prolong and
-/// correct, residual, post-smooth, and add the post-smoother's correction.
+/// One two-level V-cycle from a zero guess: [`v_cycle`] over the single smoothed `level`, with
+/// `coarse_solve` the level below it.
 pub fn two_level_cycle<T: Real>(
     level: &CycleLevel<T>,
     rhs: &[T],
     coarse_solve: &mut dyn FnMut(&[T], &mut [T]),
 ) -> Vec<T> {
+    v_cycle(std::slice::from_ref(level), rhs, coarse_solve)
+}
+
+/// One V-cycle from a zero guess in the device's dispatch order, returning the correction for
+/// `rhs`. `levels` are the smoothed levels, finest first; on each, pre-smooth, residual, restrict,
+/// recurse on the coarser levels, and past the last of `levels` call `coarse_solve` (given the
+/// coarse right-hand side, it writes the coarse correction into its second argument), then
+/// prolong and correct, residual, post-smooth, and add the post-smoother's correction.
+pub fn v_cycle<T: Real>(
+    levels: &[CycleLevel<T>],
+    rhs: &[T],
+    coarse_solve: &mut dyn FnMut(&[T], &mut [T]),
+) -> Vec<T> {
+    let Some((level, coarser)) = levels.split_first() else {
+        let mut x = vec![T::ZERO; rhs.len()];
+        coarse_solve(rhs, &mut x);
+        return x;
+    };
     let length = rhs.len();
     let coarse_length = level.prolongator.block_columns() * level.prolongator.col_block();
     let mut vectors = SmootherVectors::zeros(length);
@@ -128,8 +144,7 @@ pub fn two_level_cycle<T: Real>(
     residual(&level.matrix, rhs, &x, &mut r);
     let mut coarse_rhs = vec![T::ZERO; coarse_length];
     restrict(&level.restriction, &r, &mut coarse_rhs);
-    let mut coarse_x = vec![T::ZERO; coarse_length];
-    coarse_solve(&coarse_rhs, &mut coarse_x);
+    let coarse_x = v_cycle(coarser, &coarse_rhs, coarse_solve);
     prolong_correct(&level.prolongator, &coarse_x, &mut x);
     residual(&level.matrix, rhs, &x, &mut r);
     smooth(&r, &mut vectors);

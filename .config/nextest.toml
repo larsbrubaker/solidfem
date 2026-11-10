@@ -24,9 +24,9 @@ failure-output = "immediate-final"
 # gpu_execution.rs). They run one at a time as a precaution: two full workspace runs failed with
 # an access violation in one test process and "Parent device is lost" from the next ones to ask
 # for a device. The cause is not known: 8 later full runs side by side did not reproduce it, so
-# this does not show that parallel GPU tests are unsafe. It costs little, 7 short tests.
+# this does not show that parallel GPU tests are unsafe. It costs little: the tests are short.
 [[profile.default.overrides]]
-filter = 'binary(solver) & test(/gpu_(cycle_)?execution::/)'
+filter = 'binary(solver) & test(/gpu_([a-z]+_)?execution::/)'
 success-output = "immediate"
 test-group = "gpu"
 

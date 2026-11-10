@@ -34,7 +34,7 @@ use super::gpu_transfer::{built_hierarchy, coarse_solve, cycle_level, two_level_
 const UNIT: f64 = f32::EPSILON as f64;
 
 /// A matrix resident on the device with its uniform record.
-struct Resident {
+pub(super) struct Resident {
     starts: wgpu::Buffer,
     columns: wgpu::Buffer,
     values: wgpu::Buffer,
@@ -42,7 +42,7 @@ struct Resident {
     threads: u32,
 }
 
-fn resident(gpu: &Gpu, matrix: &BlockMatrix<f32>) -> Resident {
+pub(super) fn resident(gpu: &Gpu, matrix: &BlockMatrix<f32>) -> Resident {
     Resident {
         starts: storage(gpu, "starts", &matrix.starts_le_bytes(), false),
         columns: storage(gpu, "columns", &matrix.columns_le_bytes(), false),
@@ -54,7 +54,7 @@ fn resident(gpu: &Gpu, matrix: &BlockMatrix<f32>) -> Resident {
 }
 
 /// A vector the device writes and the host reads and writes.
-fn vector(gpu: &Gpu, label: &str, values: &[f32]) -> wgpu::Buffer {
+pub(super) fn vector(gpu: &Gpu, label: &str, values: &[f32]) -> wgpu::Buffer {
     use wgpu::util::DeviceExt;
     gpu.device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -66,7 +66,7 @@ fn vector(gpu: &Gpu, label: &str, values: &[f32]) -> wgpu::Buffer {
         })
 }
 
-fn read_vector(gpu: &Gpu, buffer: &wgpu::Buffer) -> Vec<f32> {
+pub(super) fn read_vector(gpu: &Gpu, buffer: &wgpu::Buffer) -> Vec<f32> {
     let readback = gpu.device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("readback"),
         size: buffer.size(),
@@ -77,17 +77,23 @@ fn read_vector(gpu: &Gpu, buffer: &wgpu::Buffer) -> Vec<f32> {
 }
 
 /// One recorded command: a dispatch over `threads` threads, or a copy between equal buffers.
-enum Command<'a> {
+pub(super) enum Command<'a> {
     Dispatch(&'a wgpu::ComputePipeline, wgpu::BindGroup, u32),
     Copy(&'a wgpu::Buffer, &'a wgpu::Buffer),
 }
 
 /// Records `commands` in one submission, in order, and waits for them.
-fn submit(gpu: &Gpu, commands: &[Command<'_>]) {
+pub(super) fn submit(gpu: &Gpu, commands: &[Command<'_>]) {
+    submit_repeated(gpu, commands, 1);
+}
+
+/// Records `commands` `repeats` times in one submission and waits for them, so a timing of the
+/// dispatches alone does not count one wait per repeat.
+pub(super) fn submit_repeated(gpu: &Gpu, commands: &[Command<'_>], repeats: usize) {
     let mut encoder = gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-    for command in commands {
+    for command in std::iter::repeat_n(commands, repeats).flatten() {
         match command {
             Command::Dispatch(pipeline, group, threads) => {
                 let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor::default());
@@ -106,17 +112,17 @@ fn submit(gpu: &Gpu, commands: &[Command<'_>]) {
 }
 
 /// The pipelines of both shaders.
-struct Pipelines {
+pub(super) struct Pipelines {
     start: wgpu::ComputePipeline,
     multiply: wgpu::ComputePipeline,
     update: wgpu::ComputePipeline,
-    residual: wgpu::ComputePipeline,
-    restrict: wgpu::ComputePipeline,
-    prolong: wgpu::ComputePipeline,
-    add: wgpu::ComputePipeline,
+    pub(super) residual: wgpu::ComputePipeline,
+    pub(super) restrict: wgpu::ComputePipeline,
+    pub(super) prolong: wgpu::ComputePipeline,
+    pub(super) add: wgpu::ComputePipeline,
 }
 
-fn pipelines(gpu: &Gpu) -> Pipelines {
+pub(super) fn pipelines(gpu: &Gpu) -> Pipelines {
     let module = |source: &str| {
         gpu.device
             .create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -138,7 +144,7 @@ fn pipelines(gpu: &Gpu) -> Pipelines {
 
 /// A transfer kernel's dispatch over `matrix`'s scalar rows with its uniform, its arrays bound
 /// when `with_matrix` (`add_main` reads only the uniform), and `input`, `base` and `output`.
-fn transfer<'a>(
+pub(super) fn transfer<'a>(
     gpu: &Gpu,
     pipeline: &'a wgpu::ComputePipeline,
     matrix: &Resident,
@@ -163,7 +169,7 @@ fn transfer<'a>(
 
 /// The smoother's dispatches from a zero guess on `rhs`, writing `solution`.
 #[allow(clippy::too_many_arguments)] // The smoother's buffers; a struct would only rename them.
-fn smoother<'a>(
+pub(super) fn smoother<'a>(
     gpu: &Gpu,
     p: &'a Pipelines,
     level: &CycleLevel<f32>,
@@ -244,7 +250,11 @@ fn abs_product(matrix: &BlockMatrix<f32>, x: &[f32]) -> Vec<f64> {
 }
 
 /// The bound of a product followed by one addition of `added` (zero for a plain product).
-fn product_bound(matrix: &BlockMatrix<f32>, x: &[f32], added: Option<&[f32]>) -> Vec<f64> {
+pub(super) fn product_bound(
+    matrix: &BlockMatrix<f32>,
+    x: &[f32],
+    added: Option<&[f32]>,
+) -> Vec<f64> {
     let product = reference::multiply_rounding_bound(matrix, x);
     let abs = abs_product(matrix, x);
     (0..product.len())
@@ -257,7 +267,13 @@ fn product_bound(matrix: &BlockMatrix<f32>, x: &[f32], added: Option<&[f32]>) ->
 
 /// Asserts the device's `found` is within twice `bound` of the reference's `expected`, returning
 /// how many entries are identical.
-fn within(gpu: &Gpu, what: &str, found: &[f32], expected: &[f32], bound: &[f64]) -> usize {
+pub(super) fn within(
+    gpu: &Gpu,
+    what: &str,
+    found: &[f32],
+    expected: &[f32],
+    bound: &[f64],
+) -> usize {
     assert_eq!(found.len(), expected.len(), "{what}");
     let mut identical = 0;
     for (i, ((device, cpu), bound)) in found.iter().zip(expected).zip(bound).enumerate() {
@@ -279,7 +295,7 @@ fn hierarchy(n: usize) -> (Multigrid, CycleLevel<f32>) {
     (multigrid, level)
 }
 
-fn varied_f32(length: usize, shift: usize) -> Vec<f32> {
+pub(super) fn varied_f32(length: usize, shift: usize) -> Vec<f32> {
     varied_vector(length + shift)[shift..]
         .iter()
         .map(|&v| v as f32)
