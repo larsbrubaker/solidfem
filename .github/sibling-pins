@@ -6,4 +6,4 @@
 # the new commit beside this repository, run `cargo update -p solidmesh` (or any build) so the
 # lock records its version, and commit both. Each workflow reads the line below, the only place
 # the commit is named; it must be a full 40-character SHA.
-SOLIDMESH_REV=4209cee41dcec1fd3a07ce89912c284e688be3fe
+SOLIDMESH_REV=9eb0b76d42c1c349260891e03657e28b07aa6b1d

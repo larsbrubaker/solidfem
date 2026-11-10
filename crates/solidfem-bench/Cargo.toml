@@ -51,9 +51,9 @@ solidfem-mesh = { path = "../solidfem-mesh", version = "0.1.0" }
 # never sees it. Path dependencies with version floors, on the checkout CI puts beside this one.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 libm = "0.2.16"
-solidmesh = { path = "../../../solidmesh/crates/geometry-processing", version = "0.2.2" }
-solidmesh-math = { path = "../../../solidmesh/crates/vector-math", version = "0.2.2" }
-solidmesh-mesh = { path = "../../../solidmesh/crates/polygon-mesh", version = "0.2.2" }
+solidmesh = { path = "../../../solidmesh/crates/geometry-processing", version = "0.2.5" }
+solidmesh-math = { path = "../../../solidmesh/crates/vector-math", version = "0.2.5" }
+solidmesh-mesh = { path = "../../../solidmesh/crates/polygon-mesh", version = "0.2.5" }
 
 [lints]
 workspace = true
