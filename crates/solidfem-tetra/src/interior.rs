@@ -23,7 +23,7 @@ use crate::flips::Flipper;
 use crate::predicates::{in_sphere, orient};
 
 /// A cavity larger than this is left uncarved past it; real cavities are a few dozen tetrahedra.
-const MAX_CAVITY: usize = 512;
+pub(crate) const MAX_CAVITY: usize = 512;
 
 /// How far off the requested point an edge-ring split may land before it gives up: the exact
 /// tests can refuse a point rounded just outside a tetrahedron that is nearly flat, and a point

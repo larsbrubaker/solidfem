@@ -11,7 +11,9 @@ pub struct RefineOptions {
     pub layers_through_walls: u32,
     /// A wall is thin when its thickness is at most this many local surface edge lengths.
     pub thin_wall_ratio: f64,
-    /// Full passes of the quality improvement.
+    /// Full passes of the quality improvement. Zero runs none, but the last attempt on a
+    /// tetrahedron the 10-node upgrade would refuse still runs: without it the mesh could not be
+    /// used at all.
     pub quality_passes: usize,
     /// The most points refinement may add. Reaching it with layer or size work left is a named
     /// error; a quality point is an optional improvement, so the quality pass just stops adding

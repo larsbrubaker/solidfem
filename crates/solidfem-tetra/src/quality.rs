@@ -39,6 +39,11 @@ const SMOOTH_STEPS: [f64; 3] = [1.0, 0.5, 0.25];
 /// dihedral angle that would matter to the quality pass.
 const FLAT_RELATIVE_VOLUME: f64 = 1e-12;
 
+/// The limit of the 10-node upgrade's refusal on a tetrahedron's determinant over its longest edge
+/// cubed (`FLAT_RELATIVE_VOLUME` in `solidfem-mesh/src/tet.rs`, a crate this one does not depend
+/// on, where the value is derived from the rounding of the coordinates).
+const UPGRADE_FLAT_LIMIT: f64 = 1e-12;
+
 pub(crate) fn subtract(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
 }
@@ -81,6 +86,26 @@ fn flat_to_rounding(p: &[[f64; 3]; 4]) -> bool {
     );
     let volume = dot(u, cross(v, w)).abs();
     volume <= FLAT_RELATIVE_VOLUME * length(u) * length(v) * length(w)
+}
+
+/// Whether the 10-node upgrade would refuse this tetrahedron: its determinant over its longest
+/// edge cubed is below [`UPGRADE_FLAT_LIMIT`]. This is wider than `flat_to_rounding`, whose
+/// denominator is never larger, so everything that one calls flat is refused here too.
+pub(crate) fn refused_by_upgrade(points: &[[f64; 3]], tet: &[u32; 4]) -> bool {
+    let p = tet.map(|v| points[v as usize]);
+    let (u, v, w) = (
+        subtract(p[1], p[0]),
+        subtract(p[2], p[0]),
+        subtract(p[3], p[0]),
+    );
+    let mut longest_squared = 0.0_f64;
+    for (i, q) in p.iter().enumerate() {
+        for r in &p[i + 1..] {
+            let edge = subtract(*q, *r);
+            longest_squared = longest_squared.max(dot(edge, edge));
+        }
+    }
+    dot(u, cross(v, w)).abs() < UPGRADE_FLAT_LIMIT * (longest_squared * longest_squared.sqrt())
 }
 
 /// The smallest of the six dihedral angles of a tetrahedron, in degrees, zero for one flat to

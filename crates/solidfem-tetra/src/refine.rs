@@ -3,7 +3,8 @@
 //! `wall_fill.rs` for walls whose faces have no vertices inside them) and the removal of every
 //! edge still joining the walls' opposite skins (`skins.rs`), by a caller's
 //! size function, then improves the worst tetrahedra (`quality.rs`, and a point for a sliver no
-//! flip can remove, in `quality_points.rs`). `refine.rs`, `layers.rs` and `quality_points.rs` choose
+//! flip can remove, in `quality_points.rs`, with a last attempt there on any tetrahedron the
+//! 10-node upgrade would still refuse). `refine.rs`, `layers.rs` and `quality_points.rs` choose
 //! where points go; the cavities of `interior.rs` are the only way a vertex is created, and only
 //! strictly inside the solid.
 //!
@@ -79,6 +80,14 @@ const QUALITY_TARGET_DEGREES: f64 = 30.0;
 /// element loses most of its accuracy, well below the quality target.
 const QUALITY_POINT_TARGET_DEGREES: f64 = 5.0;
 
+/// How many second attempts a run makes. Each that changes the mesh is followed by the last quality
+/// passes, which can leave a refused tetrahedron behind; this ends what could otherwise repeat.
+const MAX_RESCUE_ROUNDS: usize = 4;
+
+/// The quality passes run again after a second attempt changed the mesh, so its new points are
+/// worked on like any other.
+const PASSES_AFTER_RESCUE: usize = 2;
+
 /// A caller's size function: the wanted edge length at a position.
 pub type SizeFn = Box<dyn Fn([f64; 3]) -> f64>;
 
@@ -101,6 +110,17 @@ struct QualityRun {
     cursor: usize,
     pass: usize,
     improved: bool,
+    /// The second attempt in progress, once the passes have ended.
+    rescue: Option<RescueRun>,
+    /// How many second attempts have run and changed the mesh.
+    rescue_rounds: usize,
+}
+
+/// One second attempt over the tetrahedra the upgrade would still refuse (`quality_points.rs`).
+struct RescueRun {
+    list: Vec<u32>,
+    cursor: usize,
+    changed: bool,
 }
 
 /// Refines a finished solid mesh in resumable steps.
@@ -551,6 +571,8 @@ impl Refiner {
             cursor: 0,
             pass: 0,
             improved: true,
+            rescue: None,
+            rescue_rounds: 0,
         });
         self.phase = RefinePhase::Quality;
     }
@@ -570,9 +592,12 @@ impl Refiner {
         let Some(mut run) = self.quality.take() else {
             return self.finish();
         };
+        if run.rescue.is_some() {
+            return self.advance_rescue(run);
+        }
         if run.cursor >= run.list.len() {
             if !run.improved || run.pass >= self.options.quality_passes {
-                return self.finish();
+                return self.begin_rescue(run);
             }
             run.pass += 1;
             run.improved = false;
@@ -596,6 +621,65 @@ impl Refiner {
         if changed {
             run.improved = true;
             self.report.quality_improvements += 1;
+        }
+        self.quality = Some(run);
+        Ok(())
+    }
+
+    /// Starts a second attempt over the tetrahedra the upgrade would refuse, or ends the run when
+    /// there are none or the rounds are used up.
+    fn begin_rescue(&mut self, mut run: QualityRun) -> Result<(), TetraError> {
+        if run.rescue_rounds >= MAX_RESCUE_ROUNDS {
+            return self.finish();
+        }
+        // A slot fits u32: the triangulation counts its tetrahedra in u32.
+        let list: Vec<u32> = (0..self.flipper.core.tets.len() as u32)
+            .filter(|&slot| self.flipper.needs_rescue(slot, &self.fixed))
+            .collect();
+        if list.is_empty() {
+            return self.finish();
+        }
+        run.rescue = Some(RescueRun {
+            list,
+            cursor: 0,
+            changed: false,
+        });
+        self.quality = Some(run);
+        Ok(())
+    }
+
+    /// One tetrahedron of the second attempt, or the end of it: when any point went in, the last
+    /// quality passes run again, and the next second attempt looks at what is left.
+    fn advance_rescue(&mut self, mut run: QualityRun) -> Result<(), TetraError> {
+        let Some(rescue) = run.rescue.as_mut() else {
+            return self.finish();
+        };
+        let Some(&slot) = rescue.list.get(rescue.cursor) else {
+            if !rescue.changed {
+                return self.finish();
+            }
+            run.rescue = None;
+            run.rescue_rounds += 1;
+            run.pass = self
+                .options
+                .quality_passes
+                .saturating_sub(PASSES_AFTER_RESCUE);
+            run.improved = true;
+            run.list.clear();
+            run.cursor = 0;
+            self.quality = Some(run);
+            return Ok(());
+        };
+        rescue.cursor += 1;
+        // An earlier point of this attempt may have replaced this tetrahedron already.
+        if self.added < self.options.max_added_points
+            && self.flipper.needs_rescue(slot, &self.fixed)
+            && self.flipper.rescue_tet(slot)?
+        {
+            rescue.changed = true;
+            self.added += 1;
+            self.report.quality_points += 1;
+            self.refused_points.clear();
         }
         self.quality = Some(run);
         Ok(())
@@ -687,10 +771,13 @@ impl Refiner {
                 |run| (run.cursor, run.edges.len()),
             ),
             RefinePhase::Sizing => (self.size_run.cursor, self.size_run.round_end),
-            RefinePhase::Quality => self
-                .quality
-                .as_ref()
-                .map_or((0, 0), |run| (run.cursor, run.list.len())),
+            RefinePhase::Quality => self.quality.as_ref().map_or((0, 0), |run| {
+                run.rescue
+                    .as_ref()
+                    .map_or((run.cursor, run.list.len()), |rescue| {
+                        (rescue.cursor, rescue.list.len())
+                    })
+            }),
             RefinePhase::Done => (0, 0),
         };
         RefineProgress {
