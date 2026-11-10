@@ -10,6 +10,8 @@ mod cantilever;
 mod determinism;
 #[path = "validation/multigrid.rs"]
 mod multigrid;
+#[path = "validation/multigrid_precision.rs"]
+mod multigrid_precision;
 #[path = "validation/peak.rs"]
 mod peak;
 #[path = "validation/pipeline.rs"]

@@ -1,9 +1,11 @@
 // The multigrid setup's refusals and cancellation on hand-built block matrices: a wrong-length
 // near-null space and a matrix without 3x3 blocks must be named errors, and a cancelled setup must
-// stay cancelled.
+// stay cancelled. The f32 cycle gives the same bits however setup is sliced and stays within
+// rounding of the f64 cycle.
 
 use solidfem_solve::{
-    CsrMatrix, MultigridError, MultigridOptions, MultigridSetup, NEAR_NULL_MODES,
+    CsrMatrix, MultigridError, MultigridOptions, MultigridSetup, Precision, Preconditioner,
+    SetupStatus, NEAR_NULL_MODES,
 };
 
 /// A chain of nodes with symmetric positive definite 3x3 couplings, `3 * nodes` unknowns.
@@ -122,4 +124,59 @@ fn a_cancelled_setup_reports_cancelled_and_stays_cancelled() {
         Err(MultigridError::Cancelled)
     );
     assert!(matches!(setup.finish(), Err(MultigridError::NotFinished)));
+}
+
+/// The finished preconditioner applied to a fixed vector, after setup in slices of `slice` rows.
+fn applied(precision: Precision, slice: usize) -> Vec<f64> {
+    let nodes = 3000;
+    let matrix = block_chain(nodes);
+    let modes = modes_for(matrix.size());
+    let options = MultigridOptions {
+        coarse_dofs: 60,
+        precision,
+        ..MultigridOptions::default()
+    };
+    let mut setup =
+        MultigridSetup::new(&matrix, &modes, &positions_for(nodes), options).expect("valid");
+    while setup.step(slice, &mut || false).expect("builds") == SetupStatus::Running {}
+    let multigrid = setup.finish().expect("finished");
+    assert_eq!(multigrid.precision(), precision);
+    let residual: Vec<f64> = (0..matrix.size())
+        .map(|i| ((i * 7919) % 101) as f64 / 50.0 - 1.0)
+        .collect();
+    let mut first = vec![0.0; matrix.size()];
+    let mut second = vec![0.0; matrix.size()];
+    multigrid.apply(&residual, &mut first);
+    multigrid.apply(&residual, &mut second);
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    assert_eq!(bits(&first), bits(&second), "a second application differs");
+    first
+}
+
+#[test]
+fn an_f32_cycle_is_deterministic_and_independent_of_setup_slicing() {
+    // An f32 cycle is a different operator from the f64 one only by rounding: each output is
+    // within a relative 1e-3 of the f64 cycle's, against the largest. The chain's cycle runs about
+    // fifty f32 operations per output, each 6e-8 relative, on a block-Jacobi scaled operator whose
+    // Chebyshev polynomial amplifies a rounding error by at most its degree times the range of 30.
+    let double = applied(Precision::Double, usize::MAX);
+    let largest = double.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+    let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+    for precision in [Precision::SingleStorage, Precision::Single] {
+        let whole = applied(precision, usize::MAX);
+        assert!(whole.iter().any(|v| *v != 0.0));
+        for slice in [1usize, 13, 977] {
+            assert_eq!(
+                bits(&applied(precision, slice)),
+                bits(&whole),
+                "{precision:?} slice {slice}"
+            );
+        }
+        for (a, b) in double.iter().zip(&whole) {
+            assert!(
+                (a - b).abs() <= 1e-3 * largest,
+                "{precision:?}: {a} against {b}"
+            );
+        }
+    }
 }

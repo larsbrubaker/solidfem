@@ -45,7 +45,9 @@ pub use results::{
 };
 pub use rigid_modes::rigid_body_modes;
 pub use shape::{shape_derivatives, shape_values, NODE_COUNT, NODE_NATURAL};
-pub use solidfem_solve::{MultigridOptions, MultigridStats, PcgOptions, Progress, StepOutcome};
+pub use solidfem_solve::{
+    MultigridOptions, MultigridStats, PcgOptions, Precision, Progress, StepOutcome,
+};
 pub use study::{
     BuildProgress, Clock, Model, PreconditionerChoice, Report, StaticStudy, StudyBuilder,
     StudyOptions,

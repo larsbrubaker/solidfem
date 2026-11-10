@@ -223,6 +223,7 @@ impl MultigridSetup {
         Ok(Multigrid::from_levels(
             self.levels,
             self.options.smoother_degree,
+            self.options.precision,
         ))
     }
 

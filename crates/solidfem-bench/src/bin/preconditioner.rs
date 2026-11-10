@@ -1,20 +1,24 @@
 //! Measures the preconditioners on the two problem classes that matter: a stocky cantilever and a
-//! thin plate. `solidfem-preconditioner <cantilever|plate> <jacobi|multigrid> <nx> <ny> <nz>
+//! thin plate. `solidfem-preconditioner <cantilever|plate|plate40> <jacobi|multigrid> <nx> <ny> <nz>
 //! <cap-seconds>` builds a structured box of 10-node elements, clamps x = 0, loads the x = L face
 //! and prints the free unknowns, iterations, setup and solve seconds, operator complexity and
 //! hierarchy memory. Run in release; a capped solve reports the residual it reached. `MG_INSPECT`
 //! prints the levels and the finest aggregates' geometry, `MG_REACH` and the like override the
-//! options, and `MG_SLICE_ROWS` assembles and sets up in slices of that many rows, printing the
-//! longest single call.
+//! options, `MG_PRECISION=single-storage` stores the hierarchy in `f32` and `MG_PRECISION=single`
+//! also applies it in `f32`, and `MG_SLICE_ROWS`
+//! assembles and sets up in slices of that many rows, printing the longest single call.
+//! `MG_PROFILE` times twenty preconditioner applications on their own and prints each level's
+//! share of the stored values a cycle reads, to split a solve's time between the cycle and the
+//! conjugate gradient iteration around it.
 
 use std::time::Instant;
 
 use solidfem::elastic::{
-    Clock, Material, Model, MultigridOptions, PreconditionerChoice, StaticStudy, StepOutcome,
-    StudyBuilder, StudyOptions,
+    Clock, Material, Model, MultigridOptions, Precision, PreconditionerChoice, StaticStudy,
+    StepOutcome, StudyBuilder, StudyOptions,
 };
 use solidfem::mesh::{box_tet_mesh, QuadraticTetMesh};
-use solidfem::solve::Multigrid;
+use solidfem::solve::{Multigrid, Preconditioner};
 
 const ON_PLANE: f64 = 1e-9;
 
@@ -66,6 +70,31 @@ fn inspect(multigrid: &Multigrid, mesh: &QuadraticTetMesh, size: &[f64; 3]) {
     );
 }
 
+/// Times the preconditioner alone and prints where a cycle's reads go, level by level.
+fn profile(multigrid: &Multigrid) {
+    let levels = multigrid.level_sizes();
+    let dofs = levels.first().map_or(0, |(rows, block, _)| rows * block);
+    let residual: Vec<f64> = (0..dofs).map(|i| ((i % 17) as f64 - 8.0) / 8.0).collect();
+    let mut output = vec![0.0; dofs];
+    multigrid.apply(&residual, &mut output);
+    const APPLIES: usize = 20;
+    let begun = Instant::now();
+    for _ in 0..APPLIES {
+        multigrid.apply(&residual, &mut output);
+    }
+    let each = begun.elapsed().as_secs_f64() / APPLIES as f64;
+    let total: usize = levels.iter().map(|level| level.2).sum();
+    let shares: Vec<String> = levels
+        .iter()
+        .map(|level| format!("{:.3}", level.2 as f64 / total as f64))
+        .collect();
+    println!(
+        "profile: one preconditioner application {:.1} ms; stored values by level (share) [{}]",
+        each * 1000.0,
+        shares.join(", ")
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let parsed = (|| {
@@ -81,13 +110,14 @@ fn main() {
     })();
     let Some((kind, choice, divisions, cap)) = parsed else {
         eprintln!(
-            "usage: solidfem-preconditioner <cantilever|plate> <jacobi|multigrid> <nx> <ny> <nz> <cap-seconds>"
+            "usage: solidfem-preconditioner <cantilever|plate|plate40> <jacobi|multigrid> <nx> <ny> <nz> <cap-seconds>"
         );
         std::process::exit(2);
     };
     let (size, nu) = match kind.as_str() {
         "cantilever" => ([10.0, 1.0, 1.0], 0.3),
         "plate" => ([100.0, 100.0, 0.8], 0.3),
+        "plate40" => ([40.0, 40.0, 1.0], 0.3),
         other => {
             eprintln!("unknown problem {other}");
             std::process::exit(2);
@@ -126,6 +156,15 @@ fn main() {
             options.neighbour_reach = env_or("MG_REACH", options.neighbour_reach);
             options.smoother_range = env_or("MG_RANGE", options.smoother_range);
             options.smoother_degree = env_or("MG_DEGREE", options.smoother_degree as f64) as usize;
+            match std::env::var("MG_PRECISION").as_deref() {
+                Err(_) | Ok("double") => {}
+                Ok("single-storage") => options.precision = Precision::SingleStorage,
+                Ok("single") => options.precision = Precision::Single,
+                Ok(other) => {
+                    eprintln!("unknown MG_PRECISION {other}: use double, single-storage or single");
+                    std::process::exit(2);
+                }
+            }
             PreconditionerChoice::Multigrid(options)
         }
         other => {
@@ -166,6 +205,11 @@ fn main() {
     if std::env::var("MG_INSPECT").is_ok() {
         if let Some(multigrid) = study.multigrid() {
             inspect(multigrid, &mesh, &size);
+        }
+    }
+    if std::env::var("MG_PROFILE").is_ok() {
+        if let Some(multigrid) = study.multigrid() {
+            profile(multigrid);
         }
     }
     let solve_start = Instant::now();

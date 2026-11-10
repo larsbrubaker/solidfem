@@ -53,7 +53,18 @@
 //! **Slices.** Setup is resumable: `MultigridSetup::step(budget, cancel)` does a bounded amount
 //! of work and returns; slicing never changes the bits. The budget counts block rows of work.
 //!
-//! The files: `block.rs` holds the block sparse storage and the small dense kernels,
+//! **Precision.** Setup computes in `f64`. The finished hierarchy is stored and its V-cycle applied
+//! in the [`Precision`] the options choose: `Double` is `f64` throughout; `SingleStorage` stores
+//! the operators in `f32` and does the cycle's arithmetic in `f64`; `Single` does both in `f32`.
+//! Storing in `f32` halves the stored values' memory and the bandwidth a cycle reads. The
+//! conjugate gradient iteration and the stiffness product its convergence is measured with stay
+//! `f64` in every case, so a solve still reaches an `f64` tolerance and only the preconditioner's
+//! quality depends on the rounding. Rounding the stored operators costs no iterations on the
+//! cases measured; doing the cycle's vector arithmetic in `f32` costs some (66 to 86 on a stocky
+//! cantilever, 84 to 90 on a plate).
+//!
+//! The files: `scalar.rs` holds the value type the cycle is generic over, `block.rs` the block
+//! sparse storage and the small dense kernels,
 //! `aggregate.rs` the strength graph and the aggregation passes, `transfer.rs` the tentative
 //! prolongator, its smoothing and the Galerkin product, `setup.rs` the resumable state machine
 //! over those phases, and `cycle.rs` the finished preconditioner and its V-cycle.
@@ -61,6 +72,7 @@
 mod aggregate;
 mod block;
 mod cycle;
+mod scalar;
 mod setup;
 mod transfer;
 
@@ -72,6 +84,22 @@ pub use setup::{MultigridSetup, SetupStatus};
 /// The number of near-null-space vectors the multigrid carries: three translations and three
 /// rotations.
 pub const NEAR_NULL_MODES: usize = 6;
+
+/// The floating-point type the finished hierarchy is stored and applied in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Precision {
+    /// Stored and applied in `f64` throughout.
+    #[default]
+    Double,
+    /// Matrices, prolongators and block-diagonal inverses stored in `f32`, each value widened to
+    /// `f64` as it is read; vectors and sums stay `f64`. Half the stored values' memory and the
+    /// bandwidth a cycle reads them with, and the rounding of the stored operators alone.
+    SingleStorage,
+    /// Stored in `f32` and the V-cycle's vectors and sums in `f32` too: the residual is rounded
+    /// on the way in and the correction widened on the way out. The form a device without `f64`
+    /// arithmetic runs.
+    Single,
+}
 
 /// Settings for the multigrid preconditioner.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -89,6 +117,8 @@ pub struct MultigridOptions {
     /// The smoother targets `[lambda_max / smoother_range, lambda_max]`. The coarse levels must
     /// handle everything below that.
     pub smoother_range: f64,
+    /// The precision of the finished hierarchy and its cycle; setup always computes in `f64`.
+    pub precision: Precision,
 }
 
 impl Default for MultigridOptions {
@@ -99,6 +129,7 @@ impl Default for MultigridOptions {
             max_levels: 12,
             smoother_degree: 3,
             smoother_range: 30.0,
+            precision: Precision::Double,
         }
     }
 }

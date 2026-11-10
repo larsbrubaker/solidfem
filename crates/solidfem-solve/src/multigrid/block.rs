@@ -1,23 +1,39 @@
 //! Block sparse storage for the multigrid and the small dense kernels it is built from. A row of
 //! a [`BlockCsr`] holds sorted block columns; values are row-major dense blocks. Everything here
-//! runs in row and column order, so rounding depends only on the data.
+//! runs in row and column order, so rounding depends only on the data. Setup builds every matrix
+//! in `f64`; a finished level's matrices may be converted to `f32` ([`BlockCsr::into_precision`]).
+//! The products widen each stored value to the vector type as they read it and run in that type,
+//! so an `f32` matrix can be applied to `f64` vectors or to `f32` ones.
 
 use crate::csr::CsrMatrix;
 
+use super::scalar::Scalar;
 use super::MultigridError;
 
 /// A sparse matrix of dense `row_block` by `col_block` blocks.
 #[derive(Debug, Clone, PartialEq, Default)]
-pub(super) struct BlockCsr {
+pub(super) struct BlockCsr<T: Scalar = f64> {
     pub rows: usize,
     pub row_block: usize,
     pub col_block: usize,
     pub starts: Vec<usize>,
     pub columns: Vec<u32>,
-    pub values: Vec<f64>,
+    pub values: Vec<T>,
 }
 
-impl BlockCsr {
+impl BlockCsr<f64> {
+    /// The same matrix with its values rounded to `U`; the structure moves over unchanged.
+    pub fn into_precision<U: Scalar>(self) -> BlockCsr<U> {
+        BlockCsr {
+            rows: self.rows,
+            row_block: self.row_block,
+            col_block: self.col_block,
+            starts: self.starts,
+            columns: self.columns,
+            values: self.values.into_iter().map(U::from_f64).collect(),
+        }
+    }
+
     /// An empty matrix to append rows to.
     pub fn with_shape(rows: usize, row_block: usize, col_block: usize) -> Self {
         BlockCsr {
@@ -81,7 +97,9 @@ impl BlockCsr {
         }
         Ok(block)
     }
+}
 
+impl<T: Scalar> BlockCsr<T> {
     /// Values in one block.
     #[inline]
     pub fn block_len(&self) -> usize {
@@ -102,24 +120,25 @@ impl BlockCsr {
 
     /// The values of block `at`.
     #[inline]
-    pub fn block(&self, at: usize) -> &[f64] {
+    pub fn block(&self, at: usize) -> &[T] {
         let len = self.block_len();
         &self.values[at * len..(at + 1) * len]
     }
 
-    /// `y = self * x`; rows sum in column order.
-    pub fn multiply(&self, x: &[f64], y: &mut [f64]) {
+    /// `y = self * x`, each stored value widened to the vector type `V` as it is read; rows sum
+    /// in column order.
+    pub fn multiply<V: Scalar>(&self, x: &[V], y: &mut [V]) {
         let (rb, cb) = (self.row_block, self.col_block);
         for row in 0..self.rows {
             let out = &mut y[row * rb..(row + 1) * rb];
-            out.fill(0.0);
+            out.fill(V::ZERO);
             for at in self.row_range(row) {
                 let block = self.block(at);
                 let col = self.columns[at] as usize * cb;
                 for (p, out) in out.iter_mut().enumerate() {
                     let mut sum = *out;
                     for q in 0..cb {
-                        sum += block[p * cb + q] * x[col + q];
+                        sum += block[p * cb + q].widen::<V>() * x[col + q];
                     }
                     *out = sum;
                 }
@@ -128,9 +147,9 @@ impl BlockCsr {
     }
 
     /// `y = transpose(self) * x`, in row order.
-    pub fn multiply_transpose(&self, x: &[f64], y: &mut [f64]) {
+    pub fn multiply_transpose<V: Scalar>(&self, x: &[V], y: &mut [V]) {
         let (rb, cb) = (self.row_block, self.col_block);
-        y.fill(0.0);
+        y.fill(V::ZERO);
         for row in 0..self.rows {
             for at in self.row_range(row) {
                 let block = self.block(at);
@@ -138,7 +157,7 @@ impl BlockCsr {
                 for p in 0..rb {
                     let value = x[row * rb + p];
                     for q in 0..cb {
-                        y[col + q] += block[p * cb + q] * value;
+                        y[col + q] += block[p * cb + q].widen::<V>() * value;
                     }
                 }
             }
@@ -149,7 +168,7 @@ impl BlockCsr {
     pub fn memory_bytes(&self) -> usize {
         self.starts.len() * std::mem::size_of::<usize>()
             + self.columns.len() * std::mem::size_of::<u32>()
-            + self.values.len() * std::mem::size_of::<f64>()
+            + self.values.len() * std::mem::size_of::<T>()
     }
 }
 

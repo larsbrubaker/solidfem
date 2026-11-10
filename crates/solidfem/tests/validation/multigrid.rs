@@ -7,8 +7,8 @@
 
 use solidfem::elastic::{
     assemble_stiffness, rigid_body_modes, Material, Model, ModelError, MultigridOptions,
-    PcgOptions, PreconditionerChoice, Quadrature, StaticStudy, StepOutcome, StudyBuilder,
-    StudyOptions,
+    PcgOptions, Precision, PreconditionerChoice, Quadrature, StaticStudy, StepOutcome,
+    StudyBuilder, StudyOptions,
 };
 use solidfem::mesh::QuadraticTetMesh;
 use solidfem::meshing::quadratic_from_solid;
@@ -23,6 +23,7 @@ const MULTIGRID: PreconditionerChoice = PreconditionerChoice::Multigrid(Multigri
     max_levels: 12,
     smoother_degree: 3,
     smoother_range: 30.0,
+    precision: Precision::Double,
 });
 
 fn steel() -> Material {

@@ -18,8 +18,8 @@ mod preconditioner;
 
 pub use csr::CsrMatrix;
 pub use multigrid::{
-    Multigrid, MultigridError, MultigridOptions, MultigridSetup, MultigridStats, SetupStatus,
-    NEAR_NULL_MODES,
+    Multigrid, MultigridError, MultigridOptions, MultigridSetup, MultigridStats, Precision,
+    SetupStatus, NEAR_NULL_MODES,
 };
 pub use pcg::{Pcg, PcgError, PcgOptions, Progress, StepOutcome};
 pub use preconditioner::{Jacobi, JacobiError, Preconditioner};
