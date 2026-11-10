@@ -14,10 +14,10 @@
 //! [`StudyOptions::preconditioner`] picks Jacobi (the default) or multigrid, whose rigid-body
 //! near-null space [`rigid_body_modes`] builds from the node coordinates.
 //!
-//! Exactness: every loop runs in node or element order on one thread and the solver's iterations
-//! depend only on its input, so results are bit-identical across runs and however a solve is
-//! sliced. Wall time comes from a caller-supplied clock, because `std::time::Instant` panics on
-//! `wasm32-unknown-unknown`.
+//! Exactness: every loop here runs in node or element order on one thread and the solver's
+//! iterations depend only on its input, so results are bit-identical across runs, however a solve
+//! is sliced and whatever `MultigridOptions::threads` says. Wall time comes from a caller-supplied
+//! clock, because `std::time::Instant` panics on `wasm32-unknown-unknown`.
 
 mod assembly;
 mod constraints;

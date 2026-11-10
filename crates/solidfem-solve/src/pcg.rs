@@ -214,7 +214,8 @@ impl<P: Preconditioner> Pcg<P> {
 
     /// One iteration. Returns the outcome when the solve ended, `None` to keep going.
     fn iterate(&mut self) -> Result<Option<StepOutcome>, PcgError> {
-        self.matrix.multiply(&self.p, &mut self.ap);
+        self.preconditioner
+            .system_multiply(&self.matrix, &self.p, &mut self.ap);
         let curvature = dot(&self.p, &self.ap);
         if curvature.is_nan() || curvature <= 0.0 || !self.rz.is_finite() {
             let error = PcgError::NotPositiveDefinite {
@@ -232,7 +233,8 @@ impl<P: Preconditioner> Pcg<P> {
 
         if self.relative_residual <= self.tolerance {
             let mut residual = vec![0.0; self.rhs.len()];
-            self.matrix.multiply(&self.x, &mut residual);
+            self.preconditioner
+                .system_multiply(&self.matrix, &self.x, &mut residual);
             for (r, b) in residual.iter_mut().zip(&self.rhs) {
                 *r = b - *r;
             }

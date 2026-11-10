@@ -17,12 +17,20 @@
 //! stored through [`Multigrid::level_matrix`], [`Multigrid::level_prolongator`] and
 //! [`Multigrid::level_inverse_diagonal`] ([`LevelMatrix`] arrays, values widened exactly to `f64`)
 //! and hands the coarsest level back to [`Multigrid::solve_coarsest`].
+//!
+//! A level holding enough stored values runs its row-by-row work on the [`WorkerPool`], one chunk
+//! of rows per thread, in two kinds of region: a product reads other rows of a vector no other
+//! region is writing, and the updates that follow it touch only each chunk's own rows of several
+//! vectors at once. Each row sees the operations of a serial cycle in the same order, so the thread
+//! count changes no bit.
 
 use std::cell::RefCell;
 
 use super::block::{BlockCsr, DenseCholesky};
 use super::scalar::Scalar;
 use super::{MultigridError, MultigridStats, Precision};
+use crate::csr::CsrMatrix;
+use crate::parallel::{balanced_bounds, for_rows, WorkerPool, MIN_PARALLEL_VALUES};
 use crate::preconditioner::Preconditioner;
 
 /// One level of the hierarchy.
@@ -68,11 +76,18 @@ struct LevelWork<V: Scalar> {
     coarse_x: Vec<V>,
     /// The dense solve's `f64` right-hand side and solution, on a factored coarsest level.
     dense: Vec<f64>,
+    /// The chunk boundaries of this level's rows, a single chunk when it runs on one thread.
+    bounds: Vec<usize>,
 }
 
 impl<V: Scalar> LevelWork<V> {
-    fn for_level<S: Scalar>(level: &Level<S>, coarse_dofs: usize) -> Self {
+    fn for_level<S: Scalar>(level: &Level<S>, coarse_dofs: usize, threads: usize) -> Self {
         let dofs = level.a.dofs();
+        let chunks = if level.a.values.len() >= MIN_PARALLEL_VALUES {
+            threads
+        } else {
+            1
+        };
         LevelWork {
             residual: vec![V::ZERO; dofs],
             scaled: vec![V::ZERO; dofs],
@@ -87,6 +102,7 @@ impl<V: Scalar> LevelWork<V> {
             } else {
                 Vec::new()
             },
+            bounds: balanced_bounds(&level.a.starts, chunks),
         }
     }
 }
@@ -107,18 +123,31 @@ struct HierarchyWork<V: Scalar> {
 
 impl<S: Scalar> Hierarchy<S, f64> {
     /// Runs the cycle on the caller's `f64` vectors with no copies.
-    fn apply_direct(&self, degree: usize, residual: &[f64], output: &mut [f64]) {
+    fn apply_direct(
+        &self,
+        degree: usize,
+        pool: Option<&WorkerPool>,
+        residual: &[f64],
+        output: &mut [f64],
+    ) {
         let mut work = self.work.borrow_mut();
-        cycle(&self.levels, degree, &mut work.levels, residual, output);
+        cycle(
+            &self.levels,
+            degree,
+            pool,
+            &mut work.levels,
+            residual,
+            output,
+        );
     }
 }
 
 impl<S: Scalar, V: Scalar> Hierarchy<S, V> {
-    fn new(levels: Vec<Level<S>>, converts: bool) -> Self {
+    fn new(levels: Vec<Level<S>>, converts: bool, threads: usize) -> Self {
         let mut work = Vec::with_capacity(levels.len());
         for (index, level) in levels.iter().enumerate() {
             let coarse_dofs = levels.get(index + 1).map_or(0, |next| next.a.dofs());
-            work.push(LevelWork::for_level(level, coarse_dofs));
+            work.push(LevelWork::for_level(level, coarse_dofs, threads));
         }
         let dofs = match (converts, levels.first()) {
             (true, Some(level)) => level.a.dofs(),
@@ -195,13 +224,19 @@ impl<S: Scalar, V: Scalar> Hierarchy<S, V> {
     }
 
     /// Rounds `residual` into `V`, runs the cycle and widens the correction into `output`.
-    fn apply_converted(&self, degree: usize, residual: &[f64], output: &mut [f64]) {
+    fn apply_converted(
+        &self,
+        degree: usize,
+        pool: Option<&WorkerPool>,
+        residual: &[f64],
+        output: &mut [f64],
+    ) {
         let mut work = self.work.borrow_mut();
         let HierarchyWork { levels, rhs, x } = &mut *work;
         for (to, from) in rhs.iter_mut().zip(residual) {
             *to = V::from_f64(*from);
         }
-        cycle(&self.levels, degree, levels, rhs, x);
+        cycle(&self.levels, degree, pool, levels, rhs, x);
         for (to, from) in output.iter_mut().zip(x.iter()) {
             *to = from.to_f64();
         }
@@ -220,35 +255,64 @@ pub struct Multigrid {
     stored: Stored,
     degree: usize,
     stats: MultigridStats,
+    /// Present when `threads` asked for more than one and some level is large enough to use them.
+    pool: Option<WorkerPool>,
 }
 
 impl Multigrid {
     /// Takes the `f64` levels setup built and stores them in `precision`. Converting consumes one
     /// level at a time, so the peak is the `f64` hierarchy plus one converted level.
-    pub(super) fn from_levels(levels: Vec<Level>, degree: usize, precision: Precision) -> Self {
+    pub(super) fn from_levels(
+        levels: Vec<Level>,
+        degree: usize,
+        precision: Precision,
+        threads: usize,
+    ) -> Self {
+        let large = levels
+            .iter()
+            .any(|level| level.a.values.len() >= MIN_PARALLEL_VALUES);
+        let pool = if large {
+            WorkerPool::new(threads)
+        } else {
+            None
+        };
+        let threads = pool.as_ref().map_or(1, WorkerPool::threads);
         let (stored, stats) = match precision {
             Precision::Double => {
                 let stats = MultigridStats::of_levels(&levels);
-                (Stored::Double(Hierarchy::new(levels, false)), stats)
+                (
+                    Stored::Double(Hierarchy::new(levels, false, threads)),
+                    stats,
+                )
             }
             Precision::SingleStorage => {
                 let levels: Vec<Level<f32>> =
                     levels.into_iter().map(Level::into_precision).collect();
                 let stats = MultigridStats::of_levels(&levels);
-                (Stored::SingleStorage(Hierarchy::new(levels, false)), stats)
+                let hierarchy = Hierarchy::new(levels, false, threads);
+                (Stored::SingleStorage(hierarchy), stats)
             }
             Precision::Single => {
                 let levels: Vec<Level<f32>> =
                     levels.into_iter().map(Level::into_precision).collect();
                 let stats = MultigridStats::of_levels(&levels);
-                (Stored::Single(Hierarchy::new(levels, true)), stats)
+                (Stored::Single(Hierarchy::new(levels, true, threads)), stats)
             }
         };
         Multigrid {
             stored,
             degree,
             stats,
+            pool,
         }
+    }
+
+    /// The threads the large products run on, the caller included: one when the options asked
+    /// for one, no level is large enough to use more, or the target has no threads. Otherwise
+    /// what the options asked for, at most 64, or fewer when the system refused to start a worker;
+    /// the answer's bits are the same in every case.
+    pub fn threads(&self) -> usize {
+        self.pool.as_ref().map_or(1, WorkerPool::threads)
     }
 
     /// The shape and cost of the hierarchy.
@@ -365,13 +429,30 @@ pub struct LevelMatrix {
 
 impl Preconditioner for Multigrid {
     fn apply(&self, residual: &[f64], output: &mut [f64]) {
+        let pool = self.pool.as_ref();
         match &self.stored {
             // The vectors are already f64: the cycle reads and writes the caller's directly.
-            Stored::Double(hierarchy) => hierarchy.apply_direct(self.degree, residual, output),
-            Stored::SingleStorage(hierarchy) => {
-                hierarchy.apply_direct(self.degree, residual, output)
+            Stored::Double(hierarchy) => {
+                hierarchy.apply_direct(self.degree, pool, residual, output)
             }
-            Stored::Single(hierarchy) => hierarchy.apply_converted(self.degree, residual, output),
+            Stored::SingleStorage(hierarchy) => {
+                hierarchy.apply_direct(self.degree, pool, residual, output)
+            }
+            Stored::Single(hierarchy) => {
+                hierarchy.apply_converted(self.degree, pool, residual, output)
+            }
+        }
+    }
+
+    fn system_multiply(&self, matrix: &CsrMatrix, x: &[f64], y: &mut [f64]) {
+        match self.pool.as_ref() {
+            Some(pool) if matrix.nonzeros() >= MIN_PARALLEL_VALUES => {
+                let bounds = balanced_bounds(matrix.row_starts(), pool.threads());
+                for_rows(Some(pool), &bounds, 1, [y], &|rows, [y]| {
+                    matrix.multiply_rows(rows, x, y);
+                });
+            }
+            _ => matrix.multiply(x, y),
         }
     }
 }
@@ -380,6 +461,7 @@ impl Preconditioner for Multigrid {
 fn cycle<S: Scalar, V: Scalar>(
     levels: &[Level<S>],
     degree: usize,
+    pool: Option<&WorkerPool>,
     work: &mut [LevelWork<V>],
     rhs: &[V],
     x: &mut [V],
@@ -402,29 +484,56 @@ fn cycle<S: Scalar, V: Scalar>(
                     *to = V::from_f64(*from);
                 }
             }
-            None => smooth(level, degree, level_work, rhs, x),
+            None => smooth(level, degree, pool, level_work, rhs, x),
         }
         return;
     };
-    smooth(level, degree, level_work, rhs, x);
-    residual(level, rhs, x, &mut level_work.residual);
+    smooth(level, degree, pool, level_work, rhs, x);
+    let block = level.a.row_block;
+    residual(
+        level,
+        pool,
+        &level_work.bounds,
+        rhs,
+        x,
+        &mut level_work.residual,
+    );
     prolongator.multiply_transpose(&level_work.residual, &mut level_work.coarse_rhs);
     level_work.coarse_x.fill(V::ZERO);
     cycle(
         coarser,
         degree,
+        pool,
         coarser_work,
         &level_work.coarse_rhs,
         &mut level_work.coarse_x,
     );
-    prolongator.multiply(&level_work.coarse_x, &mut level_work.product);
-    add(x, &level_work.product);
-    residual(level, rhs, x, &mut level_work.post_rhs);
+    let coarse_x = &level_work.coarse_x;
+    for_rows(
+        pool,
+        &level_work.bounds,
+        block,
+        [level_work.product.as_mut_slice(), &mut *x],
+        &|rows, [product, x]| {
+            prolongator.multiply_rows(rows, coarse_x, product);
+            add(x, product);
+        },
+    );
+    residual(
+        level,
+        pool,
+        &level_work.bounds,
+        rhs,
+        x,
+        &mut level_work.post_rhs,
+    );
     // Taken out for the call: `smooth` borrows this level's work vectors while reading these two.
     let post_rhs = std::mem::take(&mut level_work.post_rhs);
     let mut post_x = std::mem::take(&mut level_work.post_x);
-    smooth(level, degree, level_work, &post_rhs, &mut post_x);
-    add(x, &post_x);
+    smooth(level, degree, pool, level_work, &post_rhs, &mut post_x);
+    for_rows(pool, &level_work.bounds, block, [&mut *x], &|rows, [x]| {
+        add(x, &post_x[rows.start * block..]);
+    });
     level_work.post_rhs = post_rhs;
     level_work.post_x = post_x;
 }
@@ -436,11 +545,22 @@ fn add<V: Scalar>(x: &mut [V], y: &[V]) {
 }
 
 /// `r = b - A x`.
-fn residual<S: Scalar, V: Scalar>(level: &Level<S>, b: &[V], x: &[V], r: &mut [V]) {
-    level.a.multiply(x, r);
-    for (out, value) in r.iter_mut().zip(b) {
-        *out = *value - *out;
-    }
+fn residual<S: Scalar, V: Scalar>(
+    level: &Level<S>,
+    pool: Option<&WorkerPool>,
+    bounds: &[usize],
+    b: &[V],
+    x: &[V],
+    r: &mut [V],
+) {
+    let block = level.a.row_block;
+    for_rows(pool, bounds, block, [r], &|rows, [r]| {
+        let first = rows.start * block;
+        level.a.multiply_rows(rows, x, r);
+        for (out, value) in r.iter_mut().zip(&b[first..]) {
+            *out = *value - *out;
+        }
+    });
 }
 
 /// Applies the Chebyshev smoother from a zero guess: `x` becomes the polynomial in the
@@ -450,6 +570,7 @@ fn residual<S: Scalar, V: Scalar>(level: &Level<S>, b: &[V], x: &[V], r: &mut [V
 fn smooth<S: Scalar, V: Scalar>(
     level: &Level<S>,
     degree: usize,
+    pool: Option<&WorkerPool>,
     work: &mut LevelWork<V>,
     b: &[V],
     x: &mut [V],
@@ -458,40 +579,96 @@ fn smooth<S: Scalar, V: Scalar>(
     let delta = 0.5 * (level.lambda_max - level.lambda_min);
     let sigma = theta / delta;
     let mut rho = 1.0 / sigma;
-    work.residual.copy_from_slice(b);
-    apply_inverse_diagonal(level, &work.residual, &mut work.scaled);
+    let block = level.a.row_block;
+    let LevelWork {
+        residual,
+        scaled,
+        direction,
+        product,
+        bounds,
+        ..
+    } = work;
     let first = V::from_f64(theta);
-    for (d, z) in work.direction.iter_mut().zip(&work.scaled) {
-        *d = *z / first;
-    }
-    x.copy_from_slice(&work.direction);
+    for_rows(
+        pool,
+        bounds,
+        block,
+        [
+            residual.as_mut_slice(),
+            scaled.as_mut_slice(),
+            direction.as_mut_slice(),
+            &mut *x,
+        ],
+        &|rows, [r, z, d, x]| {
+            r.copy_from_slice(&b[rows.start * block..rows.end * block]);
+            apply_inverse_diagonal(level, rows, r, z);
+            for (d, z) in d.iter_mut().zip(z.iter()) {
+                *d = *z / first;
+            }
+            x.copy_from_slice(d);
+        },
+    );
     for _ in 1..degree {
-        level.a.multiply(&work.direction, &mut work.product);
-        for (r, ad) in work.residual.iter_mut().zip(&work.product) {
-            *r -= *ad;
-        }
-        apply_inverse_diagonal(level, &work.residual, &mut work.scaled);
+        // The product reads every row of `direction`, so it is its own region: the updates below
+        // change `direction` chunk by chunk.
+        let reads: &[V] = direction;
+        for_rows(
+            pool,
+            bounds,
+            block,
+            [product.as_mut_slice()],
+            &|rows, [ad]| {
+                level.a.multiply_rows(rows, reads, ad);
+            },
+        );
         let next_rho = 1.0 / (2.0 * sigma - rho);
         let keep = V::from_f64(next_rho * rho);
         let step = V::from_f64(2.0 * next_rho / delta);
-        for (d, z) in work.direction.iter_mut().zip(&work.scaled) {
-            *d = keep * *d + step * *z;
-        }
-        add(x, &work.direction);
+        let products: &[V] = product;
+        for_rows(
+            pool,
+            bounds,
+            block,
+            [
+                residual.as_mut_slice(),
+                scaled.as_mut_slice(),
+                direction.as_mut_slice(),
+                &mut *x,
+            ],
+            &|rows, [r, z, d, x]| {
+                for (r, ad) in r.iter_mut().zip(&products[rows.start * block..]) {
+                    *r -= *ad;
+                }
+                apply_inverse_diagonal(level, rows, r, z);
+                for (d, z) in d.iter_mut().zip(z.iter()) {
+                    *d = keep * *d + step * *z;
+                }
+                add(x, d);
+            },
+        );
         rho = next_rho;
     }
 }
 
-fn apply_inverse_diagonal<S: Scalar, V: Scalar>(level: &Level<S>, x: &[V], y: &mut [V]) {
+/// Block rows `rows` of the block-diagonal inverse applied to `x` into `y`, both holding exactly
+/// those rows.
+fn apply_inverse_diagonal<S: Scalar, V: Scalar>(
+    level: &Level<S>,
+    rows: std::ops::Range<usize>,
+    x: &[V],
+    y: &mut [V],
+) {
     let block = level.a.row_block;
-    for row in 0..level.a.rows {
+    let start = rows.start;
+    for row in rows {
         let d = &level.inverse_diagonal[row * block * block..(row + 1) * block * block];
+        let local = row - start;
         for p in 0..block {
             let mut sum = V::ZERO;
             for q in 0..block {
-                sum += d[p * block + q].widen::<V>() * x[row * block + q];
+                sum += d[p * block + q].widen::<V>() * x[local * block + q];
             }
-            y[row * block + p] = sum;
+            y[local * block + p] = sum;
         }
     }
 }

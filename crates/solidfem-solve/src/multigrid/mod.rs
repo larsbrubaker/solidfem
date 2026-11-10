@@ -69,6 +69,16 @@
 //! preconditioner needs to be accurate to, and a cycle mostly waits on reading them. `Double`
 //! remains for a caller that wants the cycle's bits free of any `f32` rounding.
 //!
+//! **Threads.** On native targets the products on a level with at least
+//! `parallel::MIN_PARALLEL_VALUES` stored values, the Chebyshev updates there and the conjugate
+//! gradient's matrix product run on [`MultigridOptions::threads`] threads, in chunks of rows of
+//! about equal stored work. Each row is computed from its own blocks in column order, so every
+//! thread count gives the same bits as one; the transpose product, whose sums cross rows, stays
+//! serial. `wasm32` always runs on the calling thread. On a 1.0-million-unknown cantilever (20
+//! logical processors, other builds running) an iteration took 0.73 to 0.79 s on one thread, 0.38
+//! on two, 0.23 on four, 0.15 on eight and 0.13 on sixteen, the same 44 iterations every time, so
+//! the default stops at eight: past that the extra threads buy about a tenth more.
+//!
 //! The files: `scalar.rs` holds the value type the cycle is generic over, `block.rs` the block
 //! sparse storage and the small dense kernels,
 //! `aggregate.rs` the strength graph and the aggregation passes, `transfer.rs` the tentative
@@ -128,6 +138,11 @@ pub struct MultigridOptions {
     /// The precision of the finished hierarchy and its cycle; setup always computes in `f64`.
     /// `SingleStorage` unless chosen otherwise.
     pub precision: Precision,
+    /// Threads for the large products of the V-cycle and the conjugate gradient's matrix product,
+    /// the calling thread included. Never changes the answer's bits. By default half the logical
+    /// processors, at most eight; `wasm32` runs on one whatever this says. Any count is accepted:
+    /// at most 64 threads are ever started, so `usize::MAX` means 64, and zero means one.
+    pub threads: usize,
 }
 
 impl Default for MultigridOptions {
@@ -139,6 +154,7 @@ impl Default for MultigridOptions {
             smoother_degree: 3,
             smoother_range: 30.0,
             precision: Precision::SingleStorage,
+            threads: crate::parallel::default_threads(),
         }
     }
 }

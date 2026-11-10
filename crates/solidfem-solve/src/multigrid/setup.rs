@@ -224,6 +224,7 @@ impl MultigridSetup {
             self.levels,
             self.options.smoother_degree,
             self.options.precision,
+            self.options.threads,
         ))
     }
 

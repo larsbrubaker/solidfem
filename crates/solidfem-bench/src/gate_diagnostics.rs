@@ -70,8 +70,8 @@ pub fn inspect_aggregates(multigrid: &Multigrid, mesh: &QuadraticTetMesh) {
     );
 }
 
-/// The default options, with `MG_REACH`, `MG_RANGE`, `MG_DEGREE` and `MG_COARSE` overriding them
-/// for measurements.
+/// The default options, with `MG_REACH`, `MG_RANGE`, `MG_DEGREE`, `MG_COARSE` and `MG_THREADS`
+/// overriding them for measurements.
 pub fn multigrid_options() -> MultigridOptions {
     let env_or = |name: &str, default: f64| {
         std::env::var(name)
@@ -84,5 +84,6 @@ pub fn multigrid_options() -> MultigridOptions {
     options.smoother_range = env_or("MG_RANGE", options.smoother_range);
     options.smoother_degree = env_or("MG_DEGREE", options.smoother_degree as f64) as usize;
     options.coarse_dofs = env_or("MG_COARSE", options.coarse_dofs as f64) as usize;
+    options.threads = env_or("MG_THREADS", options.threads as f64) as usize;
     options
 }

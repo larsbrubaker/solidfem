@@ -124,6 +124,13 @@ impl Preconditioner for StudyPreconditioner {
             StudyPreconditioner::Multigrid(multigrid) => multigrid.apply(residual, output),
         }
     }
+
+    fn system_multiply(&self, matrix: &CsrMatrix, x: &[f64], y: &mut [f64]) {
+        match self {
+            StudyPreconditioner::Jacobi(jacobi) => jacobi.system_multiply(matrix, x, y),
+            StudyPreconditioner::Multigrid(multigrid) => multigrid.system_multiply(matrix, x, y),
+        }
+    }
 }
 
 /// Settings for a study.

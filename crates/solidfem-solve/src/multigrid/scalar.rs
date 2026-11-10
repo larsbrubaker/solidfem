@@ -13,6 +13,8 @@ pub(super) trait Scalar:
     Copy
     + Debug
     + Default
+    + Send
+    + Sync
     + PartialEq
     + Add<Output = Self>
     + Sub<Output = Self>

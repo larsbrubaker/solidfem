@@ -13,11 +13,15 @@
 //! reference of the same arithmetic, with no GPU dependency.
 //!
 //! Slicing never changes results: a solve's floating-point operations depend only on its input
-//! and iteration count, so one long run and many short `step` calls give identical bits.
+//! and iteration count, so one long run and many short `step` calls give identical bits. Neither
+//! does the thread count: on native targets the multigrid runs its large row-by-row products on
+//! `MultigridOptions::threads` threads (`parallel.rs` says why the bits cannot differ), and
+//! `wasm32` always runs on the calling thread.
 
 mod csr;
 pub mod gpu;
 mod multigrid;
+mod parallel;
 mod pcg;
 mod preconditioner;
 

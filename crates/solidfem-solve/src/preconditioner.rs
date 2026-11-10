@@ -11,6 +11,12 @@ pub trait Preconditioner {
     /// Writes `M^-1 * residual` into `output`. Must be linear, symmetric and positive definite,
     /// or the conjugate gradient iteration loses its guarantees.
     fn apply(&self, residual: &[f64], output: &mut [f64]);
+
+    /// Writes `matrix * x` into `y` for the conjugate gradient iteration, the same bits as
+    /// [`CsrMatrix::multiply`]; a preconditioner holding worker threads runs it on them.
+    fn system_multiply(&self, matrix: &CsrMatrix, x: &[f64], y: &mut [f64]) {
+        matrix.multiply(x, y);
+    }
 }
 
 /// Diagonal (Jacobi) preconditioning.

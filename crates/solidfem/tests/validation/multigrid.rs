@@ -24,6 +24,7 @@ const MULTIGRID: PreconditionerChoice = PreconditionerChoice::Multigrid(Multigri
     smoother_degree: 3,
     smoother_range: 30.0,
     precision: Precision::Double,
+    threads: 1,
 });
 
 fn steel() -> Material {
@@ -56,9 +57,11 @@ fn built_multigrid(
     modes: &[f64],
     positions: &[[f64; 3]],
     precision: Precision,
+    threads: usize,
 ) -> Multigrid {
     let options = MultigridOptions {
         precision,
+        threads,
         ..MultigridOptions::default()
     };
     let mut setup = MultigridSetup::new(matrix, modes, positions, options).expect("valid setup");
@@ -95,7 +98,8 @@ fn the_preconditioner_is_symmetric_and_positive_definite() {
 
 fn symmetric_and_positive_definite(precision: Precision) {
     let (matrix, modes, positions) = shifted_stiffness();
-    let multigrid = built_multigrid(&matrix, &modes, &positions, precision);
+    let threads = MultigridOptions::default().threads;
+    let multigrid = built_multigrid(&matrix, &modes, &positions, precision, threads);
     assert_eq!(multigrid.precision(), precision);
     let n = matrix.size();
     // Tolerance: the cycle performs at most about 20 products over the matrix's scalar entries,
@@ -124,6 +128,35 @@ fn symmetric_and_positive_definite(precision: Precision) {
         // Positive definiteness: x.Px is the energy of the preconditioner on a non-zero vector.
         let energy = dot(&x, &px);
         assert!(energy > 0.0, "{precision:?} seed {seed}: x.Px = {energy}");
+    }
+}
+
+/// A residual three values short is out of bounds only in the last chunk of rows, which runs on a
+/// worker thread, so the panic has to cross from the worker to the caller. The pool and the cycle's
+/// work vectors must come out of it usable. `Single` is not exercised: it rounds the residual into
+/// its own full-length vector first, so a short one does not panic there.
+#[test]
+fn a_panic_on_a_worker_reaches_the_caller_and_the_pool_keeps_working() {
+    let (matrix, modes, positions) = shifted_stiffness();
+    let n = matrix.size();
+    let residual = sample(n, 3);
+    for precision in [Precision::Double, Precision::SingleStorage] {
+        let multigrid = built_multigrid(&matrix, &modes, &positions, precision, 4);
+        assert_eq!(multigrid.threads(), 4, "the level must use the workers");
+        let mut before = vec![0.0; n];
+        multigrid.apply(&residual, &mut before);
+
+        let mut output = vec![0.0; n];
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            multigrid.apply(&residual[..n - 3], &mut output);
+        }));
+        assert!(outcome.is_err(), "{precision:?}: a short residual panics");
+
+        let mut after = vec![0.0; n];
+        multigrid.apply(&residual, &mut after);
+        for (row, (a, b)) in before.iter().zip(&after).enumerate() {
+            assert_eq!(a.to_bits(), b.to_bits(), "{precision:?}: row {row}");
+        }
     }
 }
 

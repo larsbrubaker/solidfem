@@ -106,14 +106,34 @@ impl CsrMatrix {
 
     /// Writes `self * x` into `y`. Rows sum in column order, so the rounding of the result
     /// depends only on the data.
+    ///
+    /// # Panics
+    /// When `y` is longer than the matrix: the extra values would be left stale.
     pub fn multiply(&self, x: &[f64], y: &mut [f64]) {
-        for (row, out) in y.iter_mut().enumerate() {
+        assert!(
+            y.len() <= self.size,
+            "the product has {} rows and the output holds {}",
+            self.size,
+            y.len()
+        );
+        self.multiply_rows(0..self.size, x, y);
+    }
+
+    /// Writes rows `rows` of `self * x` into `y`, which holds exactly those rows. Each row
+    /// depends only on `x` and its own entries, so rows can be computed in any grouping.
+    pub(crate) fn multiply_rows(&self, rows: std::ops::Range<usize>, x: &[f64], y: &mut [f64]) {
+        for (row, out) in rows.zip(y.iter_mut()) {
             let mut sum = 0.0;
             for at in self.row_starts[row]..self.row_starts[row + 1] {
                 sum += self.values[at] * x[self.columns[at] as usize];
             }
             *out = sum;
         }
+    }
+
+    /// The stored-entry count before each row, then the total.
+    pub(crate) fn row_starts(&self) -> &[usize] {
+        &self.row_starts
     }
 
     /// A 2-norm bound on the rounding error of [`multiply`](Self::multiply) at `x`: each row

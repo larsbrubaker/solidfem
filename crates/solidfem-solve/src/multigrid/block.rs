@@ -128,9 +128,16 @@ impl<T: Scalar> BlockCsr<T> {
     /// `y = self * x`, each stored value widened to the vector type `V` as it is read; rows sum
     /// in column order.
     pub fn multiply<V: Scalar>(&self, x: &[V], y: &mut [V]) {
+        self.multiply_rows(0..self.rows, x, y);
+    }
+
+    /// Block rows `rows` of `self * x` into `y`, which holds exactly those rows. A row depends
+    /// only on `x` and its own blocks, so rows can be computed in any grouping.
+    pub fn multiply_rows<V: Scalar>(&self, rows: std::ops::Range<usize>, x: &[V], y: &mut [V]) {
         let (rb, cb) = (self.row_block, self.col_block);
-        for row in 0..self.rows {
-            let out = &mut y[row * rb..(row + 1) * rb];
+        let first = rows.start;
+        for row in rows {
+            let out = &mut y[(row - first) * rb..(row - first + 1) * rb];
             out.fill(V::ZERO);
             for at in self.row_range(row) {
                 let block = self.block(at);

@@ -31,6 +31,15 @@ fn never() -> impl FnMut() -> bool {
     || false
 }
 
+/// A longer output would keep stale values past the product's end and read as a result.
+#[test]
+#[should_panic(expected = "the product has 4 rows and the output holds 5")]
+fn a_matrix_product_refuses_an_output_longer_than_the_matrix() {
+    let matrix = laplacian(4);
+    let mut output = vec![0.0; 5];
+    matrix.multiply(&[1.0; 4], &mut output);
+}
+
 #[test]
 fn it_solves_a_system_with_a_known_solution() {
     let n = 50;

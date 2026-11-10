@@ -6,7 +6,7 @@
 //! prints the levels and the finest aggregates' geometry, `MG_REACH` and the like override the
 //! options, `MG_PRECISION` chooses the hierarchy's precision (unset is the library default,
 //! `single-storage`, which stores it in `f32`; `double` keeps it in `f64`; `single` also applies
-//! it in `f32`), and `MG_SLICE_ROWS`
+//! it in `f32`), `MG_THREADS` sets the multigrid's thread count, and `MG_SLICE_ROWS`
 //! assembles and sets up in slices of that many rows, printing the longest single call.
 //! `MG_PROFILE` times twenty preconditioner applications on their own and prints each level's
 //! share of the stored values a cycle reads, to split a solve's time between the cycle and the
@@ -157,6 +157,7 @@ fn main() {
             options.neighbour_reach = env_or("MG_REACH", options.neighbour_reach);
             options.smoother_range = env_or("MG_RANGE", options.smoother_range);
             options.smoother_degree = env_or("MG_DEGREE", options.smoother_degree as f64) as usize;
+            options.threads = env_or("MG_THREADS", options.threads as f64) as usize;
             match std::env::var("MG_PRECISION").as_deref() {
                 Err(_) => {}
                 Ok("double") => options.precision = Precision::Double,
