@@ -42,7 +42,7 @@ use crate::skins::SAME_FACING_COSINE;
 /// The relative rounding of one coordinate as surfaces arrive: mesh files and modelling kernels
 /// store positions in single precision, whose rounding is at most half a unit in the last place,
 /// `2^-24` of the value.
-const COORDINATE_ROUNDING: f64 = 1.0 / 16_777_216.0;
+pub(crate) const COORDINATE_ROUNDING: f64 = 1.0 / 16_777_216.0;
 
 /// The largest rounding slope a triangle may have and still give a plane, from the angle `t` two
 /// faces of one flat patch may differ by ([`SAME_FACING_COSINE`]): `sqrt(2 (1 - cos t))` is

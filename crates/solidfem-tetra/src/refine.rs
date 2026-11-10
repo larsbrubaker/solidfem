@@ -3,8 +3,9 @@
 //! `wall_fill.rs` for walls whose faces have no vertices inside them) and the removal of every
 //! edge still joining the walls' opposite skins (`skins.rs`), by a caller's
 //! size function, then improves the worst tetrahedra (`quality.rs`, and a point for a sliver no
-//! flip can remove, in `quality_points.rs`, with a last attempt there on any tetrahedron the
-//! 10-node upgrade would still refuse). `refine.rs`, `layers.rs` and `quality_points.rs` choose
+//! flip can remove, in `quality_points.rs`, with a last attempt there on any tetrahedron of four
+//! surface vertices the 10-node upgrade would still refuse or that is flat to the surface's
+//! coordinate rounding). `refine.rs`, `layers.rs` and `quality_points.rs` choose
 //! where points go; the cavities of `interior.rs` are the only way a vertex is created, and only
 //! strictly inside the solid.
 //!
@@ -56,6 +57,7 @@ use crate::error::TetraError;
 use crate::flips::{edge_key, face_key, FlipCounts, Flipper};
 use crate::layers::{layer_run, min_layer_thickness, LayerRun};
 use crate::quality::{histogram, min_dihedral_degrees, subtract, DihedralHistogram};
+use crate::quality_points::surface_rounding;
 use crate::refine_mesh::{boundary_faces, centroid_of, checked_size, circumcentre_of, extract};
 pub use crate::refine_options::{RefineOptions, RefinePhase, RefineProgress, RefineReport};
 use crate::skins::{incident_faces, OppositeSkins};
@@ -116,11 +118,13 @@ struct QualityRun {
     rescue_rounds: usize,
 }
 
-/// One second attempt over the tetrahedra the upgrade would still refuse (`quality_points.rs`).
+/// One second attempt over the flat tetrahedra of four surface vertices (`quality_points.rs`).
 struct RescueRun {
     list: Vec<u32>,
     cursor: usize,
     changed: bool,
+    /// The surface's coordinate rounding (`quality_points::surface_rounding`).
+    rounding: f64,
 }
 
 /// Refines a finished solid mesh in resumable steps.
@@ -628,15 +632,16 @@ impl Refiner {
         Ok(())
     }
 
-    /// Starts a second attempt over the tetrahedra the upgrade would refuse, or ends the run when
-    /// there are none or the rounds are used up.
+    /// Starts a second attempt over the flat tetrahedra of four surface vertices, or ends the run
+    /// when there are none or the rounds are used up.
     fn begin_rescue(&mut self, mut run: QualityRun) -> Result<(), TetraError> {
         if run.rescue_rounds >= MAX_RESCUE_ROUNDS {
             return self.finish();
         }
         // A slot fits u32: the triangulation counts its tetrahedra in u32.
+        let rounding = surface_rounding(&self.flipper.core.points, &self.fixed);
         let list: Vec<u32> = (0..self.flipper.core.tets.len() as u32)
-            .filter(|&slot| self.flipper.needs_rescue(slot, &self.fixed))
+            .filter(|&slot| self.flipper.needs_rescue(slot, &self.fixed, rounding))
             .collect();
         if list.is_empty() {
             return self.finish();
@@ -645,6 +650,7 @@ impl Refiner {
             list,
             cursor: 0,
             changed: false,
+            rounding,
         });
         self.quality = Some(run);
         Ok(())
@@ -675,7 +681,9 @@ impl Refiner {
         rescue.cursor += 1;
         // An earlier point of this attempt may have replaced this tetrahedron already.
         if self.added < self.options.max_added_points
-            && self.flipper.needs_rescue(slot, &self.fixed)
+            && self
+                .flipper
+                .needs_rescue(slot, &self.fixed, rescue.rounding)
             && self.flipper.rescue_tet(slot)?
         {
             rescue.changed = true;

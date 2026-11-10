@@ -293,3 +293,97 @@ fn a_flat_element_no_flip_can_remove_is_replaced_by_a_point_low_over_the_surface
         );
     }
 }
+
+/// How far single-precision storage may have put a vertex of `solid` from where it was meant:
+/// each coordinate is rounded by at most `2^-24` of the largest magnitude `M`, so a point by at
+/// most `sqrt(3) 2^-24 M`.
+fn input_rounding(solid: &SolidMesh) -> f64 {
+    let magnitude = solid
+        .points
+        .iter()
+        .flatten()
+        .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+    3.0_f64.sqrt() * magnitude / 16_777_216.0
+}
+
+/// Whether moving each vertex of `tet` by at most `rounding` could have made it from four
+/// coplanar points: moving one vertex by `m` changes the determinant of the edge vectors by `m`
+/// dotted with the opposite face's cross product, so four coplanar points moved that far have a
+/// determinant of at most `rounding` times the sum of the four faces' cross-product lengths (terms
+/// in two or more moves are smaller again by `rounding` over an edge).
+fn flat_to_input_rounding(solid: &SolidMesh, tet: &[u32; 4], rounding: f64) -> bool {
+    let p = tet.map(|v| solid.points[v as usize]);
+    let cross = |u: [f64; 3], w: [f64; 3]| {
+        [
+            u[1] * w[2] - u[2] * w[1],
+            u[2] * w[0] - u[0] * w[2],
+            u[0] * w[1] - u[1] * w[0],
+        ]
+    };
+    let determinant = dot(sub(p[1], p[0]), cross(sub(p[2], p[0]), sub(p[3], p[0])));
+    let mut areas = 0.0;
+    for [i, j, k] in [[1, 2, 3], [0, 2, 3], [0, 1, 3], [0, 1, 2]] {
+        let n = cross(sub(p[j], p[i]), sub(p[k], p[i]));
+        areas += dot(n, n).sqrt();
+    }
+    determinant.abs() <= rounding * areas
+}
+
+#[test]
+fn a_flat_element_within_the_input_rounding_is_replaced_though_the_upgrade_would_take_it() {
+    // The shape of `flat_under_low_roof` a thousand units from the origin, where storage rounding
+    // reaches `e = sqrt(3) 2^-24 1002`, about 1.03e-4, with `d` 1e-5 off the plane of `a b c`: a
+    // tenth of that rounding, as a flat face of a part read from a file comes, yet a determinant
+    // over the longest edge cubed of about 1.8e-6, far above what the upgrade refuses.
+    let mut solid = flat_under_low_roof();
+    for point in &mut solid.points {
+        *point = point.map(|value| value + 1000.0);
+    }
+    solid.points[3][2] = 1000.0 + 1e-5;
+    let rounding = input_rounding(&solid);
+    assert!(
+        flat_to_input_rounding(&solid, &solid.tets[0], rounding),
+        "the shape must start with an element flat to the input's rounding"
+    );
+    assert!(
+        relative_volume(&solid, &solid.tets[0]) >= UPGRADE_FLAT_LIMIT,
+        "the shape must start with an element the upgrade accepts"
+    );
+    let surface_before = boundary_faces(&solid);
+    let surface_points = solid.points.len();
+    let surface_coordinates = solid.points.clone();
+    let surface_triangles = outward_triangles(&solid);
+    // The worst angle a user is shown before: the flat element's, the roof's being far above it.
+    let worst_before = solid
+        .tets
+        .iter()
+        .map(|tet| min_dihedral(&solid, tet))
+        .fold(180.0_f64, f64::min);
+    let (refined, report) =
+        run_refine(solid, constant_size(1e6), RefineOptions::default()).expect("refines");
+    assert_solid(&refined, &surface_coordinates, &surface_triangles);
+    assert_eq!(
+        boundary_faces(&refined),
+        surface_before,
+        "the surface changed"
+    );
+    assert_eq!(refined.points.len(), surface_points + report.quality_points);
+    // Every move of the quality pass, a flip, a smoothing step or a point, goes in only when it
+    // strictly raises the worst tetrahedron of what it replaces, so the mesh's worst angle must
+    // rise: the flat element was the worst, and it is gone.
+    let worst_after = refined
+        .tets
+        .iter()
+        .map(|tet| min_dihedral(&refined, tet))
+        .fold(180.0_f64, f64::min);
+    assert!(
+        worst_after > worst_before,
+        "the worst angle did not rise: {worst_before} degrees before, {worst_after} after"
+    );
+    for tet in &refined.tets {
+        assert!(
+            !flat_to_input_rounding(&refined, tet, rounding),
+            "an element flat to the input's rounding remains: {tet:?}"
+        );
+    }
+}

@@ -23,17 +23,21 @@
 //! end, so no edge joins opposite skins of a wall.
 //!
 //! **The second attempt.** When the quality passes have ended, a tetrahedron of four surface
-//! vertices that the upgrade to 10-node elements would still refuse gets one more try
-//! (`refine.rs` drives it). Waiting for the end leaves alone every part the passes finish on their
-//! own, since flips and points often remove a flat tetrahedron a little later. It reaches two cases
-//! the ordinary point cannot. Where the wall meets the sliver at a tight angle every height from a
-//! quarter of an edge up is already outside the solid, so lower ones are tried
-//! ([`LOW_HEIGHT_FRACTIONS`]), and only when nothing higher fits, because a point low over the
-//! surface is itself a thin element. And a face of three vertices nearly in a line makes a flat
-//! tetrahedron with any apex, so the cavity is grown across such interior faces
-//! (`quality_cavity`) and the star is built on sound faces only; a needle face on the surface
-//! cannot be taken in, a surface triangle being fixed. A star any of whose tetrahedra the upgrade
-//! would refuse is not accepted.
+//! vertices that the upgrade to 10-node elements would still refuse, or that is flat to the
+//! surface's own rounding ([`flat_to_input_rounding`]), gets one more try (`refine.rs` drives
+//! it). The second kind is two triangles of one flat face under the tetrahedron of the quad's
+//! other diagonal: the four corners are coplanar but for the rounding of their stored
+//! coordinates, so the tetrahedron's shape could be that rounding alone, a few ten-thousandths of
+//! a degree, yet its volume over its longest edge cubed is far above what the upgrade refuses.
+//! Waiting for the end leaves alone every part the passes finish on their own, since flips and
+//! points often remove a flat tetrahedron a little later. It reaches two cases the ordinary point
+//! cannot. Where the wall meets the sliver at a tight angle every height from a quarter of an edge
+//! up is already outside the solid, so lower ones are tried ([`LOW_HEIGHT_FRACTIONS`]), and only
+//! when nothing higher fits, because a point low over the surface is itself a thin element. And a
+//! face of three vertices nearly in a line makes a flat tetrahedron with any apex, so the cavity
+//! is grown across such interior faces (`quality_cavity`) and the star is built on sound faces
+//! only; a needle face on the surface cannot be taken in, a surface triangle being fixed. A star
+//! any of whose tetrahedra the upgrade would refuse is not accepted.
 //!
 //! **The second attempt and the layers.** It needs no rule of its own for thin walls. Every new
 //! tetrahedron joins the new point to a face that already existed, so no element or edge through
@@ -53,8 +57,9 @@ use crate::error::TetraError;
 use crate::flips::Flipper;
 use crate::interior::MAX_CAVITY;
 use crate::predicates::orient;
+use crate::quad_chords::COORDINATE_ROUNDING;
 use crate::quality::{
-    cross, length, min_dihedral_degrees, normalized, refused_by_upgrade, subtract,
+    cross, dot, length, min_dihedral_degrees, normalized, refused_by_upgrade, subtract,
 };
 use crate::refine_mesh::{centroid_of, circumcentre_of};
 
@@ -68,6 +73,44 @@ const HEIGHT_FRACTIONS: [f64; 4] = [1.0, 0.75, 0.5, 0.25];
 /// already outside the solid, yet a lower one still sees both surface faces. The star's own
 /// quality decides among them, so the lowest is taken only when it is all that fits.
 const LOW_HEIGHT_FRACTIONS: [f64; 5] = [0.125, 0.0625, 0.03125, 0.015625, 0.0078125];
+
+/// How far rounding may have put a surface vertex from where it was meant (`e` in
+/// `quad_chords.rs`): `sqrt(3) 2^-24 M`, `M` the largest coordinate magnitude of a vertex in
+/// `fixed`.
+pub(crate) fn surface_rounding(points: &[[f64; 3]], fixed: &[bool]) -> f64 {
+    let magnitude = points
+        .iter()
+        .zip(fixed)
+        .filter(|(_, &on_surface)| on_surface)
+        .flat_map(|(point, _)| *point)
+        .fold(0.0_f64, |largest, value| largest.max(value.abs()));
+    3.0_f64.sqrt() * COORDINATE_ROUNDING * magnitude
+}
+
+/// Whether moving each vertex of `tet` by at most `rounding` could have made it from four
+/// coplanar points. The determinant `d` of the edge vectors changes, for a move `m` of one
+/// vertex, by `m` dotted with the cross product of the opposite face's edges, whose length is
+/// twice that face's area; terms in two or three moves are smaller again by `rounding` over an
+/// edge. So four coplanar points moved that far have `|d| <= rounding * sum |n_i|`, the `n_i`
+/// the four faces' cross products, and a tetrahedron within that bound could be rounding alone.
+/// It need not be: on input exact in `f64`, or for a small real feature of a part far from the
+/// origin, a genuine element up to about four roundings high is taken too. That misreading is
+/// harmless because of the guards in `rescue_point`: a point goes in only when its star strictly
+/// raises the worst tetrahedron it replaces and has none the upgrade would refuse, so a real
+/// element is replaced only by better ones, and the surface never changes.
+fn flat_to_input_rounding(points: &[[f64; 3]], tet: &[u32; 4], rounding: f64) -> bool {
+    let p = tet.map(|v| points[v as usize]);
+    let determinant = dot(
+        subtract(p[1], p[0]),
+        cross(subtract(p[2], p[0]), subtract(p[3], p[0])),
+    );
+    let mut areas = 0.0;
+    for positions in FACE {
+        let [a, b, c] = positions.map(|k| p[k]);
+        areas += length(cross(subtract(b, a), subtract(c, a)));
+    }
+    determinant.abs() <= rounding * areas
+}
 
 impl Flipper {
     /// Adds a point that removes tetrahedron `slot`, if some candidate strictly raises the worst
@@ -101,11 +144,13 @@ impl Flipper {
     }
 
     /// Whether tetrahedron `slot` is what the second attempt is for: alive, refused by the upgrade
-    /// to 10-node elements, with all four vertices on the surface.
-    pub(crate) fn needs_rescue(&self, slot: u32, fixed: &[bool]) -> bool {
+    /// to 10-node elements or flat to the surface's `rounding` ([`surface_rounding`]), with all
+    /// four vertices on the surface.
+    pub(crate) fn needs_rescue(&self, slot: u32, fixed: &[bool], rounding: f64) -> bool {
         let tet = self.core.tets[slot as usize];
         tet.iter().all(|&v| v < DEAD)
-            && refused_by_upgrade(&self.core.points, &tet)
+            && (refused_by_upgrade(&self.core.points, &tet)
+                || flat_to_input_rounding(&self.core.points, &tet, rounding))
             && tet
                 .iter()
                 .all(|&v| fixed.get(v as usize).copied().unwrap_or(false))
