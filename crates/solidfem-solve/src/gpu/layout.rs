@@ -6,11 +6,13 @@
 //! host.
 
 use crate::csr::CsrMatrix;
+use crate::LevelMatrix;
 
 use super::shader::MAX_BLOCK;
 use super::GpuError;
 
-/// Threads per workgroup in every kernel of [`super::SMOOTHER_WGSL`].
+/// Threads per workgroup in every kernel of [`super::SMOOTHER_WGSL`] and
+/// [`super::TRANSFER_WGSL`].
 pub const WORKGROUP_SIZE: u32 = 64;
 
 /// Bytes of one [`GpuParams`] record.
@@ -187,6 +189,20 @@ impl<T: Real> BlockMatrix<T> {
         Self::from_parts(rows, 3, 3, &starts, &columns, &values)
     }
 
+    /// Reads a matrix of a multigrid hierarchy ([`crate::Multigrid::level_matrix`] or
+    /// [`crate::Multigrid::level_prolongator`]): rounding to `f32` gives back exactly the values
+    /// a [`crate::Precision::Single`] hierarchy stores.
+    pub fn from_level(matrix: &LevelMatrix) -> Result<Self, GpuError> {
+        Self::from_parts(
+            matrix.block_columns,
+            matrix.row_block,
+            matrix.col_block,
+            &matrix.starts,
+            &matrix.columns,
+            &matrix.values,
+        )
+    }
+
     /// Block rows.
     pub fn rows(&self) -> usize {
         self.rows
@@ -230,6 +246,50 @@ impl<T: Real> BlockMatrix<T> {
         }
     }
 
+    /// The transpose, stored explicitly so that applying it is a gather: block row `c` of the
+    /// result holds every block of block column `c` of this matrix, in ascending order of this
+    /// matrix's block row, each block transposed. A thread per scalar row of the transpose then
+    /// sums its terms in that order with no scatter and no atomics, which is exactly the order a
+    /// row-by-row scatter of `transpose(self) * x` adds them in, so the two give the same bits.
+    pub fn transpose(&self) -> Self {
+        let (rb, cb) = (self.row_block, self.col_block);
+        let mut starts = vec![0u32; self.columns_in_blocks + 1];
+        for &column in &self.columns {
+            starts[column as usize + 1] += 1;
+        }
+        for i in 0..self.columns_in_blocks {
+            starts[i + 1] += starts[i];
+        }
+        let mut filled: Vec<usize> = starts.iter().map(|&s| s as usize).collect();
+        let mut columns = vec![0u32; self.columns.len()];
+        let mut values = vec![T::ZERO; self.values.len()];
+        for row in 0..self.rows {
+            for at in self.starts[row] as usize..self.starts[row + 1] as usize {
+                let column = self.columns[at] as usize;
+                let to = filled[column];
+                filled[column] += 1;
+                // Fits in u32: `from_parts` refuses 2^32 scalar rows.
+                columns[to] = row as u32;
+                let source = &self.values[at * rb * cb..(at + 1) * rb * cb];
+                let target = &mut values[to * rb * cb..(to + 1) * rb * cb];
+                for p in 0..rb {
+                    for q in 0..cb {
+                        target[q * rb + p] = source[p * cb + q];
+                    }
+                }
+            }
+        }
+        BlockMatrix {
+            rows: self.columns_in_blocks,
+            columns_in_blocks: self.rows,
+            row_block: cb,
+            col_block: rb,
+            starts,
+            columns,
+            values,
+        }
+    }
+
     /// The same matrix in another precision, each value rounded to nearest.
     pub fn convert<U: Real>(&self) -> BlockMatrix<U> {
         BlockMatrix {
@@ -264,7 +324,33 @@ impl BlockMatrix<f32> {
     pub fn values_le_bytes(&self) -> Vec<u8> {
         f32_le_bytes(&self.values)
     }
+
+    /// Checks that each of the matrix's buffers fits one storage binding of `limit` bytes
+    /// ([`GUARANTEED_BINDING_BYTES`] unless the host requested more). The kernels index each
+    /// buffer from zero, so a matrix that does not fit cannot run; the error says how many block
+    /// rows (nodes, on the finest level) would.
+    pub fn check_binding_size(&self, limit: u64) -> Result<(), GpuError> {
+        let buffers = [self.starts.len(), self.columns.len(), self.values.len()];
+        // Four bytes per u32 or f32; a usize length times four fits u64 on every target.
+        let bytes = buffers.iter().map(|&n| 4 * n as u64).max().unwrap_or(0);
+        if bytes <= limit {
+            return Ok(());
+        }
+        // The rows that fit at this matrix's mean bytes per row, rounded down; u128 cannot
+        // overflow for a u64 limit times a usize row count.
+        let fitting = u128::from(limit) * self.rows as u128 / u128::from(bytes);
+        Err(GpuError::BindingTooLarge {
+            bytes,
+            limit,
+            rows: self.rows,
+            // Fits usize: below `self.rows`, since `limit < bytes`.
+            rows_that_fit: fitting as usize,
+        })
+    }
 }
+
+/// The storage binding size every WebGPU device supports (`maxStorageBufferBindingSize`), bytes.
+pub const GUARANTEED_BINDING_BYTES: u64 = 134_217_728;
 
 /// Packs `u32`s little-endian.
 pub fn u32_le_bytes(values: &[u32]) -> Vec<u8> {

@@ -8,8 +8,9 @@
 //! smoothed aggregation algebraic multigrid over the six rigid-body modes, built in resumable
 //! slices by [`MultigridSetup`] because a large setup must not freeze a browser.
 //!
-//! [`gpu`] holds the smoother's kernels for a GPU: the packed single-precision block layout, the
-//! WGSL compute shaders, and a CPU reference of the same arithmetic, with no GPU dependency.
+//! [`gpu`] holds the kernels of one V-cycle level for a GPU (smoother, residual, restriction,
+//! prolongation): the packed single-precision block layout, the WGSL compute shaders, and a CPU
+//! reference of the same arithmetic, with no GPU dependency.
 //!
 //! Slicing never changes results: a solve's floating-point operations depend only on its input
 //! and iteration count, so one long run and many short `step` calls give identical bits.
@@ -22,8 +23,8 @@ mod preconditioner;
 
 pub use csr::CsrMatrix;
 pub use multigrid::{
-    Multigrid, MultigridError, MultigridOptions, MultigridSetup, MultigridStats, Precision,
-    SetupStatus, NEAR_NULL_MODES,
+    LevelMatrix, Multigrid, MultigridError, MultigridOptions, MultigridSetup, MultigridStats,
+    Precision, SetupStatus, NEAR_NULL_MODES,
 };
 pub use pcg::{Pcg, PcgError, PcgOptions, Progress, StepOutcome};
 pub use preconditioner::{Jacobi, JacobiError, Preconditioner};

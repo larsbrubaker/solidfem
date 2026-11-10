@@ -1,9 +1,10 @@
-//! The multigrid smoother's kernels for a GPU: the packed single-precision block sparse layout a
-//! device reads, the WGSL compute shaders that run on it, and a CPU reference of exactly the same
-//! arithmetic. The library holds no GPU dependency: a host uploads the packed bytes with whatever
-//! WebGPU binding it has (`wgpu` natively, the browser's WebGPU from WebAssembly) and runs the
-//! shader constants. The intended split is the V-cycle in `f32` on the device while the residual
-//! and the conjugate gradient stay `f64` on the CPU; this module holds the smoother's kernels.
+//! The kernels of one multigrid V-cycle level for a GPU: the packed single-precision block sparse
+//! layout a device reads, the WGSL compute shaders that run on it, and a CPU reference of exactly
+//! the same arithmetic. The library holds no GPU dependency: a host uploads the packed bytes with
+//! whatever WebGPU binding it has (`wgpu` natively, the browser's WebGPU from WebAssembly) and runs
+//! the shader constants. The intended split is the V-cycle in `f32` on the device while the
+//! residual and the conjugate gradient stay `f64` on the CPU; this module holds the kernels of a
+//! level, with the coarsest level's solve left to the CPU.
 //!
 //! **Layout** (`layout.rs`). A [`BlockMatrix`] is block compressed sparse rows of dense
 //! `row_block` by `col_block` blocks (3 on the finest level, 6 on coarse ones, rectangular for a
@@ -20,6 +21,18 @@
 //! coefficients are computed on the CPU in `f64` once ([`ChebyshevCoefficients`]) and live in one
 //! uniform buffer per step.
 //!
+//! **Transfers** (`transfer_shader.rs`, [`TRANSFER_WGSL`]). `residual_main` (`b - A x`),
+//! `restrict_main` (`P^T r`), `prolong_correct_main` (`x + P e`) and `add_main` complete one
+//! V-cycle level: pre-smooth, residual, restrict, coarse solve, prolong and correct, residual,
+//! post-smooth, add. Restriction reads the prolongator's explicitly stored transpose
+//! ([`BlockMatrix::transpose`]), so every coarse value is a gather by one thread, never a scatter.
+//! A host reads a hierarchy's levels with [`crate::Multigrid::level_matrix`],
+//! [`crate::Multigrid::level_prolongator`] and [`crate::Multigrid::level_inverse_diagonal`]
+//! ([`BlockMatrix::from_level`]); prolongators are 3x6 blocks from the finest level and 6x6 below
+//! it, coarse matrices 6x6. The coarse solve stays on the CPU
+//! ([`crate::Multigrid::solve_coarsest`]). [`reference::two_level_cycle`] is the dispatch sequence
+//! on the CPU, and in `f32` it is the [`crate::Precision::Single`] cycle to the bit.
+//!
 //! **Order.** Every sum runs in a fixed order: a scalar row sums its blocks in stored order and
 //! each block's columns in order, starting from zero, exactly as the CPU block product does. One
 //! thread owns each sum, so results do not depend on scheduling and repeat to the bit on a given
@@ -34,7 +47,9 @@
 //! limits, and browsers often do not. The largest buffer is `values`: 36 bytes per 3x3 block, so
 //! the guaranteed binding holds 3,728,270 fine blocks, about 138,000 nodes (414,000 unknowns) at
 //! the 27 blocks per row a 10-node tetrahedral mesh has. All indices are `u32`, so a matrix must
-//! have fewer than 2^32 stored values and scalar rows ([`GpuError::TooLarge`]). Splitting a larger
+//! have fewer than 2^32 stored values and scalar rows ([`GpuError::TooLarge`]).
+//! [`BlockMatrix::check_binding_size`] refuses a matrix whose buffers exceed a binding
+//! ([`GpuError::BindingTooLarge`], with how many block rows would fit). Splitting a larger
 //! matrix is not provided: the kernels index rows and blocks from zero. It needs either a first
 //! row and a first block in [`GpuParams`] (each slice its own `starts`/`columns`/`values`
 //! buffers, writing its rows of the shared output), or slices bound at offsets of one buffer,
@@ -48,14 +63,17 @@
 mod layout;
 pub mod reference;
 mod shader;
+mod transfer_shader;
 
 use std::fmt;
 
 pub use layout::{
     dispatch_size, f32_from_le_bytes, f32_le_bytes, u32_le_bytes, BlockMatrix,
-    ChebyshevCoefficients, GpuParams, Real, PARAMS_STRIDE, WORKGROUP_SIZE,
+    ChebyshevCoefficients, GpuParams, Real, GUARANTEED_BINDING_BYTES, PARAMS_STRIDE,
+    WORKGROUP_SIZE,
 };
 pub use shader::{MAX_BLOCK, SMOOTHER_WGSL};
+pub use transfer_shader::TRANSFER_WGSL;
 
 /// Why a matrix or smoother could not be prepared for a GPU.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -77,6 +95,18 @@ pub enum GpuError {
     TooLarge {
         /// The count that does not fit.
         count: usize,
+    },
+    /// A buffer of the matrix is larger than one storage binding may be, and the kernels do not
+    /// split a matrix across bindings.
+    BindingTooLarge {
+        /// Bytes of the largest buffer.
+        bytes: u64,
+        /// Bytes one binding may hold.
+        limit: u64,
+        /// Block rows of the matrix.
+        rows: usize,
+        /// Block rows (nodes, on the finest level) that fit at this matrix's bytes per row.
+        rows_that_fit: usize,
     },
     /// A diagonal block is missing or not symmetric positive definite, so block-Jacobi cannot
     /// scale that row.
@@ -114,6 +144,17 @@ impl fmt::Display for GpuError {
                 f,
                 "{count} entries need indices beyond the GPU's 32-bit range, which the kernels \
                  cannot address: solve this matrix on the CPU"
+            ),
+            GpuError::BindingTooLarge {
+                bytes,
+                limit,
+                rows,
+                rows_that_fit,
+            } => write!(
+                f,
+                "the matrix needs a {bytes}-byte GPU buffer where one binding holds {limit} \
+                 bytes: about {rows_that_fit} of its {rows} block rows fit, so solve it on the \
+                 CPU or request a larger binding from the device"
             ),
             GpuError::NotPositiveDefinite { row, pivot } => write!(
                 f,

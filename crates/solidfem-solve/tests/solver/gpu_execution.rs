@@ -24,10 +24,10 @@ use super::gpu_kernels::{coefficients, six_by_three, spring_lattice, varied_vect
 /// The environment variable that turns a skipped GPU test into a failure.
 const REQUIRE_GPU: &str = "SOLIDFEM_REQUIRE_GPU";
 
-struct Gpu {
-    device: wgpu::Device,
-    queue: wgpu::Queue,
-    name: String,
+pub(super) struct Gpu {
+    pub(super) device: wgpu::Device,
+    pub(super) queue: wgpu::Queue,
+    pub(super) name: String,
 }
 
 /// The default adapter with its own limits, or the reason there is none.
@@ -53,7 +53,7 @@ fn gpu() -> Result<Gpu, String> {
 }
 
 /// The device, or `None` after printing why `test` is skipped; fails when [`REQUIRE_GPU`] is 1.
-fn gpu_or_skip(test: &str) -> Option<Gpu> {
+pub(super) fn gpu_or_skip(test: &str) -> Option<Gpu> {
     match gpu() {
         Ok(gpu) => Some(gpu),
         Err(reason) => {
@@ -68,7 +68,7 @@ fn gpu_or_skip(test: &str) -> Option<Gpu> {
     }
 }
 
-fn shader(gpu: &Gpu) -> wgpu::ShaderModule {
+pub(super) fn shader(gpu: &Gpu) -> wgpu::ShaderModule {
     gpu.device
         .create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("smoother"),
@@ -76,7 +76,11 @@ fn shader(gpu: &Gpu) -> wgpu::ShaderModule {
         })
 }
 
-fn pipeline(gpu: &Gpu, module: &wgpu::ShaderModule, entry: &str) -> wgpu::ComputePipeline {
+pub(super) fn pipeline(
+    gpu: &Gpu,
+    module: &wgpu::ShaderModule,
+    entry: &str,
+) -> wgpu::ComputePipeline {
     gpu.device
         .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some(entry),
@@ -99,7 +103,7 @@ struct Resident {
     dofs: u32,
 }
 
-fn storage(gpu: &Gpu, label: &str, bytes: &[u8], writable: bool) -> wgpu::Buffer {
+pub(super) fn storage(gpu: &Gpu, label: &str, bytes: &[u8], writable: bool) -> wgpu::Buffer {
     let mut usage = wgpu::BufferUsages::STORAGE;
     if writable {
         usage |= wgpu::BufferUsages::COPY_SRC;
@@ -112,7 +116,7 @@ fn storage(gpu: &Gpu, label: &str, bytes: &[u8], writable: bool) -> wgpu::Buffer
         })
 }
 
-fn uniform(gpu: &Gpu, params: &GpuParams) -> wgpu::Buffer {
+pub(super) fn uniform(gpu: &Gpu, params: &GpuParams) -> wgpu::Buffer {
     gpu.device
         .create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("params"),
@@ -121,7 +125,7 @@ fn uniform(gpu: &Gpu, params: &GpuParams) -> wgpu::Buffer {
         })
 }
 
-fn bind(
+pub(super) fn bind(
     gpu: &Gpu,
     pipeline: &wgpu::ComputePipeline,
     entries: &[(u32, &wgpu::Buffer)],
@@ -257,7 +261,7 @@ fn read_solution(gpu: &Gpu, resident: &Resident) -> Vec<f32> {
 }
 
 /// Copies `source` into the mappable `readback` and reads it as f32s.
-fn read(gpu: &Gpu, source: &wgpu::Buffer, readback: &wgpu::Buffer) -> Vec<f32> {
+pub(super) fn read(gpu: &Gpu, source: &wgpu::Buffer, readback: &wgpu::Buffer) -> Vec<f32> {
     let mut encoder = gpu
         .device
         .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());

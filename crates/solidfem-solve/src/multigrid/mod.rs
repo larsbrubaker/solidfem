@@ -85,7 +85,7 @@ mod transfer;
 use std::fmt;
 
 pub(crate) use block::invert_spd_block;
-pub use cycle::Multigrid;
+pub use cycle::{LevelMatrix, Multigrid};
 pub use setup::{MultigridSetup, SetupStatus};
 
 /// The number of near-null-space vectors the multigrid carries: three translations and three
@@ -192,6 +192,19 @@ pub enum MultigridError {
     },
     /// A result was asked for before setup finished.
     NotFinished,
+    /// The coarsest level has no direct factorization: it is too large to factor and its smoother
+    /// stands in for a solve.
+    CoarsestNotFactored {
+        /// Values at the coarsest level.
+        values: usize,
+    },
+    /// A vector for the coarsest level's solve has the wrong length.
+    CoarseLength {
+        /// Values at the coarsest level.
+        expected: usize,
+        /// The length supplied.
+        found: usize,
+    },
 }
 
 impl fmt::Display for MultigridError {
@@ -221,6 +234,15 @@ impl fmt::Display for MultigridError {
             ),
             MultigridError::Cancelled => write!(f, "the multigrid setup was cancelled"),
             MultigridError::NotFinished => write!(f, "the multigrid setup has not finished"),
+            MultigridError::CoarsestNotFactored { values } => write!(
+                f,
+                "the coarsest multigrid level has {values} values and no direct factorization: \
+                 apply its smoother instead of a coarse solve"
+            ),
+            MultigridError::CoarseLength { expected, found } => write!(
+                f,
+                "the coarse solve was given {found} values where the coarsest level has {expected}"
+            ),
         }
     }
 }

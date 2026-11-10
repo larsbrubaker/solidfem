@@ -21,7 +21,14 @@ failure-output = "immediate-final"
 # The GPU kernel tests print `SKIPPED: ...` and pass on a machine without a GPU adapter (CI's
 # runners have none); showing a passing test's output here keeps a skip from reading as a run.
 # `SOLIDFEM_REQUIRE_GPU=1` turns the skip into a failure (crates/solidfem-solve/tests/solver/
-# gpu_execution.rs).
+# gpu_execution.rs). They run one at a time as a precaution: two full workspace runs failed with
+# an access violation in one test process and "Parent device is lost" from the next ones to ask
+# for a device. The cause is not known: 8 later full runs side by side did not reproduce it, so
+# this does not show that parallel GPU tests are unsafe. It costs little, 7 short tests.
 [[profile.default.overrides]]
-filter = 'binary(solver) & test(gpu_execution::)'
+filter = 'binary(solver) & test(/gpu_(cycle_)?execution::/)'
 success-output = "immediate"
+test-group = "gpu"
+
+[test-groups]
+gpu = { max-threads = 1 }

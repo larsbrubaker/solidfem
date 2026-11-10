@@ -1,7 +1,9 @@
-//! The CPU reference of the kernels in [`super::SMOOTHER_WGSL`]: the same operations in the same
-//! order, in either precision. In `f32` it is what a device computes, up to the fused
-//! multiply-adds and the 2.5 ULP division WGSL allows; in `f64` it is the multigrid's own
-//! smoother, bit for bit (the solver tests compare it with a one-level hierarchy). [`multiply_rounding_bound`] and
+//! The CPU reference of the kernels in [`super::SMOOTHER_WGSL`] and [`super::TRANSFER_WGSL`]: the
+//! same operations in the same order, in either precision, and [`two_level_cycle`], the device's
+//! dispatch sequence for one V-cycle over two levels. In `f32` it is what a device computes, up
+//! to the fused multiply-adds and the 2.5 ULP division WGSL allows, and it is the
+//! [`crate::Precision::Single`] cycle bit for bit; in `f64` it is the multigrid's own smoother, bit
+//! for bit (the solver tests compare both with real hierarchies). [`multiply_rounding_bound`] and
 //! [`smoother_rounding_bound`] bound how far an `f32` evaluation may sit from the exact result on
 //! the same `f32` inputs, so two `f32` evaluations (device and reference) differ by at most twice
 //! the bound.
@@ -47,6 +49,92 @@ fn row_product<T: Real>(matrix: &BlockMatrix<T>, row: usize, x: &[T]) -> T {
         }
     }
     sum
+}
+
+/// `r = b - A x`: `residual_main`, the product summed from zero and then subtracted from `b`.
+pub fn residual<T: Real>(matrix: &BlockMatrix<T>, b: &[T], x: &[T], r: &mut [T]) {
+    for (row, out) in r
+        .iter_mut()
+        .enumerate()
+        .take(matrix.rows() * matrix.row_block())
+    {
+        *out = b[row] - row_product(matrix, row, x);
+    }
+}
+
+/// `coarse = P^T fine` with `transpose` the stored transpose of `P`: `restrict_main`.
+pub fn restrict<T: Real>(transpose: &BlockMatrix<T>, fine: &[T], coarse: &mut [T]) {
+    multiply(transpose, fine, coarse);
+}
+
+/// `x = x + P e`: `prolong_correct_main`, the product summed from zero and then added.
+pub fn prolong_correct<T: Real>(prolongator: &BlockMatrix<T>, e: &[T], x: &mut [T]) {
+    for (row, out) in x
+        .iter_mut()
+        .enumerate()
+        .take(prolongator.rows() * prolongator.row_block())
+    {
+        *out = *out + row_product(prolongator, row, e);
+    }
+}
+
+/// `x = x + y`: `add_main`.
+pub fn add<T: Real>(x: &mut [T], y: &[T]) {
+    for (out, value) in x.iter_mut().zip(y) {
+        *out = *out + *value;
+    }
+}
+
+/// What one level of a two-level V-cycle reads: the level's matrix, its block-Jacobi inverse,
+/// the smoother's coefficients, the prolongator to the coarse level and its stored transpose.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CycleLevel<T> {
+    /// The level's matrix.
+    pub matrix: BlockMatrix<T>,
+    /// The inverse of each diagonal block, row-major.
+    pub inverse_diagonal: Vec<T>,
+    /// The Chebyshev smoother's scalars.
+    pub coefficients: ChebyshevCoefficients,
+    /// The prolongator, fine block rows by coarse block columns.
+    pub prolongator: BlockMatrix<T>,
+    /// `prolongator.transpose()`, which restriction gathers through.
+    pub restriction: BlockMatrix<T>,
+}
+
+/// One two-level V-cycle from a zero guess in the device's dispatch order, returning the
+/// correction for `rhs`: pre-smooth, residual, restrict, `coarse_solve` (given the coarse
+/// right-hand side, it writes the coarse correction into its second argument), prolong and
+/// correct, residual, post-smooth, and add the post-smoother's correction.
+pub fn two_level_cycle<T: Real>(
+    level: &CycleLevel<T>,
+    rhs: &[T],
+    coarse_solve: &mut dyn FnMut(&[T], &mut [T]),
+) -> Vec<T> {
+    let length = rhs.len();
+    let coarse_length = level.prolongator.block_columns() * level.prolongator.col_block();
+    let mut vectors = SmootherVectors::zeros(length);
+    let smooth = |b: &[T], vectors: &mut SmootherVectors<T>| {
+        chebyshev_smooth(
+            &level.matrix,
+            &level.inverse_diagonal,
+            &level.coefficients,
+            b,
+            vectors,
+        );
+    };
+    smooth(rhs, &mut vectors);
+    let mut x = vectors.solution.clone();
+    let mut r = vec![T::ZERO; length];
+    residual(&level.matrix, rhs, &x, &mut r);
+    let mut coarse_rhs = vec![T::ZERO; coarse_length];
+    restrict(&level.restriction, &r, &mut coarse_rhs);
+    let mut coarse_x = vec![T::ZERO; coarse_length];
+    coarse_solve(&coarse_rhs, &mut coarse_x);
+    prolong_correct(&level.prolongator, &coarse_x, &mut x);
+    residual(&level.matrix, rhs, &x, &mut r);
+    smooth(&r, &mut vectors);
+    add(&mut x, &vectors.solution);
+    x
 }
 
 /// The inverse of each diagonal block, row-major, `rows * n * n` values for square `n` by `n`

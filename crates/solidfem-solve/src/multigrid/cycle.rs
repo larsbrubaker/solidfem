@@ -12,12 +12,17 @@
 //! solution rounded to `V`. The Chebyshev coefficients are computed in
 //! `f64` and rounded where they are used, so all three precisions apply the same polynomial before and
 //! after the coarse correction and the cycle stays symmetric up to rounding.
+//!
+//! A host that runs the cycle elsewhere (the GPU kernels in `crate::gpu`) reads each level as
+//! stored through [`Multigrid::level_matrix`], [`Multigrid::level_prolongator`] and
+//! [`Multigrid::level_inverse_diagonal`] ([`LevelMatrix`] arrays, values widened exactly to `f64`)
+//! and hands the coarsest level back to [`Multigrid::solve_coarsest`].
 
 use std::cell::RefCell;
 
 use super::block::{BlockCsr, DenseCholesky};
 use super::scalar::Scalar;
-use super::{MultigridStats, Precision};
+use super::{MultigridError, MultigridStats, Precision};
 use crate::preconditioner::Preconditioner;
 
 /// One level of the hierarchy.
@@ -148,6 +153,47 @@ impl<S: Scalar, V: Scalar> Hierarchy<S, V> {
             .map(|level| (level.lambda_min, level.lambda_max))
     }
 
+    fn level_matrix(&self, level: usize, prolongator: bool) -> Option<LevelMatrix> {
+        let stored = self.levels.get(level)?;
+        let (matrix, block_columns) = if prolongator {
+            (
+                stored.prolongator.as_ref()?,
+                self.levels.get(level + 1)?.a.rows,
+            )
+        } else {
+            (&stored.a, stored.a.rows)
+        };
+        Some(LevelMatrix {
+            block_columns,
+            row_block: matrix.row_block,
+            col_block: matrix.col_block,
+            starts: matrix.starts.clone(),
+            columns: matrix.columns.clone(),
+            values: matrix.values.iter().map(|v| v.to_f64()).collect(),
+        })
+    }
+
+    fn level_inverse_diagonal(&self, level: usize) -> Option<Vec<f64>> {
+        let stored = self.levels.get(level)?;
+        Some(stored.inverse_diagonal.iter().map(|v| v.to_f64()).collect())
+    }
+
+    fn solve_coarsest(&self, values: &mut [f64]) -> Result<(), MultigridError> {
+        let dofs = self.levels.last().map_or(0, |level| level.a.dofs());
+        let factor = self.levels.last().and_then(|level| level.coarse.as_ref());
+        let Some(factor) = factor else {
+            return Err(MultigridError::CoarsestNotFactored { values: dofs });
+        };
+        if values.len() != dofs {
+            return Err(MultigridError::CoarseLength {
+                expected: dofs,
+                found: values.len(),
+            });
+        }
+        factor.solve(values);
+        Ok(())
+    }
+
     /// Rounds `residual` into `V`, runs the cycle and widens the correction into `output`.
     fn apply_converted(&self, degree: usize, residual: &[f64], output: &mut [f64]) {
         let mut work = self.work.borrow_mut();
@@ -249,6 +295,72 @@ impl Multigrid {
             Stored::Single(hierarchy) => hierarchy.aggregates(level),
         }
     }
+
+    /// The matrix of `level` as stored, so its cycle can run elsewhere (on a GPU); `None` past
+    /// the coarsest level. Values are widened to `f64`, exactly, from whatever precision the
+    /// hierarchy stores, and each call makes a full `f64` copy of the level's matrix: read it once
+    /// to upload it, never per cycle.
+    pub fn level_matrix(&self, level: usize) -> Option<LevelMatrix> {
+        match &self.stored {
+            Stored::Double(hierarchy) => hierarchy.level_matrix(level, false),
+            Stored::SingleStorage(hierarchy) => hierarchy.level_matrix(level, false),
+            Stored::Single(hierarchy) => hierarchy.level_matrix(level, false),
+        }
+    }
+
+    /// The prolongator from the coarser level `level + 1` up to `level`: block rows of `level`,
+    /// block columns of `level + 1` (3x6 blocks from the finest level, 6x6 below it). `None` on
+    /// the coarsest level and past it. Values are widened to `f64` as in
+    /// [`Multigrid::level_matrix`], and each call makes a full `f64` copy of the prolongator.
+    pub fn level_prolongator(&self, level: usize) -> Option<LevelMatrix> {
+        match &self.stored {
+            Stored::Double(hierarchy) => hierarchy.level_matrix(level, true),
+            Stored::SingleStorage(hierarchy) => hierarchy.level_matrix(level, true),
+            Stored::Single(hierarchy) => hierarchy.level_matrix(level, true),
+        }
+    }
+
+    /// The inverse of each diagonal block of `level`, row-major, as the smoother reads it, widened
+    /// to `f64`, a full copy on each call; `None` past the coarsest level.
+    pub fn level_inverse_diagonal(&self, level: usize) -> Option<Vec<f64>> {
+        match &self.stored {
+            Stored::Double(hierarchy) => hierarchy.level_inverse_diagonal(level),
+            Stored::SingleStorage(hierarchy) => hierarchy.level_inverse_diagonal(level),
+            Stored::Single(hierarchy) => hierarchy.level_inverse_diagonal(level),
+        }
+    }
+
+    /// Solves the coarsest level's system in place with its `f64` factorization, the cycle's own
+    /// coarse solve. On an error `values` is untouched and is not a correction:
+    /// [`MultigridError::CoarsestNotFactored`] when the coarsest level is above the factorization
+    /// size and is smoothed instead, which a host handles by running that level's smoother, and
+    /// [`MultigridError::CoarseLength`] when `values` is not that level's length.
+    pub fn solve_coarsest(&self, values: &mut [f64]) -> Result<(), MultigridError> {
+        match &self.stored {
+            Stored::Double(hierarchy) => hierarchy.solve_coarsest(values),
+            Stored::SingleStorage(hierarchy) => hierarchy.solve_coarsest(values),
+            Stored::Single(hierarchy) => hierarchy.solve_coarsest(values),
+        }
+    }
+}
+
+/// A block sparse matrix of the hierarchy as plain arrays: `starts` holds `rows + 1` block
+/// offsets, `columns` one block column per block (sorted within a row, below `block_columns`),
+/// `values` the row-major `row_block` by `col_block` blocks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LevelMatrix {
+    /// Block columns.
+    pub block_columns: usize,
+    /// Rows of one block.
+    pub row_block: usize,
+    /// Columns of one block.
+    pub col_block: usize,
+    /// Block offsets of each block row.
+    pub starts: Vec<usize>,
+    /// The block column of each block.
+    pub columns: Vec<u32>,
+    /// Row-major block values.
+    pub values: Vec<f64>,
 }
 
 impl Preconditioner for Multigrid {
