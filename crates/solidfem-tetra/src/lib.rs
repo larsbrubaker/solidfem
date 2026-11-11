@@ -26,6 +26,8 @@
 //! a wall face too wide for vertex rays is also filled with points through its middle
 //! (`wall_fill.rs`). `tests/refine/sweep.rs` measures the rule over shapes whose skins are known
 //! from how they were built, and pins how many runs still succeed with an edge across a wall.
+//! The same stage lists where a wall is far thinner than the size asked for there
+//! ([`Refiner::thin_walls`], [`ThinWallSpot`]), so a caller can warn about the spot.
 //!
 //! A refinement may be given a tetrahedron budget ([`RefineOptions::max_tets`]): the result has at
 //! most that many, or the run is refused by name with the count that broke it
@@ -48,12 +50,12 @@
 //!   a decision about the caller's surface, so a repeated point is
 //!   [`TetraError::DuplicatePoint`] rather than a silent merge.
 //!
-//! Layout: `refine.rs` is the refinement run, `refine_options.rs` its options and report, `refine_mesh.rs` reads a solid in and writes
+//! Layout: `refine.rs` is the refinement run and `refine/layer_stage.rs` its layer stage, `refine_options.rs` its options and report, `refine_mesh.rs` reads a solid in and writes
 //! the refined one out, `layers.rs` the through-wall points from
 //! surface vertices, `wall_fill.rs` those from the middle of large wall faces, `skins.rs`
 //! the opposite skins of a wall and the splitting of the edges joining them, `quad_chords.rs` the
 //! chords that run along the surface and are never called through, `interior.rs` the
-//! insertion, `quality.rs` the improvement, `quality_points.rs` the points for slivers no flip can remove, `surface.rs` is the surface-recovery interface and
+//! insertion, `quality.rs` the improvement, `quality_points.rs` the points for slivers no flip can remove, `thin_walls.rs` the walls too thin for their size, `surface.rs` is the surface-recovery interface and
 //! classifies the solid, `surface_report.rs` what a recovery run reports, `patches.rs`
 //! finds the flat regions, `recover.rs` orders the recovery of each constraint, `plane_delaunay.rs`
 //! chooses each flat region's triangulation, `flips.rs` holds the flips and the tetrahedron limit, `hull_fold.rs` the flips at a fold of the hull, `steiner.rs` adds points inside the solid, `triangulator.rs` the
@@ -83,6 +85,7 @@ mod steiner;
 mod surface;
 mod surface_check;
 mod surface_report;
+mod thin_walls;
 mod triangulator;
 mod wall_fill;
 
@@ -94,4 +97,5 @@ pub use refine::{
 pub use surface::{
     GaveUpCounts, RecoveryReport, SolidMesh, SurfaceMesher, SurfacePhase, SurfaceProgress,
 };
+pub use thin_walls::ThinWallSpot;
 pub use triangulator::{StepStatus, Tetrahedralization, Triangulator, HULL};

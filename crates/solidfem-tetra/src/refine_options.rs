@@ -1,6 +1,7 @@
 //! What a [`crate::Refiner`] is asked to do and what it says back: [`RefineOptions`], the
 //! [`RefinePhase`] a run is in, its [`RefineProgress`] and the [`RefineReport`] of what it did.
-//! `refine.rs` holds the run itself and its header the rules these values describe.
+//! `refine.rs` holds the run itself and its header the rules these values describe; the thin-wall
+//! spots a run lists are in `thin_walls.rs`, kept out of the report because they are a list.
 
 use crate::quality::DihedralHistogram;
 
@@ -9,7 +10,9 @@ use crate::quality::DihedralHistogram;
 pub struct RefineOptions {
     /// Elements requested through each thin wall; less than 2 adds no layers.
     pub layers_through_walls: u32,
-    /// A wall is thin when its thickness is at most this many local surface edge lengths.
+    /// A wall is thin when its thickness is at most this many local surface edge lengths. It is not
+    /// checked: zero, negative or NaN finds no thin wall (no layers, no wall fill), and so no
+    /// [`Self::thin_wall_warning_ratio`] spot from wall fill either; infinity calls every wall thin.
     pub thin_wall_ratio: f64,
     /// Full passes of the quality improvement. Zero runs none, but the last attempt still runs on
     /// a tetrahedron of four surface vertices that the 10-node upgrade would refuse, without which
@@ -25,6 +28,16 @@ pub struct RefineOptions {
     /// that would cross it ([`RefineReport::size_stopped_at_budget`]) and the quality pass makes
     /// no flip or point that would.
     pub max_tets: usize,
+    /// A wall thinner than the size asked for there divided by this is listed by
+    /// [`crate::Refiner::thin_walls`]; the mesh, and whether the run succeeds, are the same whatever
+    /// it is. 60 is where the worst elements left in thin walls were measured on a corpus of real
+    /// parts: walls under about a 60th of the size asked for, rare (none on most parts). The walls
+    /// too thin for rounding ([`RefineReport::walls_too_thin_for_rounding`]) are always listed. It
+    /// is not checked, like [`Self::thin_wall_ratio`]: `f64::INFINITY`, a negative value or NaN
+    /// lists only those; zero lists every wall the layer stage measured, at any thickness. The
+    /// layer stage does the measuring, so with [`Self::layers_through_walls`] below 2 nothing is
+    /// measured and the list is `None`, not empty.
+    pub thin_wall_warning_ratio: f64,
 }
 
 impl Default for RefineOptions {
@@ -35,6 +48,7 @@ impl Default for RefineOptions {
             quality_passes: 8,
             max_added_points: 50_000_000,
             max_tets: usize::MAX,
+            thin_wall_warning_ratio: 60.0,
         }
     }
 }
@@ -76,7 +90,10 @@ pub struct RefineReport {
     /// because the run then ends in [`crate::TetraError::ThroughEdgeNotSplit`]; read this from the
     /// report of the failed run.
     pub through_edges_refused: usize,
-    /// Surface vertices across a wall too thin to divide above rounding, so no points were added.
+    /// Surface vertices across a wall too thin to divide above rounding, so no points were added,
+    /// and wall-face columns (`wall_fill.rs`) likewise. Each such vertex and column is also in a
+    /// spot of [`crate::Refiner::thin_walls`], the extreme case of a wall too thin for its elements,
+    /// wherever the size function has a value in the wall there.
     pub walls_too_thin_for_rounding: usize,
     /// Points added by the size function.
     pub size_points: usize,

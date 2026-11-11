@@ -28,6 +28,8 @@ mod support;
 mod surface_chords;
 #[path = "refine/sweep.rs"]
 mod sweep;
+#[path = "refine/thin_walls.rs"]
+mod thin_walls;
 #[path = "refine/through.rs"]
 mod through;
 #[path = "refine/wall_skins.rs"]

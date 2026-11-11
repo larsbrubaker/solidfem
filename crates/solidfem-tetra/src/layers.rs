@@ -67,6 +67,8 @@ pub(crate) struct Hit {
     pub(crate) from_inside: bool,
     /// The triangle's unit normal, the through-wall direction a layer point stays in plane with.
     pub(crate) normal: [f64; 3],
+    /// The triangle's vertices, so a vertex can tell which vertices face it across the wall.
+    pub(crate) face: [u32; 3],
 }
 
 const LEAF: usize = 4;
@@ -140,7 +142,7 @@ impl SurfaceRays {
                 if skip(triangle) {
                     continue;
                 }
-                let Some(hit) = ray_triangle(triangle.corners, origin, direction) else {
+                let Some(hit) = ray_triangle(triangle, origin, direction) else {
                     continue;
                 };
                 if hit.distance > 0.0 && best.is_none_or(|b| hit.distance < b.distance) {
@@ -233,8 +235,8 @@ fn box_hit(
 
 /// Plain floating point ray against triangle, with a tiny allowance so a ray landing on the
 /// shared edge of two triangles is not missed by both.
-fn ray_triangle(corners: [[f64; 3]; 3], origin: [f64; 3], direction: [f64; 3]) -> Option<Hit> {
-    let [a, b, c] = corners;
+fn ray_triangle(triangle: &Triangle, origin: [f64; 3], direction: [f64; 3]) -> Option<Hit> {
+    let [a, b, c] = triangle.corners;
     let (e1, e2) = (subtract(b, a), subtract(c, a));
     let p = cross(direction, e2);
     let det = dot(e1, p);
@@ -264,6 +266,7 @@ fn ray_triangle(corners: [[f64; 3]; 3], origin: [f64; 3], direction: [f64; 3]) -
         distance,
         from_inside: dot(unit, direction) > 0.0,
         normal: unit,
+        face: triangle.vertices,
     })
 }
 

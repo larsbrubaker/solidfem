@@ -47,9 +47,10 @@ const MAX_GRID_STEPS: f64 = 16.0;
 /// A triangle proposes columns only when its longest edge is at least this many walls wide. At
 /// two-wall spacing that is four grid steps, the coarsest grid with columns apart from the one
 /// at the triangle's centre; a narrower triangle is left to the vertex rays and the edge splits.
-/// A judgement, not derived further. It only decides where points are added: the classification
-/// of opposite skins (`skins.rs`) does not use it.
-const WALL_WIDTH_RATIO: f64 = 8.0;
+/// A judgement, not derived further. It decides where points are added, and so how far apart two
+/// thin-wall measures may be and still be one wall (`thin_walls.rs`): the classification of
+/// opposite skins (`skins.rs`) does not use it.
+pub(crate) const WALL_WIDTH_RATIO: f64 = 8.0;
 
 /// One proposed column across a wall: where it starts, inward, the far side, and how far it
 /// keeps from its neighbours.
@@ -61,6 +62,8 @@ pub(crate) struct WallColumn {
     pub(crate) far_normal: [f64; 3],
     /// Half the column's lateral separation from its neighbours, which the separation rule applies.
     pub(crate) across: f64,
+    /// The surface triangle the column ends on, across the wall.
+    pub(crate) far: [u32; 3],
 }
 
 /// The columns a surface triangle proposes across the wall behind it, in a stable barycentric
@@ -141,6 +144,7 @@ pub(crate) fn wall_seeds(
                 distance: hit.distance,
                 far_normal: hit.normal,
                 across: 0.5 * spacing,
+                far: hit.face,
             });
         }
     }
