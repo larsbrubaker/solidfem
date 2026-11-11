@@ -34,7 +34,9 @@
 //! max_added_points`] bounds it regardless and ends in
 //! [`TetraError::RefinementBudgetExhausted`] (a point the quality pass would have added is an
 //! optional improvement, so at the limit the pass stops adding points and still returns `Ok`). An edge on the surface cannot be split in this
-//! stage, so it is not counted as too long.
+//! stage, so it is not counted as too long. A tetrahedron whose own point would put a poor
+//! tetrahedron, worse than it, on its surface face is left oversized in the same way and not tried
+//! again until an insertion replaces it (`interior.rs`).
 //!
 //! **The tetrahedron budget.** [`RefineOptions::max_tets`] is a promise: an `Ok` run has at most
 //! that many tetrahedra. The surface and the layers through its thin walls are what the caller
@@ -58,7 +60,9 @@ use crate::core::{Core, DEAD};
 use crate::error::TetraError;
 use crate::flips::{edge_key, face_key, FlipCounts, Flipper};
 use crate::layers::{layer_run, LayerRun};
-use crate::quality::{histogram, min_dihedral_degrees, subtract, DihedralHistogram};
+use crate::quality::{
+    histogram, min_dihedral_degrees, subtract, DihedralHistogram, QUALITY_POINT_TARGET_DEGREES,
+};
 use crate::quality_points::surface_rounding;
 use crate::refine_mesh::{boundary_faces, centroid_of, checked_size, circumcentre_of, extract};
 pub use crate::refine_options::{RefineOptions, RefinePhase, RefineProgress, RefineReport};
@@ -82,11 +86,6 @@ const MAX_SIZE_ROUNDS: usize = 256;
 /// The worst tetrahedra below this minimum dihedral angle are worked on by the quality pass.
 const QUALITY_TARGET_DEGREES: f64 = 30.0;
 
-/// Below this minimum dihedral angle, a tetrahedron that flips and smoothing cannot improve gets a
-/// new point (`quality_points.rs`). Points cost elements, so this is the band where a 10-node
-/// element loses most of its accuracy, well below the quality target.
-const QUALITY_POINT_TARGET_DEGREES: f64 = 5.0;
-
 /// How many second attempts a run makes. Each that changes the mesh is followed by the last quality
 /// passes, which can leave a refused tetrahedron behind; this ends what could otherwise repeat.
 const MAX_RESCUE_ROUNDS: usize = 4;
@@ -103,6 +102,15 @@ struct SizeRun {
     round_end: usize,
     round: usize,
     added_this_round: usize,
+    /// Tetrahedra, by sorted vertices, left oversized because their own point would have put a
+    /// worse poor tetrahedron on their surface face (`interior.rs`), as a surface edge is left
+    /// long. Vertices do not move in this stage, so a key names one shape, and a tetrahedron an
+    /// insertion replaces comes back under a new key. Only looked up, never iterated. It is not
+    /// purely a cache and can change the mesh slightly: a remembered tetrahedron gives up both its
+    /// candidates, so its circumcentre is not tried again even where that had failed for a reason
+    /// that depends on its neighbours, and when its circumcentre is the point the rule refuses,
+    /// its centroid is not tried at all.
+    left_oversized: HashSet<[u32; 4]>,
 }
 
 struct QualityRun {
@@ -218,6 +226,7 @@ impl Refiner {
                 round_end,
                 round: 0,
                 added_this_round: 0,
+                left_oversized: HashSet::new(),
             },
             quality: None,
             report: RefineReport::default(),
@@ -303,7 +312,9 @@ impl Refiner {
         let slot = run.cursor;
         run.cursor += 1;
         let tet = self.flipper.core.tets[slot];
-        if tet.iter().any(|&v| v >= DEAD) {
+        let mut key = tet;
+        key.sort_unstable();
+        if tet.iter().any(|&v| v >= DEAD) || run.left_oversized.contains(&key) {
             return Ok(());
         }
         let centroid = centroid_of(&self.flipper.core.points, &tet);
@@ -324,6 +335,13 @@ impl Refiner {
             let Some(seeds) = self.flipper.locate_interior(slot, candidate) else {
                 continue;
             };
+            // The point lies in the tetrahedron that asked for it: one that would put a worse poor
+            // tetrahedron on that tetrahedron's surface face leaves it oversized (`interior.rs`).
+            if seeds.contains(&slot) && self.flipper.worsens_surface_face(slot, candidate) {
+                self.report.size_points_left_oversized += 1;
+                self.size_run.left_oversized.insert(key);
+                return Ok(());
+            }
             let local = checked_size(&self.size, candidate)?;
             if self
                 .flipper

@@ -318,6 +318,6 @@ pub static EXAMPLES: [ExamplePart; 11] = [
         loaded: "A 1000 N sideways push on the tip of the tooth.",
         load: "1000 N",
         verdict: Verdict::Limited,
-        status: "This page's coarser mesh reads 5.5% below the 93.0 MPa converged reference for the stress at the tooth root. It is a coarse mesh and not the benchmark's result.",
+        status: "This page's coarser mesh reads 5.8% below the 93.0 MPa converged reference for the stress at the tooth root. It is a coarse mesh and not the benchmark's result.",
     },
 ];

@@ -100,6 +100,10 @@ pub struct RefineReport {
     /// Size candidates that were refused: too close to a neighbour, with no legal cavity, or
     /// over the tetrahedron budget.
     pub size_points_refused: usize,
+    /// Tetrahedra on the surface left larger than the size asks because their own point would
+    /// have put a worse poor element on their surface face, each counted once: such a tetrahedron
+    /// is not tried again until an insertion replaces it.
+    pub size_points_left_oversized: usize,
     /// The size stage ended because its next point would have crossed
     /// [`RefineOptions::max_tets`], so the interior may be coarser than the size function asks.
     pub size_stopped_at_budget: bool,

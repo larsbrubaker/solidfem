@@ -29,6 +29,13 @@ use crate::error::TetraError;
 use crate::flips::{edge_key, Flipper};
 use crate::skins::OppositeSkins;
 
+/// Below this minimum dihedral angle, a tetrahedron that flips and smoothing cannot improve gets a
+/// new point (`quality_points.rs`). Points cost elements, so this is the band where a 10-node
+/// element loses most of its accuracy, well below the quality target. A judgement, not a
+/// derivation, and the one definition of a poor element: a size point may not put a tetrahedron
+/// this poor and worse than the one it replaces on a surface face (`interior.rs`).
+pub(crate) const QUALITY_POINT_TARGET_DEGREES: f64 = 5.0;
+
 /// Rings larger than this are skipped: the search is cubic and big rings give poor elements.
 const MAX_QUALITY_RING: usize = 7;
 

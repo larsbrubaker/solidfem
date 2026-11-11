@@ -16,11 +16,32 @@
 //! joined to the seeds is kept, and that is repeated. Only a seed needing removal refuses the
 //! point. Every remaining outer face is strictly visible, so each new tetrahedron is exactly
 //! positive, and surface faces cannot be removed because the flood never crosses a ghost.
+//!
+//! **A size point keeps clear of its own tetrahedron's surface face.** A tetrahedron on a surface
+//! triangle whose edges are longer than the size asks stays too big for ever, as a surface edge
+//! cannot be split, and on a needle triangle in a thin solid its circumcentre is outside the
+//! solid, so the size stage offers its centroid, a quarter of its height over the triangle. The
+//! gap to the cavity's vertices does not stop that, as a needle's vertices are far apart, and
+//! each such point would put a tetrahedron a quarter as high on the same triangle. So a size
+//! point inside the tetrahedron that asked for it is refused when the new tetrahedron on that
+//! tetrahedron's surface face would be poor (under [`QUALITY_POINT_TARGET_DEGREES`]) and worse
+//! than it ([`Flipper::worsens_surface_face`]); `refine.rs` then leaves it oversized. Every cavity
+//! stays the whole visibility cavity, so where the rule does not fire nothing changes.
+//!
+//! **What it does not cover.** A point whose cavity floods into some other tetrahedron on the
+//! surface is not checked. Keeping such a tetrahedron out of the cavity would insert the point into
+//! a cavity with tetrahedra cut out of it, and the non-Delaunay pockets that leaves become interior
+//! slivers, as measured on a coarse thin box. So a neighbour's point can still lower a needle's
+//! tetrahedron: on a 20 x 4 x 0.4 slab with a needle 0.04 wide, at size 0.5, the needle's
+//! tetrahedron ends at 0.0136 degrees, its apex a size point asked for by a tetrahedron off the
+//! needle, where without the rule the size stage flattened it to 8.5e-7 degrees and the quality
+//! pass's flips then replaced it by one of 0.724.
 
 use crate::core::{FACE, GHOST};
 use crate::error::TetraError;
 use crate::flips::Flipper;
 use crate::predicates::{in_sphere, orient};
+use crate::quality::{min_dihedral_degrees, QUALITY_POINT_TARGET_DEGREES};
 
 /// A cavity larger than this is left uncarved past it; real cavities are a few dozen tetrahedra.
 pub(crate) const MAX_CAVITY: usize = 512;
@@ -152,6 +173,29 @@ impl Flipper {
         }
         self.add_steiner(&cavity, point)?;
         Ok(true)
+    }
+
+    /// Whether a point at `point` would make, on a surface face of tetrahedron `t`, a tetrahedron
+    /// under [`QUALITY_POINT_TARGET_DEGREES`] and worse than `t` (the file header).
+    pub(crate) fn worsens_surface_face(&mut self, t: u32, point: [f64; 3]) -> bool {
+        let tet = self.core.tets[t as usize];
+        // The point is kept in the list only for the measure. The count stays below `u32::MAX`,
+        // as the input is capped far below it.
+        let index = self.core.points.len() as u32;
+        self.core.points.push(point);
+        let mut replaced = None;
+        let worse = FACE.iter().enumerate().any(|(i, positions)| {
+            if !self.is_ghost(self.core.neighbors[t as usize][i]) {
+                return false;
+            }
+            let [a, b, c] = positions.map(|p| tet[p]);
+            let new = min_dihedral_degrees(&self.core.points, &[a, b, c, index]);
+            let old =
+                *replaced.get_or_insert_with(|| min_dihedral_degrees(&self.core.points, &tet));
+            new < QUALITY_POINT_TARGET_DEGREES.min(old)
+        });
+        self.core.points.pop();
+        worse
     }
 
     /// The conflict region of `point` around `seeds`, cut down until `point` sees every outer
