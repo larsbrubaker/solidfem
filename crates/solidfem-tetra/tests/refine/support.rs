@@ -1,6 +1,6 @@
 // Reading refinement output from the outside: boundary faces, a walk along a straight line through
-// the output tetrahedra using their neighbour links, and a minimum dihedral angle computed here,
-// separately from the library's.
+// the output tetrahedra using their neighbour links, a minimum dihedral angle computed here,
+// separately from the library's, and a fingerprint of a mesh's exact bits.
 
 use std::collections::BTreeSet;
 
@@ -181,4 +181,26 @@ fn unit(a: [f64; 3]) -> [f64; 3] {
 pub fn edge_length(mesh: &SolidMesh, a: u32, b: u32) -> f64 {
     let d = sub(mesh.points[a as usize], mesh.points[b as usize]);
     dot(d, d).sqrt()
+}
+
+/// A 64-bit FNV-1a hash over the bit pattern of every point coordinate, then every tetrahedron's
+/// four indices, in the mesh's own order: equal for two meshes only when they are, to the last
+/// bit, the same points in the same tetrahedra (up to a hash collision).
+pub fn fingerprint(mesh: &SolidMesh) -> u64 {
+    const OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
+    const PRIME: u64 = 0x0000_0100_0000_01b3;
+    let mut hash = OFFSET;
+    let mut eat = |bytes: &[u8]| {
+        for &byte in bytes {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(PRIME);
+        }
+    };
+    for coordinate in mesh.points.iter().flatten() {
+        eat(&coordinate.to_bits().to_le_bytes());
+    }
+    for index in mesh.tets.iter().flatten() {
+        eat(&index.to_le_bytes());
+    }
+    hash
 }

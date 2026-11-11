@@ -1,5 +1,6 @@
-// The repository walk the file gates share: `file_compliance.rs` and `markdown_placement.rs` both
-// pull this file in with `#[path]`, so the two can never disagree about what the repository is.
+// The repository walk the file gates share: `file_compliance.rs`, `markdown_placement.rs` and
+// `portable_math.rs` pull this file in with `#[path]`, so they can never disagree about what the
+// repository is.
 //
 // The walk starts at the workspace root and reads the file system, not git's index, so a file an
 // agent has just written counts before it is committed. Skipped trees are build output and VCS

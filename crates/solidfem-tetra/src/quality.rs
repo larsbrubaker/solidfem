@@ -6,7 +6,8 @@
 //! **The measure.** Minimum dihedral angle in degrees: a sliver has angles near zero and near 180
 //! degrees and no good 10-node element has either. The scaled Jacobian (the volume over the three
 //! edge lengths at a corner) is the second measure, reported with it. Floating-point values are
-//! used only to choose among moves; legality is always the exact orientation test.
+//! used only to choose among moves; legality is always the exact orientation test. The angle is
+//! `libm::acos`, not the platform's, so the same moves are chosen on every system.
 //!
 //! **Why edge removal chooses by dynamic programming.** The ring around an edge has many
 //! triangulations, and one poor tetrahedron in the choice is the bad outcome. The interval search
@@ -135,7 +136,7 @@ pub(crate) fn min_dihedral_degrees(points: &[[f64; 3]], tet: &[u32; 4]) -> f64 {
         for j in i + 1..4 {
             let cosine = dot(normals[i], normals[j]).clamp(-1.0, 1.0);
             // Outward normals: the interior angle is the supplement of the angle between them.
-            let dihedral = 180.0 - cosine.acos().to_degrees();
+            let dihedral = 180.0 - libm::acos(cosine).to_degrees();
             smallest = smallest.min(dihedral);
         }
     }

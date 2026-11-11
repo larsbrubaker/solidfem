@@ -1,5 +1,6 @@
 # solidfem-tetra: the resumable exact Delaunay triangulator tetrahedralizing a point set, the
-# core of the tetrahedral mesher. Its one dependency, `robust`, provides the exact predicates.
+# core of the tetrahedral mesher. `robust` provides the exact predicates and `libm` the arc cosine,
+# the same pure-Rust code on every target, so a mesh is the same bits on every system.
 [package]
 name = "solidfem-tetra"
 description = "Exact incremental Delaunay tetrahedralization of point sets, resumable for hosts without threads"
@@ -12,6 +13,7 @@ homepage.workspace = true
 readme.workspace = true
 
 [dependencies]
+libm = "0.2.16"
 robust = "1.2"
 
 [lints]

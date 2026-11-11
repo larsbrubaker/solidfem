@@ -5,10 +5,12 @@
 //!
 //! **Finding the wall.** From a surface vertex, along the inward angle-weighted normal of its
 //! triangles, the nearest surface triangle not touching the vertex is the far side of the wall,
-//! and the distance to it is the local thickness. Ray tests are plain floating point: a position
-//! is only proposed here. Whether it can be a mesh vertex is decided exactly by `interior.rs`.
-//! A hit from outside the solid (the ray left through a nearby reflex corner) means the
-//! vertex is not facing a wall, and it proposes nothing.
+//! and the distance to it is the local thickness. The normal weights each triangle by its angle at
+//! the vertex, taken with `libm::acos` so the ray, and every point along it, is the same bits on
+//! every system. Ray tests are plain floating point: a position is only proposed here. Whether it
+//! can be a mesh vertex is decided exactly by `interior.rs`. A hit from outside the solid (the
+//! ray left through a nearby reflex corner) means the vertex is not facing a wall, and it proposes
+//! nothing.
 //!
 //! **When it counts as a wall.** The ray decides only where the thickness is at most the
 //! requested ratio of the local surface edge length, a wall that isotropic elements of the
@@ -393,7 +395,7 @@ pub(crate) fn layer_run(points: &[[f64; 3]], boundary: &[[u32; 3]], fixed: &[boo
         for k in 0..3 {
             let (v, from, to) = (face[k], p[(k + 1) % 3], p[(k + 2) % 3]);
             let (e1, e2) = (subtract(from, p[k]), subtract(to, p[k]));
-            let angle = dot(normalized(e1), normalized(e2)).clamp(-1.0, 1.0).acos();
+            let angle = libm::acos(dot(normalized(e1), normalized(e2)).clamp(-1.0, 1.0));
             let n = &mut normals[v as usize];
             n[0] += normal[0] * angle;
             n[1] += normal[1] * angle;

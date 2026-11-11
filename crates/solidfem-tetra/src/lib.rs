@@ -40,6 +40,10 @@
 //!   their indices, never on the insertion order or on how a run was sliced.
 //! - **No bounding box.** A vertex at infinity (`core.rs`) closes the triangulation, so hull
 //!   tetrahedra are exact and nothing artificial has to be removed.
+//! - **The same bits on every system.** Floating-point estimates use `+ - * /`, `sqrt` and the
+//!   `libm` crate's functions, never the platform's `acos`, `sin` or `exp`, whose last bit differs
+//!   between systems' math libraries and would change which points and moves are chosen. The
+//!   workspace-gates test `portable_math` refuses a platform call here.
 //! - **Duplicates are refused.** Tetrahedra index the caller's points one for one, and welding is
 //!   a decision about the caller's surface, so a repeated point is
 //!   [`TetraError::DuplicatePoint`] rather than a silent merge.

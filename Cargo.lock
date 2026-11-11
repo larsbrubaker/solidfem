@@ -831,6 +831,7 @@ dependencies = [
 name = "solidfem-tetra"
 version = "0.1.0"
 dependencies = [
+ "libm",
  "robust",
 ]
 

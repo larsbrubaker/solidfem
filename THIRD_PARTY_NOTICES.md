@@ -26,8 +26,9 @@ No third-party code.
 # solidfem-tetra (`crates/solidfem-tetra`)
 
 No third-party code is copied into this crate. It depends on the `robust` crate (MIT OR Apache-2.0,
-https://github.com/georust/robust) for exact orientation and in-sphere predicates, and takes it
-from crates.io as an ordinary dependency.
+https://github.com/georust/robust) for exact orientation and in-sphere predicates, and on the
+`libm` crate (MIT, https://github.com/rust-lang/compiler-builtins) for the arc cosine, the same on
+every system, and takes both from crates.io as ordinary dependencies.
 
 # Demo page (`demo/`)
 

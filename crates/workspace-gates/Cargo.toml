@@ -1,7 +1,8 @@
 # workspace-gates: repo-wide gates that are tests only (file_compliance, markdown_placement,
-# workspace_members, dependencies, notices). The library is empty; the gates live in tests/ and
-# read the whole workspace from its root, so a crate that joins the workspace is covered without
-# naming it here. serde_json reads `cargo metadata` for the dependencies and workspace_members
+# portable_math, workspace_members, dependencies, notices). The library is empty; the gates live
+# in tests/ and read the whole workspace from its root, so a crate that joins the workspace is
+# covered without naming it here (portable_math names the crates it holds to the same bits on
+# every system). serde_json reads `cargo metadata` for the dependencies and workspace_members
 # gates. Never published.
 [package]
 name = "workspace-gates"

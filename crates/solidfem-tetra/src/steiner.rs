@@ -283,8 +283,13 @@ impl Flipper {
             return Ok(Placed::NotPlaced { no_room: false });
         }
         for direction in directions {
-            for halvings in 0..OFFSET_HALVINGS {
-                let offset = scale * 2.0_f64.powi(-halvings);
+            // `factor` is 2^-halvings: halving a power of two is exact down to 2^-1022, far below
+            // the 2^-15 reached here, so `scale * factor` is the same bits on every system, which
+            // `powi`, whose precision the platform decides, does not promise.
+            let mut factor = 1.0_f64;
+            for _ in 0..OFFSET_HALVINGS {
+                let offset = scale * factor;
+                factor *= 0.5;
                 let candidate = [
                     base[0] + direction[0] * offset,
                     base[1] + direction[1] * offset,

@@ -7,7 +7,9 @@
 use std::f64::consts::{PI, TAU};
 
 use crate::shapes::{sin_cos, Surface};
-use crate::support::{assert_contracts, constant_size, options_with_layers, recovered, run_refine};
+use crate::support::{
+    assert_contracts, constant_size, fingerprint, options_with_layers, recovered, run_refine,
+};
 use crate::wall_skins::{grid, samples_in_tets_joining_skins};
 
 /// A long prism whose cross-section is an isosceles triangle with angle `apex` at the edge along
@@ -265,4 +267,44 @@ fn a_tube_with_out_of_step_facets_keeps_its_wall_fill() {
         }
     }
     assert!(problems.is_empty(), "{problems:#?}");
+}
+
+#[test]
+fn the_out_of_step_tubes_mesh_to_the_same_bits_on_every_system() {
+    // The tubes' input is `sin_cos` and plain arithmetic, the same bits everywhere, and the
+    // mesher uses only exact predicates, `+ - * /`, `sqrt` and `libm`. So each value is the same
+    // on every system, or the mesher depends on the platform: a math-library call whose last bit
+    // differs moved a layer point or changed a choice. These are the tubes the wall-fill test
+    // above measures; a one-ulp change in the layer normals' angle moves the 200-long one, and in
+    // the quality pass's angle the 100-long one, so both measures are covered. The constants were
+    // recorded once; a change to the mesher that changes these meshes on purpose records them
+    // again and says why.
+    const RECORDED: [(usize, f64, u64); 3] = [
+        (16, 100.0, 0x7039_754e_d0cc_9f89),
+        (16, 200.0, 0x4884_f5ee_80d6_7a9d),
+        (24, 200.0, 0xbe0d_4859_4fc5_4fd0),
+    ];
+    let mut problems = Vec::new();
+    for (segments, length, recorded) in RECORDED {
+        let surface = out_of_step_tube(segments, 9.0, 10.0, length);
+        let (refined, _) = run_refine(
+            recovered(&surface),
+            constant_size(200.0),
+            options_with_layers(2),
+        )
+        .expect("refines");
+        let found = fingerprint(&refined);
+        if found != recorded {
+            problems.push(format!(
+                "{segments} segments, {length} long: {} points, {} tetrahedra, fingerprint \
+                 {found:#018x}, recorded {recorded:#018x}",
+                refined.points.len(),
+                refined.tets.len()
+            ));
+        }
+    }
+    assert!(
+        problems.is_empty(),
+        "a refined tube is not the recorded mesh: {problems:#?}"
+    );
 }
