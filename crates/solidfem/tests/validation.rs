@@ -6,6 +6,8 @@ mod support;
 
 #[path = "validation/cantilever.rs"]
 mod cantilever;
+#[path = "validation/comparison.rs"]
+mod comparison;
 #[path = "validation/determinism.rs"]
 mod determinism;
 #[path = "validation/multigrid.rs"]

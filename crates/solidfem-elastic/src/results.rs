@@ -27,7 +27,8 @@
 //! the corner and one linear tensor is fitted to both legs, so the fit reads far below the stress
 //! the elements there computed: on a refined L angle by up to a third.
 //!
-//! **The peak.** [`peak_von_mises`] is the one peak a caller may report: over a region, the
+//! **The peak.** [`peak_von_mises`] (and [`peak_stress`], the same peak with its position) is the
+//! one peak a caller may report: over a region, the
 //! larger of the recovered node values and the integration point values, each classified by its
 //! own physical position. A reported peak can therefore never read below a stress the solver
 //! computed in that region. The floor is applied to the peak and not to the field: a node floored
@@ -136,32 +137,88 @@ pub struct RecoveredField {
     pub nodal_von_mises: Vec<f64>,
 }
 
+/// A peak von Mises stress and where it is.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PeakStress {
+    /// The von Mises stress at the peak.
+    pub von_mises: f64,
+    /// Physical position of the node or integration point that holds it.
+    pub position: [f64; 3],
+}
+
 /// The peak von Mises stress over the points `inside` accepts: the larger of the recovered value
 /// at the mesh nodes and the value at the integration points, each classified by its physical
 /// position. `None` when neither a node nor a point is inside. A non-finite value is kept, never
 /// dropped, so it cannot hide a broken result behind a finite peak. Read from any recovered
-/// field; [`Solution::peak_von_mises`] and [`RecoveredField::peak_von_mises`] call this.
+/// field; [`Solution::peak_von_mises`] and [`RecoveredField::peak_von_mises`] call this, and it
+/// is [`peak_stress`]'s value, so the two never disagree.
 pub fn peak_von_mises(
     mesh: &QuadraticTetMesh,
     nodal_von_mises: &[f64],
     point_stresses: &[PointStress],
     inside: impl Fn([f64; 3]) -> bool,
 ) -> Option<f64> {
+    peak_stress(mesh, nodal_von_mises, point_stresses, inside).map(|peak| peak.von_mises)
+}
+
+/// [`peak_von_mises`] with the position that holds it. Candidates are taken in node order, then
+/// in integration point order; a later candidate replaces the peak only when it is strictly
+/// larger, so of equal values the first is reported. The first NaN met becomes the peak and stays
+/// it, with its own position, so a broken value cannot be hidden behind a finite one.
+pub fn peak_stress(
+    mesh: &QuadraticTetMesh,
+    nodal_von_mises: &[f64],
+    point_stresses: &[PointStress],
+    inside: impl Fn([f64; 3]) -> bool,
+) -> Option<PeakStress> {
+    peak_with_holder(mesh, nodal_von_mises, point_stresses, inside).map(|(peak, _)| peak)
+}
+
+/// What holds a peak: a mesh node or an integration point, by its index in its array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PeakHolder {
+    Node(usize),
+    Point(usize),
+}
+
+/// [`peak_stress`] with what holds the peak, for a caller that needs the elements around it.
+pub(crate) fn peak_with_holder(
+    mesh: &QuadraticTetMesh,
+    nodal_von_mises: &[f64],
+    point_stresses: &[PointStress],
+    inside: impl Fn([f64; 3]) -> bool,
+) -> Option<(PeakStress, PeakHolder)> {
     let nodes = mesh
         .nodes()
         .iter()
         .zip(nodal_von_mises)
-        .filter(|(position, _)| inside(**position))
-        .map(|(_, value)| *value);
+        .enumerate()
+        .filter(|(_, (position, _))| inside(**position))
+        .map(|(node, (position, value))| {
+            let peak = PeakStress {
+                von_mises: *value,
+                position: *position,
+            };
+            (peak, PeakHolder::Node(node))
+        });
     let points = point_stresses
         .iter()
-        .filter(|point| inside(point.position))
-        .map(|point| point.von_mises);
-    nodes.chain(points).reduce(|peak, value| {
-        if peak.is_nan() || value.is_nan() {
-            f64::NAN
+        .enumerate()
+        .filter(|(_, point)| inside(point.position))
+        .map(|(index, point)| {
+            let peak = PeakStress {
+                von_mises: point.von_mises,
+                position: point.position,
+            };
+            (peak, PeakHolder::Point(index))
+        });
+    nodes.chain(points).reduce(|peak, candidate| {
+        if peak.0.von_mises.is_nan() {
+            peak
+        } else if candidate.0.von_mises.is_nan() || candidate.0.von_mises > peak.0.von_mises {
+            candidate
         } else {
-            peak.max(value)
+            peak
         }
     })
 }
@@ -174,6 +231,16 @@ impl Solution {
         inside: impl Fn([f64; 3]) -> bool,
     ) -> Option<f64> {
         peak_von_mises(mesh, &self.nodal_von_mises, &self.point_stresses, inside)
+    }
+
+    /// The peak von Mises stress over the points `inside` accepts, with its position; see
+    /// [`peak_stress`].
+    pub fn peak_stress(
+        &self,
+        mesh: &QuadraticTetMesh,
+        inside: impl Fn([f64; 3]) -> bool,
+    ) -> Option<PeakStress> {
+        peak_stress(mesh, &self.nodal_von_mises, &self.point_stresses, inside)
     }
 }
 

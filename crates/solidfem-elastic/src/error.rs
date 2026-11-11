@@ -1,5 +1,6 @@
 //! The errors a study can return. Each names what is wrong in terms a caller can act on, and every
-//! refusal happens before a result exists, so a model that cannot be solved never yields numbers.
+//! refusal happens before a result exists, so a model that cannot be solved never yields numbers,
+//! and a mesh comparison or safety factor that would mean nothing is refused rather than computed.
 
 use std::fmt;
 
@@ -91,6 +92,48 @@ pub enum ModelError {
     /// An error estimate was given a recovery begun for a mesh with other node, vertex or element
     /// counts than the study's.
     RecoveryMeshMismatch,
+    /// A mesh comparison was given a "fine" mesh with no more elements in the region read than
+    /// the coarse one, so the comparison would say nothing about refinement there.
+    FineMeshNotFiner {
+        /// Elements of the coarse mesh with an integration point inside the region.
+        coarse_elements: usize,
+        /// Elements of the fine mesh with an integration point inside the region.
+        fine_elements: usize,
+    },
+    /// A mesh comparison found no integration point inside the region on one mesh: nothing of
+    /// its elements' volume is there to read.
+    NothingInsideRegion { mesh: ComparedMesh },
+    /// A mesh comparison found a peak stress that is NaN or infinite on one mesh: that solution
+    /// is broken, not a result.
+    NonFinitePeak { mesh: ComparedMesh, von_mises: f64 },
+    /// A mesh comparison found exactly zero stress everywhere in the region on one mesh, which
+    /// has no safety factor. A region at rounding-level stress is not caught here: it passes and
+    /// reads a huge safety factor.
+    ZeroPeak { mesh: ComparedMesh },
+    /// A mesh comparison was given a solution whose arrays do not have one entry per node of its
+    /// mesh, or whose integration points do not cover its elements.
+    SolutionMeshMismatch { mesh: ComparedMesh },
+    /// A safety factor was asked for with a yield strength that is not a finite stress above
+    /// zero.
+    InvalidYieldStrength { yield_strength: f64 },
+}
+
+/// Which of a mesh comparison's two solves an error is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComparedMesh {
+    /// The solve passed as coarse.
+    Coarse,
+    /// The solve passed as fine.
+    Fine,
+}
+
+impl fmt::Display for ComparedMesh {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ComparedMesh::Coarse => write!(f, "coarse"),
+            ComparedMesh::Fine => write!(f, "fine"),
+        }
+    }
 }
 
 impl fmt::Display for ModelError {
@@ -173,6 +216,42 @@ impl fmt::Display for ModelError {
                 f,
                 "the solution stores no strain energy, so its relative error has no scale: check \
                  that the loads or prescribed displacements deform the part"
+            ),
+            ModelError::FineMeshNotFiner {
+                coarse_elements,
+                fine_elements,
+            } => write!(
+                f,
+                "the meshes cannot be compared: in the region read the fine mesh has \
+                 {fine_elements} elements and the coarse one {coarse_elements}; mesh the fine \
+                 solve with smaller elements there"
+            ),
+            ModelError::NothingInsideRegion { mesh } => write!(
+                f,
+                "the meshes cannot be compared: no element of the {mesh} mesh reaches inside the \
+                 region read, and a face or line alone cannot be read however fine the mesh; \
+                 widen the region so it holds part of the solid"
+            ),
+            ModelError::NonFinitePeak { mesh, von_mises } => write!(
+                f,
+                "the meshes cannot be compared: the {mesh} solution's peak stress is {von_mises}, \
+                 so that solution is broken; solve the part on that mesh again and check its \
+                 loads and material"
+            ),
+            ModelError::ZeroPeak { mesh } => write!(
+                f,
+                "the meshes cannot be compared: the {mesh} solution has no stress in the region \
+                 read, which has no safety factor; check that the loads stress this region"
+            ),
+            ModelError::SolutionMeshMismatch { mesh } => write!(
+                f,
+                "the meshes cannot be compared: the {mesh} solution was not solved on the {mesh} \
+                 mesh; pass each solution with the mesh its study ran on"
+            ),
+            ModelError::InvalidYieldStrength { yield_strength } => write!(
+                f,
+                "a safety factor needs a finite yield strength above zero, not \
+                 {yield_strength}; give the material's yield strength"
             ),
         }
     }

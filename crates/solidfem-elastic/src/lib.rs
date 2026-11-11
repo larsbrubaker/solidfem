@@ -15,6 +15,9 @@
 //! [`StaticStudy::begin_error_estimate`]) also says how converged the result is: an
 //! [`ErrorEstimate`] holds each element's energy-norm error indicator and the model's estimated
 //! relative error, from the difference between the recovered and the element stress.
+//! [`MeshComparison::between`] reads two solves of one part and load on a coarser and a finer
+//! mesh and says how much the peak stress ([`peak_stress`]) and the safety factor moved between
+//! them: whether the number is still moving with refinement, not a bound on its error.
 //! [`StudyOptions::preconditioner`] picks Jacobi (the default) or multigrid, whose rigid-body
 //! near-null space [`rigid_body_modes`] builds from the node coordinates.
 //!
@@ -24,6 +27,7 @@
 //! clock, because `std::time::Instant` panics on `wasm32-unknown-unknown`.
 
 mod assembly;
+mod comparison;
 mod constraints;
 mod element;
 mod error;
@@ -38,16 +42,18 @@ mod shape;
 mod study;
 
 pub use assembly::assemble_stiffness;
+pub use comparison::{ComparedPeak, MeshComparison, Verdict, MIN_ELEMENT_RATIO};
 pub use constraints::Freedom;
 pub use element::{
     element_stiffness, point_geometry, strain_at, stress_at, von_mises, PointGeometry,
 };
-pub use error::{ElementFault, ModelError};
+pub use error::{ComparedMesh, ElementFault, ModelError};
 pub use error_estimate::{ErrorEstimate, ErrorEstimation};
 pub use material::{Material, MaterialField};
 pub use quadrature::{Quadrature, QuadraturePoint, TRIANGLE_POINTS};
 pub use results::{
-    nodal_rotations, peak_von_mises, PointStress, RecoveredField, Recovery, Solution,
+    nodal_rotations, peak_stress, peak_von_mises, PeakStress, PointStress, RecoveredField,
+    Recovery, Solution,
 };
 pub use rigid_modes::rigid_body_modes;
 pub use shape::{shape_derivatives, shape_values, NODE_COUNT, NODE_NATURAL};

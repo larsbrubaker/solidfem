@@ -42,6 +42,16 @@ it stands.
   in the clamp's elements. It falls as the mesh refines, except under a point load, whose exact
   energy is infinite. Nothing drives refinement from it yet, and a part of more than one material
   is refused.
+- Comparing two solves of one part on a coarser and a finer mesh: how much the peak stress, its
+  position and the safety factor moved between them, and whether the peak has settled at the
+  host's tolerance, is still moving, or was read on meshes too alike (elements under 4 times
+  smaller where the peak is) to tell. It shows whether the number is still moving, not how far it
+  is from the true stress. At a clamp's edge or a sharp inside corner the model's stress is
+  unbounded and the peak keeps rising with refinement (on a test cantilever by a measured 9.6% to
+  19.7% per halving of the element size). Leaving such a spot out of the region read lets the rest
+  settle, but its stress then goes unassessed, and at a sharp inside corner of a real part that
+  stress is real: the model needs the fillet. Meshing twice and applying the supports and loads to
+  each mesh is the host's work.
 - Solid bars and thick-walled tubes, as the demo offers them, compared with the textbook on the
   page, and the real-part benchmark shapes offered as example parts, each with the benchmark's
   verdict shown on the page.
